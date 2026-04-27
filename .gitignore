@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build
+dist/
+dist-ssr/
+*.local
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Data & logs
+server/data/config.json
+server/data/*.db
+server/data/logs/
+data/
+*.log
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
