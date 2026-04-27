@@ -97,12 +97,40 @@ npm run build
 cd server && npm start
 ```
 
-### Docker 部署（待实现）
+### Docker 部署（一键启动）
 
 ```bash
-docker build -t teable-sync .
-docker run -p 3100:3100 -p 5173:5173 teable-sync
+# 克隆项目
+git clone https://github.com/jclee8810-max/teable-sync.git
+cd teable-sync
+
+# 启动全部服务（TeableSync + SQL Server）
+docker-compose up -d
+
+# 打开浏览器
+open http://localhost:5173
 ```
+
+> 提示：docker-compose.yml 默认包含 TeableSync + SQL Server（测试用）。如需 Teable 自部署版，取消注释文件底部的 Teable + PostgreSQL 部分。
+
+### 生产环境镜像构建
+
+```bash
+# 构建镜像
+npm run docker:build
+
+# 运行
+docker run -d -p 3100:3100 -p 5173:5173 --name teable-sync teable-sync
+```
+
+### Docker Compose 各服务说明
+
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| teable-sync | 3100 / 5173 | 主服务 |
+| sqlserver | 1433 | SQL Server（可选，测试用）|
+
+如外部已有 SQL Server 或 Teable，修改 `docker-compose.yml` 中对应地址后重启即可。
 
 ## 字段类型映射
 

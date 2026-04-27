@@ -1,0 +1,58 @@
+# TeableSync Docker 部署
+# 包含：TeableSync + SQL Server（测试用）+ Teable 自部署
+
+services:
+  # TeableSync 主服务
+  teable-sync:
+    build: .
+    ports:
+      - "3100:3100"   # 后端 API
+      - "5173:5173"   # 前端 UI
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - teable-sync-data:/app/server/data
+    depends_on:
+      - sqlserver
+    restart: unless-stopped
+
+  # SQL Server（测试用，可选）
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=QClaw2026!Strong
+      - TZ=Asia/Shanghai
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    restart: unless-stopped
+
+  # Teable 自部署版（可选，需要 PostgreSQL）
+  # teable:
+  #   image: registry.cn-shenzhen.aliyuncs.com/teable/teable:release.2026-04-24T10-11-41Z.1555
+  #   environment:
+  #     - DB_HOST=postgres
+  #     - DB_PORT=5432
+  #     - DB_NAME=teable
+  #     - DB_USER=postgres
+  #     - DB_PASSWORD=QClaw2026!Strong
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - postgres
+  #   restart: unless-stopped
+  #
+  # postgres:
+  #   image: postgres:15
+  #   environment:
+  #     - POSTGRES_PASSWORD=QClaw2026!Strong
+  #     - POSTGRES_DB=teable
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+volumes:
+  teable-sync-data:
+  sqlserver-data:
