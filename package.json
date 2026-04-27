@@ -1,7 +1,7 @@
 {
   "name": "teable-sync",
   "version": "1.0.0",
-  "description": "SQL → Teable 数据同步工具",
+  "description": "SQL → Teable 数据同步工具 | v1.0.0 (2026-04-27 Docker部署支持)",
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",

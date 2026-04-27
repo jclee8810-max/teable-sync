@@ -1,6 +1,7 @@
 {
   "name": "teable-sync-server",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "TeableSync Server - SQL → Teable 数据同步后端",
   "private": true,
   "type": "module",
   "scripts": {
