@@ -70,6 +70,7 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   // Build redirect URI — points back to our callback
   // The server runs on PORT (default 3100)
   const serverPort = process.env.PORT || 3100;
+  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
   const redirectUri = `http://localhost:${serverPort}/api/oauth/teable/callback`;
 
   // Generate state with nonce + connectionId
@@ -104,13 +105,14 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
 // Called by browser after user authorizes in Teable
 // Teable redirects here with ?code=xxx&state=yyy
 router.get('/teable/callback', async (req, res) => {
+  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
   const { code, state, error, error_description } = req.query;
 
   // Handle error from Teable (user denied, etc.)
   if (error) {
     console.error(`[OAuth] Teable returned error: ${error} - ${error_description}`);
     // Redirect back to frontend with error
-    return res.redirect(`http://localhost:5174/?oauth_error=${encodeURIComponent(error_description || error)}`);
+    return res.redirect(`${frontendBase}/?oauth_error=${encodeURIComponent(error_description || error)}`);
   }
 
   if (!code || !state) {
@@ -200,13 +202,13 @@ router.get('/teable/callback', async (req, res) => {
 
     // Redirect to frontend success page
     const frontendUrl = userInfo
-      ? `http://localhost:5174/?oauth_success=1&email=${encodeURIComponent(userInfo.email || '')}`
-      : `http://localhost:5174/?oauth_success=1`;
+      ? `${frontendBase}/?oauth_success=1&email=${encodeURIComponent(userInfo.email || '')}`
+      : `${frontendBase}/?oauth_success=1`;
     res.redirect(frontendUrl);
 
   } catch (err) {
     console.error(`[OAuth] Error: ${err.message}`);
-    res.redirect(`http://localhost:5174/?oauth_error=${encodeURIComponent(err.message)}`);
+    res.redirect(`${frontendBase}/?oauth_error=${encodeURIComponent(err.message)}`);
   }
 });
 
@@ -225,7 +227,8 @@ router.get('/teable/status/:connectionId', authMiddleware, async (req, res) => {
   let valid = false;
   let userInfo = null;
   try {
-    const teableHost = conn.host || 'http://localhost:3000';
+    // Note: frontendBase from startOAuth, homepage is for OAuth app display
+    const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
     const meRes = await fetch(`${teableHost.replace(/\/$/, '')}/api/auth/user/me`, {
       headers: { Authorization: `Bearer ${conn.token}` },
     });
@@ -304,8 +307,8 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
       },
       body: JSON.stringify({
         name: appName,
-        redirectUri: redirectUri || `http://localhost:3100/api/oauth/teable/callback`,
-        homepage: 'http://localhost:3100',
+        redirectUri: redirectUri || `http://localhost:${serverPort}/api/oauth/teable/callback`,
+        homepage: `${frontendBase}`,
       }),
     });
 

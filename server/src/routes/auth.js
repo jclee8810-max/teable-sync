@@ -123,9 +123,10 @@ router.get('/users', authMiddleware, (req, res) => {
 // ─── Teable OAuth Login ───────────────────────────────────────────────
 // Teable OAuth default config (overridable via env vars)
 const TEABLE_OAUTH_HOST = process.env.TEABLE_OAUTH_HOST || 'http://localhost:3000';
-const TEABLE_OAUTH_CLIENT_ID = process.env.TEABLE_OAUTH_CLIENT_ID || 'cltydkfncabnodyazyn';
-const TEABLE_OAUTH_CLIENT_SECRET = process.env.TEABLE_OAUTH_CLIENT_SECRET || 'ttjjrw842kevfhs4xdakst3xnjbjcewm1dqzwbjq';
+const TEABLE_OAUTH_CLIENT_ID = process.env.TEABLE_OAUTH_CLIENT_ID || '';
+const TEABLE_OAUTH_CLIENT_SECRET = process.env.TEABLE_OAUTH_CLIENT_SECRET || '';
 const SYNC_SERVER_PORT = process.env.PORT || 3100;
+const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
 
 // In-memory store for login OAuth state
 const loginOAuthState = new Map();
@@ -159,7 +160,7 @@ router.get('/teable-callback', async (req, res) => {
 
   if (error) {
     console.error(`[Auth OAuth] Teable error: ${error} - ${error_description}`);
-    return res.redirect(`http://localhost:5174/?auth_error=${encodeURIComponent(error_description || error)}`);
+    return res.redirect(`${FRONTEND_BASE_URL}/?auth_error=${encodeURIComponent(error_description || error)}`);
   }
 
   if (!code || !state) {
@@ -248,11 +249,11 @@ router.get('/teable-callback', async (req, res) => {
     const { passwordHash: _, ...safeUser } = user;
 
     // Redirect to frontend with token
-    res.redirect(`http://localhost:5174/?oauth_token=${jwtToken}&email=${encodeURIComponent(email)}`);
+    res.redirect(`${FRONTEND_BASE_URL}/?oauth_token=${jwtToken}&email=${encodeURIComponent(email)}`);
 
   } catch (err) {
     console.error(`[Auth OAuth] Error: ${err.message}`);
-    res.redirect(`http://localhost:5174/?auth_error=${encodeURIComponent(err.message)}`);
+    res.redirect(`${FRONTEND_BASE_URL}/?auth_error=${encodeURIComponent(err.message)}`);
   }
 });
 

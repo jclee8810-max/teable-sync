@@ -334,7 +334,7 @@ async function createOAuthApp() {
         email: oauthForm.value.email,
         password: oauthForm.value.password,
         appName: oauthForm.value.appName,
-        redirectUri: `http://localhost:3100/api/oauth/teable/callback`,
+        redirectUri: `${window.location.protocol}//${window.location.host}/api/oauth/teable/callback`,
       }),
     })
     const data = await res.json()
