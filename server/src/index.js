@@ -4,6 +4,9 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
+import authRouter from './routes/auth.js';
+import oauthRouter from './routes/oauth.js';
+import { authMiddleware } from './middleware/auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -41,7 +44,16 @@ function saveConfig(config) {
   return _writeLock;
 }
 
-// --- WebSocket ---
+// --- Auth routes (public) ---
+app.use('/api/auth', authRouter);
+// --- OAuth routes ---
+app.use('/api/oauth', oauthRouter);
+
+// --- Public health (before auth middleware) ---
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// --- Protected API routes ---
+app.use('/api', authMiddleware);
 const server = app.listen(PORT, () => {
   console.log(`🚀 TeableSync Server running on http://localhost:${PORT}`);
     // 启动时自动恢复定时任务（默认关闭，通过环境变量 AUTO_RESUME_TASKS=true 开启）
@@ -494,9 +506,6 @@ app.delete('/api/logs', (req, res) => {
   saveConfig(config);
   res.json({ ok: true });
 });
-
-// Serve static files in production
-app.use(express.static(join(__dirname, '..', '..', 'client', 'dist')));
 
 // --- Global error handling ---
 process.on('uncaughtException', (err) => {

@@ -15,6 +15,9 @@ SQL Server / MySQL / PostgreSQL → Teable 数据同步工具，带 Web GUI。
 | 实时同步日志（WebSocket） | ✅ |
 | 定时调度（手动 / 定时） | ✅ |
 | 连接测试（保存前验证连通性） | ✅ |
+| Teable OAuth 2.0 授权连接 | ✅ |
+| OAuth 单点登录（用 Teable 账号登录） | ✅ |
+| 用户认证（JWT + 密码加密） | ✅ |
 
 ## 系统要求
 
@@ -58,10 +61,16 @@ cd client && npm install && cd ..
 - 用户名：sa
 - 密码：your_password
 
-**Teable 示例**
+**Teable 示例（手动 Token）**
 - 类型：Teable
 - URL：http://localhost:3000（或你的 Teable 地址）
 - Token：你的 Teable API Token
+
+**Teable OAuth 连接（推荐）**
+- 类型：Teable
+- URL：你的 Teable 地址
+- 点击「OAuth 连接 Teable 账号」，按提示完成授权
+- 无需手动输入 Token，更安全
 
 ### 4. 创建同步任务
 
@@ -159,7 +168,56 @@ docker run -d -p 3100:3100 -p 5173:5173 --name teable-sync teable-sync
 - 自动在 Teable 目标表创建对应字段
 - 已配置的字段映射优先，不会重复创建
 
+## 用户认证
+
+### 登录方式
+
+1. **邮箱密码登录** — 注册账号后直接登录
+2. **Teable OAuth 登录** — 点击「用 Teable 账号登录」按钮，跳转到 Teable 授权页面，授权后自动创建账号并登录
+
+### 用户角色
+
+| 角色 | 权限 |
+|------|------|
+| super_admin | 所有权限 + 用户管理（第一个注册的用户自动成为管理员） |
+| user | 正常使用权限 |
+
+### OAuth 单点登录流程
+
+```
+1. 用户点击「用 Teable 账号登录」
+2. 浏览器跳转到 Teable 授权页面
+3. 用户在 Teable 登录并授权
+4. Teable 回调 → sync-pilot 后端用 code 换 access_token
+5. 自动创建/匹配 sync-pilot 用户 → 签发 JWT
+6. 重定向回前端，自动登录完成
+```
+
+### OAuth 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| TEABLE_OAUTH_HOST | http://localhost:3000 | Teable 实例地址 |
+| TEABLE_OAUTH_CLIENT_ID | - | OAuth App Client ID |
+| TEABLE_OAUTH_CLIENT_SECRET | - | OAuth App Client Secret |
+| PORT | 3100 | sync-pilot 后端端口 |
+
 ## API 接口
+
+### 认证
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/auth/register | 注册 |
+| POST | /api/auth/login | 登录 |
+| GET | /api/auth/me | 获取当前用户信息 |
+| PUT | /api/auth/password | 修改密码 |
+| GET | /api/auth/users | 获取用户列表（管理员） |
+| DELETE | /api/auth/users/:id | 删除用户（管理员） |
+| GET | /api/auth/teable-login | Teable OAuth 登录（302 重定向） |
+| GET | /api/auth/teable-callback | OAuth 回调端点 |
+
+### 系统
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -179,7 +237,21 @@ docker run -d -p 3100:3100 -p 5173:5173 --name teable-sync teable-sync
 | POST | /api/tasks/:id/run | 手动执行同步 |
 | GET | /api/logs | 获取日志 |
 | DELETE | /api/logs | 清空日志 |
+| POST | /api/oauth/teable/start | 发起 OAuth 授权 |
+| GET | /api/oauth/teable/callback | OAuth 回调（Teable 跳转回来） |
+| GET | /api/oauth/teable/status/:id | 查询 OAuth 连接状态 |
+| DELETE | /api/oauth/teable/disconnect/:id | 断开 OAuth 连接 |
+| POST | /api/oauth/teable/app | 在 Teable 创建 OAuth 应用 |
 | WS | ws://localhost:3100 | 实时日志推送 |
+
+### OAuth 连接管理（数据源授权）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/oauth/teable/start | 发起 OAuth 授权（数据源连接） |
+| GET | /api/oauth/teable/callback | OAuth 回调（数据源连接） |
+| GET | /api/oauth/teable/status/:id | 查询连接状态 |
+| DELETE | /api/oauth/teable/disconnect/:id | 断开连接 |
 
 ## 目录结构
 
@@ -216,3 +288,12 @@ A: Web UI 底部有实时日志面板，支持按 Info/Warn/Error 过滤。
 
 ### Q: 支持 Teable Cloud（app.teable.ai）吗？
 A: 支持，只需在连接配置时填入你的 Teable Cloud 地址和 Token。
+
+### Q: OAuth 连接有什么好处？
+A: OAuth 是 Teable 官方推荐的授权方式，比手动输入 Token 更安全，无需暴露管理员密码，且 Token 自动续期。
+
+### Q: OAuth 需要哪些条件？
+A: 需要你部署的 Teable 实例支持 OAuth（Teable 自部署版 1.8+），以及具有管理员权限的账号来创建 OAuth 应用。
+
+### Q: OAuth 连接失败怎么办？
+A: 确认 Teable 版本 >= 1.8，管理员账号有足够权限，且 redirect_uri 配置为 `http://localhost:3100/api/oauth/teable/callback`（开发环境）或你的实际地址（生产环境）。

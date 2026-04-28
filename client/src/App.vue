@@ -1,5 +1,6 @@
 <template>
-  <div class="app-root">
+  <AuthPage v-if="!isLoggedIn" @auth-changed="onAuthChanged" />
+  <div v-else class="app-root">
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-brand">
@@ -59,8 +60,20 @@
           <p class="page-desc">{{ currentPageDesc }}</p>
         </div>
         <div class="top-bar-right">
-          <div class="pulse-ring">
-            <span class="pulse-dot"></span>
+          <div class="user-menu" @click="showUserMenu = !showUserMenu">
+            <div class="user-avatar">{{ currentUser?.email?.[0]?.toUpperCase() || 'U' }}</div>
+            <span class="user-name">{{ currentUser?.email || '未登录' }}</span>
+            <el-icon><ArrowDown /></el-icon>
+          </div>
+          <!-- User dropdown -->
+          <div v-if="showUserMenu" class="user-dropdown" v-click-outside="() => showUserMenu = false">
+            <div class="dropdown-item" @click="goProfile">
+              <el-icon><User /></el-icon>个人中心
+            </div>
+            <div class="dropdown-divider"></div>
+            <div class="dropdown-item danger" @click="handleLogout">
+              <el-icon><SwitchButton /></el-icon>退出登录
+            </div>
           </div>
         </div>
       </header>
@@ -69,6 +82,7 @@
         <ConnectionsPanel v-if="activeTab === 'connections'" />
         <TasksPanel v-if="activeTab === 'tasks'" />
         <LogsPanel v-if="activeTab === 'logs'" />
+        <AuthPage v-if="showProfile" @auth-changed="onAuthChanged" />
       </div>
     </main>
   </div>
@@ -79,8 +93,14 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import ConnectionsPanel from './components/ConnectionsPanel.vue'
 import TasksPanel from './components/TasksPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
+import AuthPage from './components/AuthPage.vue'
+import { getCurrentUser, clearToken, getToken } from './api.js'
 
 const activeTab = ref('tasks')
+const isLoggedIn = ref(false)
+const currentUser = ref(null)
+const showUserMenu = ref(false)
+const showProfile = ref(false)
 
 const navItems = computed(() => [
   { key: 'connections', icon: 'Link', label: '数据源', badge: null },
@@ -103,10 +123,17 @@ const currentPageDesc = computed(() => {
 
 // WebSocket for live logs
 let ws = null
-onMounted(() => {
+function connectWS() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsPort = import.meta.env.VITE_WS_PORT || location.port || '3100'
+  const token = getToken()
   ws = new WebSocket(`${protocol}//${location.hostname}:${wsPort}`)
+  ws.onopen = () => {
+    // Send auth token if available
+    if (token) {
+      ws.send(JSON.stringify({ type: 'auth', token }))
+    }
+  }
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data)
@@ -115,8 +142,69 @@ onMounted(() => {
       }
     } catch {}
   }
+  ws.onclose = () => {
+    // Reconnect after 3s if still logged in
+    if (isLoggedIn.value) {
+      setTimeout(connectWS, 3000)
+    }
+  }
+}
+
+onMounted(async () => {
+  // Check if already logged in
+  const token = getToken()
+  if (token) {
+    try {
+      currentUser.value = await getCurrentUser()
+      isLoggedIn.value = true
+    } catch {
+      clearToken()
+      isLoggedIn.value = false
+    }
+  }
+  connectWS()
 })
+
 onUnmounted(() => { ws?.close() })
+
+function onAuthChanged(user) {
+  if (user) {
+    currentUser.value = user
+    isLoggedIn.value = true
+    showProfile.value = false
+    if (!ws || ws.readyState === WebSocket.CLOSED) connectWS()
+  } else {
+    currentUser.value = null
+    isLoggedIn.value = false
+    showProfile.value = false
+    ws?.close()
+  }
+  showUserMenu.value = false
+}
+
+function goProfile() {
+  showProfile.value = true
+  showUserMenu.value = false
+  activeTab.value = ''
+}
+
+function handleLogout() {
+  clearToken()
+  onAuthChanged(null)
+}
+
+// Click outside directive
+const vClickOutside = {
+  mounted(el, binding) {
+    el._clickOutside = (e) => {
+      if (!el.contains(e.target)) binding.value(e)
+    }
+    document.addEventListener('click', el._clickOutside)
+  },
+  unmounted(el) {
+    document.removeEventListener('click', el._clickOutside)
+  },
+}
 </script>
 
 <style>
@@ -171,8 +259,6 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
-
-
 
 /* ========== LAYOUT ========== */
 .app-root {
@@ -300,10 +386,6 @@ body {
   background: var(--green);
   border-radius: 50%;
 }
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
 .status-text {
   font-size: 12px;
   color: var(--text-tertiary);
@@ -325,54 +407,94 @@ body {
 
 .top-bar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  padding: 28px 36px 20px;
+  padding: 20px 36px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   flex-shrink: 0;
 }
 
+.top-bar-left {}
+
 .page-title {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.5px;
   color: var(--text-primary);
 }
 .page-desc {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-tertiary);
-  margin-top: 4px;
+  margin-top: 3px;
 }
 
 .top-bar-right {
   display: flex;
   align-items: center;
   gap: 16px;
+  position: relative;
 }
 
-.pulse-ring {
-  position: relative;
-  width: 10px; height: 10px;
+/* User menu */
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  user-select: none;
 }
-.pulse-dot {
-  position: absolute;
-  inset: 0;
-  background: var(--green);
+.user-menu:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.user-avatar {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
   border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
 }
-.pulse-dot::after {
-  content: '';
+.user-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* User dropdown */
+.user-dropdown {
   position: absolute;
-  inset: -4px;
-  border: 2px solid var(--green);
-  border-radius: 50%;
-  animation: pulse-ring-anim 2s ease-out infinite;
-  opacity: 0;
+  top: calc(100% + 8px);
+  right: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  min-width: 160px;
+  z-index: 100;
+  overflow: hidden;
 }
-@keyframes pulse-ring-anim {
-  0% { transform: scale(0.8); opacity: 0.6; }
-  100% { transform: scale(1.8); opacity: 0; }
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.dropdown-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.dropdown-item.danger { color: var(--red); }
+.dropdown-item.danger:hover { background: rgba(220,38,38,0.06); }
+.dropdown-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 0;
 }
 
 .content-area {
@@ -428,7 +550,7 @@ body {
 }
 .fs-btn-danger:hover { background: rgba(220,38,38,0.06); border-color: rgba(220,38,38,0.35); }
 
-/* Element Plus overrides for consistency */
+/* Element Plus overrides */
 .el-table th.el-table__cell { font-weight: 600 !important; font-size: 12px !important; }
 .el-dialog__header { border-bottom: 1px solid var(--border-subtle) !important; padding: 20px 24px !important; }
 .el-dialog__title { color: var(--text-primary) !important; font-weight: 600 !important; }

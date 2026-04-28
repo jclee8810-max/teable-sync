@@ -106,14 +106,65 @@
           <el-form-item label="服务器地址">
             <el-input v-model="form.host" placeholder="http://localhost:3000 或 https://your-teable.com" />
           </el-form-item>
-          <el-form-item label="API Token">
+
+          <!-- Token 手动输入模式 -->
+          <el-form-item label="API Token" v-if="!showOAuthSetup">
             <el-input v-model="form.token" type="password" placeholder="teable_xxxx_..." show-password />
           </el-form-item>
-          <el-button type="success" plain @click="testTeableInDialog" :loading="testingInline" style="margin-bottom:16px">
+
+          <!-- OAuth 连接模式 -->
+          <div v-if="!editingId && !form.token" class="oauth-connect-area">
+            <el-button type="primary" plain @click="startOAuthFlow" :loading="oauthLoading">
+              <el-icon><Key /></el-icon>OAuth 连接 Teable 账号
+            </el-button>
+            <p class="oauth-hint">使用 Teable 官方授权方式，更安全，无需手动输入 Token</p>
+          </div>
+
+          <!-- OAuth 已连接状态 -->
+          <div v-if="form.token && !editingId" class="oauth-connected">
+            <el-alert
+              title="已通过 OAuth 连接"
+              type="success"
+              :description="'账号: ' + (oauthStatus.email || form.host)"
+              show-icon :closable="false" style="margin-bottom:8px" />
+            <el-button type="warning" plain size="small" @click="showOAuthSetup = true">
+              切换账号
+            </el-button>
+          </div>
+
+          <el-button type="success" plain @click="testTeableInDialog" :loading="testingInline" style="margin-top:12px" v-if="form.token">
             <el-icon><Connection /></el-icon>测试连接
           </el-button>
           <el-alert v-if="testResult" :title="testResult.message" :type="testResult.success ? 'success' : 'error'"
             show-icon :closable="false" style="margin-bottom:12px" />
+
+          <!-- OAuth 快速设置（新建连接时显示） -->
+          <div v-if="!editingId && showOAuthSetup" class="oauth-setup-area">
+            <el-divider content-position="left">快速配置 OAuth</el-divider>
+            <el-form-item label="Teable 管理员邮箱">
+              <el-input v-model="oauthForm.email" placeholder="admin@your-teable.com" />
+            </el-form-item>
+            <el-form-item label="Teable 管理员密码">
+              <el-input v-model="oauthForm.password" type="password" show-password placeholder="密码" />
+            </el-form-item>
+            <el-form-item label="OAuth 应用名称">
+              <el-input v-model="oauthForm.appName" placeholder="TeableSync" />
+            </el-form-item>
+            <el-button type="primary" @click="createOAuthApp" :loading="oauthCreating">
+              自动创建 OAuth 应用
+            </el-button>
+            <p class="oauth-hint" style="margin-top:8px">
+              自动在你的 Teable 实例创建 OAuth 应用（需要管理员账号），或手动在 Teable 管理后台创建后填入 clientId 和 clientSecret
+            </p>
+            <el-alert v-if="oauthAppResult" :title="oauthAppResult.message"
+              :type="oauthAppResult.clientId ? 'success' : 'error'"
+              show-icon :closable="false" style="margin-top:12px">
+              <template #default v-if="oauthAppResult.clientId">
+                <div><b>Client ID:</b> <code>{{ oauthAppResult.clientId }}</code></div>
+                <div><b>Client Secret:</b> <code>{{ oauthAppResult.clientSecret }}</code></div>
+              </template>
+            </el-alert>
+          </div>
         </template>
 
         <template v-else>
@@ -161,6 +212,12 @@ const editingId = ref(null)
 const saving = ref(false)
 const testingInline = ref(false)
 const testResult = ref(null)
+const oauthLoading = ref(false)
+const oauthCreating = ref(false)
+const oauthAppResult = ref(null)
+const showOAuthSetup = ref(false)
+const oauthStatus = ref({ email: null })
+const oauthForm = ref({ email: '', password: '', appName: 'TeableSync' })
 
 const defaultForm = { name: '', type: 'mssql', host: 'localhost', port: '', database: '', username: '', password: '', token: '' }
 const form = ref({ ...defaultForm })
@@ -198,11 +255,127 @@ async function testTeableInDialog() {
   }
 }
 
+async function startOAuthFlow() {
+  if (!form.value.name) {
+    ElMessage.warning('请先填写连接名称')
+    return
+  }
+  if (!form.value.host) {
+    ElMessage.warning('请先填写服务器地址')
+    return
+  }
+  // Save connection first to get an ID
+  saving.value = true
+  let connId = editingId.value
+  try {
+    if (!connId) {
+      const created = await createConnection(form.value)
+      connId = created.id
+    }
+  } catch (err) {
+    ElMessage.error('保存连接失败: ' + err.message)
+    saving.value = false
+    return
+  }
+  saving.value = false
+
+  // Check if we have OAuth credentials configured
+  if (!oauthForm.value.email || !oauthForm.value.password) {
+    ElMessage.info('请先在下方填写 Teable 管理员邮箱和密码来创建 OAuth 应用')
+    showOAuthSetup.value = true
+    return
+  }
+
+  oauthLoading.value = true
+  try {
+    const res = await fetch('/api/oauth/teable/start', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('token')}`,
+      },
+      body: JSON.stringify({
+        connectionId: connId,
+        teableHost: form.value.host,
+        clientId: oauthForm.value.clientId,
+        clientSecret: oauthForm.value.clientSecret,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '启动 OAuth 失败')
+    // Redirect browser to Teable authorization page
+    window.location.href = data.authUrl
+  } catch (err) {
+    ElMessage.error(err.message)
+    oauthLoading.value = false
+  }
+}
+
+async function createOAuthApp() {
+  if (!oauthForm.value.email || !oauthForm.value.password || !oauthForm.value.appName) {
+    ElMessage.warning('请填写管理员邮箱、密码和应用名称')
+    return
+  }
+  if (!form.value.host) {
+    ElMessage.warning('请先填写服务器地址')
+    return
+  }
+  oauthCreating.value = true
+  oauthAppResult.value = null
+  try {
+    const res = await fetch('/api/oauth/teable/app', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('token')}`,
+      },
+      body: JSON.stringify({
+        teableHost: form.value.host,
+        email: oauthForm.value.email,
+        password: oauthForm.value.password,
+        appName: oauthForm.value.appName,
+        redirectUri: `http://localhost:3100/api/oauth/teable/callback`,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '创建 OAuth 应用失败')
+    oauthAppResult.value = data
+    oauthForm.value.clientId = data.clientId
+    oauthForm.value.clientSecret = data.clientSecret
+    ElMessage.success('OAuth 应用创建成功！可以开始授权了')
+  } catch (err) {
+    ElMessage.error(err.message)
+  } finally {
+    oauthCreating.value = false
+  }
+}
+
+async function checkOAuthStatus(connId) {
+  try {
+    const res = await fetch(`/api/oauth/teable/status/${connId}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data.connected) {
+        oauthStatus.value = { email: data.email }
+      }
+    }
+  } catch (e) {}
+}
+
 function openDialog(conn = null) {
   testResult.value = null
+  oauthAppResult.value = null
+  showOAuthSetup.value = false
+  oauthStatus.value = { email: null }
+  oauthForm.value = { email: '', password: '', appName: 'TeableSync' }
   if (conn) {
     editingId.value = conn.id
     form.value = { ...conn }
+    if (conn.type === 'teable' && conn.id) {
+      checkOAuthStatus(conn.id)
+    }
   } else {
     editingId.value = null
     form.value = { ...defaultForm, type: 'mssql', port: '1433' }

@@ -1,9 +1,39 @@
 import axios from 'axios'
 
+const TOKEN_KEY = 'teable_sync_token'
+
 const api = axios.create({
   baseURL: '',
   timeout: 30000,
 })
+
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem(TOKEN_KEY)
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+api.interceptors.response.use(
+  r => r,
+  err => {
+    if (err.response?.status === 401) {
+      localStorage.removeItem(TOKEN_KEY)
+      window.location.hash = '#/login'
+    }
+    return Promise.reject(err)
+  }
+)
+
+// Auth
+export const login = (data) => api.post('/api/auth/login', data).then(r => r.data)
+export const register = (data) => api.post('/api/auth/register', data).then(r => r.data)
+export const getCurrentUser = () => api.get('/api/auth/me').then(r => r.data)
+export const changePassword = (data) => api.put('/api/auth/password', data).then(r => r.data)
+export const getUsers = () => api.get('/api/auth/users').then(r => r.data)
+export const deleteUser = (id) => api.delete(`/api/auth/users/${id}`).then(r => r.data)
+export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
+export const getToken = () => localStorage.getItem(TOKEN_KEY)
+export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
 
 // Connections
 export const getConnections = () => api.get('/api/connections').then(r => r.data)
