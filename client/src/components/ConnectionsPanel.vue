@@ -73,6 +73,9 @@
           <span v-if="conn._tested === true" class="conn-status active">● 已连接</span>
           <span v-else-if="conn._tested === false" class="conn-status error">● 连接失败</span>
           <span v-else class="conn-status unknown">○ 未测试</span>
+          <span class="conn-visibility" :class="conn.shared ? 'shared' : 'private'">
+            {{ conn.shared ? '🌐 共享' : '🔒 私有' }}
+          </span>
         </div>
       </div>
 
@@ -190,6 +193,17 @@
             <el-input v-model="form.password" type="password" show-password />
           </el-form-item>
         </template>
+
+        <!-- 共享开关（所有类型通用，放在底部） -->
+        <el-divider v-if="form.type === 'teable'" />
+        <el-form-item label="共享">
+          <div style="display:flex;align-items:center;gap:8px">
+            <el-switch v-model="form.shared" :disabled="!canEditSharing" />
+            <span style="font-size:12px;color:#888">
+              {{ form.shared ? '团队成员可查看和使用此连接' : '仅自己可用' }}
+            </span>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="dialogVisible = false">取消</button>
@@ -219,13 +233,33 @@ const showOAuthSetup = ref(false)
 const oauthStatus = ref({ email: null })
 const oauthForm = ref({ email: '', password: '', appName: 'TeableSync' })
 
-const defaultForm = { name: '', type: 'mssql', host: 'localhost', port: '', database: '', username: '', password: '', token: '' }
+const defaultForm = { name: '', type: 'mssql', host: 'localhost', port: '', database: '', username: '', password: '', token: '', shared: false }
 const form = ref({ ...defaultForm })
 
 const defaultPort = computed(() => ({ mssql: '1433', mysql: '3306', pg: '5432' }[form.value.type] || ''))
 
 function typeLabel(type) {
   return { mssql: 'SQL Server', mysql: 'MySQL', pg: 'PostgreSQL', teable: 'Teable' }[type] || type
+}
+
+// 当前用户身份
+const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
+const currentUserId = currentUser?.id || null
+const isSuperAdmin = currentUser?.role === 'super_admin'
+
+function isOwner(conn) {
+  return conn && (conn.ownerId === currentUserId || isSuperAdmin)
+}
+
+// 判断是否有权限修改共享设置：super_admin 或 owner 或 新建
+const canEditSharing = computed(() => {
+  if (!editingId.value) return true // 新建时都可以
+  const conn = connById(editingId.value)
+  return isSuperAdmin || (conn && conn.ownerId === currentUserId)
+})
+
+function connById(id) {
+  return connections.value.find(c => c.id === id) || null
 }
 
 function onTypeChange() {
@@ -573,6 +607,9 @@ onMounted(loadConnections)
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .conn-status {
@@ -582,4 +619,19 @@ onMounted(loadConnections)
 .conn-status.active { color: var(--green); }
 .conn-status.error { color: var(--red); }
 .conn-status.unknown { color: var(--text-tertiary); }
+
+.conn-visibility {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.conn-visibility.shared {
+  background: rgba(64, 158, 255, 0.15);
+  color: #409eff;
+}
+.conn-visibility.private {
+  background: rgba(201, 205, 212, 0.2);
+  color: var(--text-tertiary);
+}
 </style>

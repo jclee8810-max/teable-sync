@@ -198,10 +198,100 @@ docker run -d -p 3100:3100 -p 5173:5173 --name teable-sync teable-sync
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | TEABLE_OAUTH_HOST | http://localhost:3000 | Teable 实例地址 |
-| FRONTEND_BASE_URL | http://localhost:5174 | 前端访问地址（用于 OAuth 回调）|
+| SERVER_PUBLIC_URL | http://localhost:3100 | 服务器公网地址（OAuth 回调用）|
+| FRONTEND_BASE_URL | http://localhost:5174 | 前端访问地址（用于 OAuth 回调重定向）|
 | TEABLE_OAUTH_CLIENT_ID | - | OAuth App Client ID |
 | TEABLE_OAUTH_CLIENT_SECRET | - | OAuth App Client Secret |
 | PORT | 3100 | sync-pilot 后端端口 |
+
+## 客户部署指南
+
+### 局域网/内网部署
+
+TeableSync 已支持局域网访问，客户可从内网任意设备访问。
+
+**1. 环境变量配置**
+
+```bash
+# server/.env
+PORT=3100
+SERVER_PUBLIC_URL=http://192.168.10.2:3100  # 服务器在局域网的地址
+FRONTEND_BASE_URL=http://192.168.10.2:5174   # 前端在局域网的地址
+TEABLE_OAUTH_HOST=http://your-teable:3000    # Teable 实例地址
+JWT_SECRET=请生成32字节随机字符串
+```
+
+**2. 启动服务**
+
+```bash
+# 构建前端
+cd client && npm run build && cd ..
+
+# 启动后端
+cd server && npm start
+```
+
+**3. 客户访问**
+
+- 前端：`http://192.168.10.2:5174`
+- 后端 API：`http://192.168.10.2:3100`
+
+### Docker 部署（推荐）
+
+```bash
+# 构建镜像
+docker build -t teable-sync .
+
+# 运行容器
+docker run -d -p 3100:3100 -p 5174:5174 \
+  -e PORT=3100 \
+  -e SERVER_PUBLIC_URL=http://your-server:3100 \
+  -e FRONTEND_BASE_URL=http://your-server:5174 \
+  -e TEABLE_OAUTH_HOST=http://your-teable:3000 \
+  -e JWT_SECRET=your-random-secret \
+  -v /path/to/data:/app/server/data \
+  --name teable-sync \
+  teable-sync
+```
+
+### Nginx 反向代理（公网部署）
+
+```nginx
+server {
+    listen 80;
+    server_name sync.yourcompany.com;
+
+    # 前端静态文件
+    location / {
+        root /path/to/teable-sync/client/dist;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 后端 API
+    location /api {
+        proxy_pass http://127.0.0.1:3100;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+
+    # WebSocket
+    location /ws {
+        proxy_pass http://127.0.0.1:3100;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+**环境变量：**
+
+```bash
+SERVER_PUBLIC_URL=https://sync.yourcompany.com
+FRONTEND_BASE_URL=https://sync.yourcompany.com
+```
 
 ## API 接口
 

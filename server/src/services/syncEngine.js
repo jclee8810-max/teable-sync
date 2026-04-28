@@ -10,6 +10,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(dirname(dirname(__dirname)), 'data', 'sync-state');
 if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
 
+// P1-1: Task-level sync lock to prevent concurrent runs of the same task
+const syncLocks = new Set();
+
 function getSyncState(taskId) {
   const file = join(STATE_DIR, `${taskId}.json`);
   if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf-8'));
@@ -30,6 +33,13 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     const entry = { taskId, level, message: msg, ts: new Date().toISOString() };
     broadcastLog(entry);
   };
+
+  // P1-1: Prevent concurrent runs of the same task
+  if (syncLocks.has(taskId)) {
+    log('warn', '⏳ 任务正在执行中，忽略本次请求');
+    return;
+  }
+  syncLocks.add(taskId);
 
   log('info', `🔄 开始同步任务: ${task.name}`);
 
@@ -122,6 +132,14 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     );
     // User mapping takes priority over auto-created mapping
     const mapping = { ...autoMapping, ...columnMapping };
+
+    // P1-2: Validate user-specified column mappings point to existing target fields
+    for (const [srcCol, tgtField] of Object.entries(columnMapping)) {
+      if (!fields.find(f => f.name === tgtField)) {
+        log('warn', `⚠️ 用户映射 ${srcCol}→${tgtField}，但目标字段不存在，已忽略此映射`);
+        delete mapping[srcCol];
+      }
+    }
     if (createdFields.length > 0) {
       log('info', `🔗 字段映射: ${Object.keys(mapping).map(k => `${k}→${mapping[k]}`).join(', ')}`);
     } else {
@@ -148,7 +166,8 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
         log('info', `📊 目标表已有 ${existingRecords.length} 条记录(分页获取完成)`);
       }
     } catch (e) {
-      log('warn', `⚠️ 获取现有记录失败(将全部插入): ${e.message}`);
+      log('error', `❌ 获取现有记录失败，同步终止: ${e.message}`);
+      return;
     }
 
     // Build index by PK
@@ -207,7 +226,8 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     }
 
     // 7. Batch write to Teable
-    const BATCH_SIZE = 100; // Teable API rate limit (max 1000 per request, use 100 for balance)
+    // P2-2: Increase batch size — Teable supports up to 1000 records per request
+    const BATCH_SIZE = 500;
 
     for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
       const batch = toInsert.slice(i, i + BATCH_SIZE);
@@ -241,5 +261,8 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
   } catch (err) {
     log('error', `❌ 同步失败: ${err.message}`);
     console.error(err);
+  } finally {
+    // P1-1: Always release the lock
+    syncLocks.delete(taskId);
   }
 }

@@ -2,8 +2,15 @@ import axios from 'axios'
 
 const TOKEN_KEY = 'teable_sync_token'
 
+// 动态获取 API 地址：支持局域网访问
+// 如果从 192.168.x.x 访问，API 也走 192.168.x.x
+const getBaseURL = () => {
+  const { protocol, hostname } = window.location
+  return `${protocol}//${hostname}:3100/api`
+}
+
 const api = axios.create({
-  baseURL: '',
+  baseURL: getBaseURL(),
   timeout: 30000,
 })
 

@@ -71,7 +71,8 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   // The server runs on PORT (default 3100)
   const serverPort = process.env.PORT || 3100;
   const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
-  const redirectUri = `http://localhost:${serverPort}/api/oauth/teable/callback`;
+  const serverPublicUrl = process.env.SERVER_PUBLIC_URL || `http://localhost:${serverPort}`;
+  const redirectUri = `${serverPublicUrl}/api/oauth/teable/callback`;
 
   // Generate state with nonce + connectionId
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -227,8 +228,8 @@ router.get('/teable/status/:connectionId', authMiddleware, async (req, res) => {
   let valid = false;
   let userInfo = null;
   try {
-    // Note: frontendBase from startOAuth, homepage is for OAuth app display
-    const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
+    // teableHost is stored in the connection config
+    const teableHost = conn.host || 'http://localhost:3000';
     const meRes = await fetch(`${teableHost.replace(/\/$/, '')}/api/auth/user/me`, {
       headers: { Authorization: `Bearer ${conn.token}` },
     });
@@ -307,8 +308,8 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
       },
       body: JSON.stringify({
         name: appName,
-        redirectUri: redirectUri || `http://localhost:${serverPort}/api/oauth/teable/callback`,
-        homepage: `${frontendBase}`,
+        redirectUri: redirectUri || `${process.env.SERVER_PUBLIC_URL || `http://localhost:${process.env.PORT || 3100}`}/api/oauth/teable/callback`,
+        homepage: `${process.env.FRONTEND_BASE_URL || 'http://localhost:5174'}`,
       }),
     });
 

@@ -61,7 +61,7 @@ const server = app.listen(PORT, () => {
     const config = loadConfig();
     for (const task of config.syncTasks) {
       if (task.enabled && (task.syncMode === 'scheduled' || task.syncMode === 'realtime' || task.syncMode === 'incremental')) {
-        fetch(`http://localhost:${PORT}/api/tasks/${task.id}/start`, { method: 'POST' })
+        fetch(`http://127.0.0.1:${PORT}/api/tasks/${task.id}/start`, { method: 'POST' })
           .then(() => console.log(`↻ 自动恢复: ${task.name} (${task.syncMode})`))
           .catch(() => {});
       }
@@ -90,15 +90,25 @@ function broadcastLog(log) {
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
-// Connections CRUD
+// Connections CRUD (multi-tenant: owner can see/edit + shared connections)
 app.get('/api/connections', (req, res) => {
   const config = loadConfig();
-  res.json(config.connections);
+  const { role, id: userId } = req.user;
+  const visible = config.connections.filter(
+    (c) => role === 'super_admin' || c.ownerId === userId || c.shared === true
+  );
+  res.json(visible);
 });
 
 app.post('/api/connections', (req, res) => {
   const config = loadConfig();
-  const conn = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...req.body };
+  const conn = {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    ownerId: req.user.id,
+    shared: false, // 默认为私有
+    ...req.body,
+  };
   config.connections.push(conn);
   saveConfig(config);
   res.json(conn);
@@ -108,13 +118,23 @@ app.put('/api/connections/:id', (req, res) => {
   const config = loadConfig();
   const idx = config.connections.findIndex((c) => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  config.connections[idx] = { ...config.connections[idx], ...req.body };
+  const conn = config.connections[idx];
+  // 非 super_admin 只能编辑自己的
+  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+    return res.status(403).json({ error: '无权编辑此连接' });
+  }
+  config.connections[idx] = { ...conn, ...req.body, id: conn.id, ownerId: conn.ownerId };
   saveConfig(config);
   res.json(config.connections[idx]);
 });
 
 app.delete('/api/connections/:id', (req, res) => {
   const config = loadConfig();
+  const conn = config.connections.find((c) => c.id === req.params.id);
+  if (!conn) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+    return res.status(403).json({ error: '无权删除此连接' });
+  }
   config.connections = config.connections.filter((c) => c.id !== req.params.id);
   saveConfig(config);
   res.json({ ok: true });
@@ -264,7 +284,11 @@ app.post('/api/teable/test', async (req, res) => {
 // Sync Tasks CRUD
 app.get('/api/tasks', (req, res) => {
   const config = loadConfig();
-  res.json(config.syncTasks);
+  const { role, id: userId } = req.user;
+  const visible = role === 'super_admin'
+    ? config.syncTasks
+    : config.syncTasks.filter((t) => t.userId === userId);
+  res.json(visible);
 });
 
 app.post('/api/tasks', (req, res) => {
@@ -275,6 +299,7 @@ app.post('/api/tasks', (req, res) => {
     createdAt: new Date().toISOString(),
     lastSyncAt: null,
     status: 'idle',
+    userId: req.user.id, // 任务归属当前用户
     ...req.body,
   };
   config.syncTasks.push(task);
@@ -286,18 +311,26 @@ app.put('/api/tasks/:id', (req, res) => {
   const config = loadConfig();
   const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  config.syncTasks[idx] = { ...config.syncTasks[idx], ...req.body };
+  const task = config.syncTasks[idx];
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权编辑此任务' });
+  }
+  config.syncTasks[idx] = { ...task, ...req.body, id: task.id, userId: task.userId };
   saveConfig(config);
   res.json(config.syncTasks[idx]);
 });
 
 app.delete('/api/tasks/:id', (req, res) => {
-  // Stop scheduler if running
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权删除此任务' });
+  }
   if (syncScheduler.has(req.params.id)) {
     clearInterval(syncScheduler.get(req.params.id).intervalId);
     syncScheduler.delete(req.params.id);
   }
-  const config = loadConfig();
   config.syncTasks = config.syncTasks.filter((t) => t.id !== req.params.id);
   saveConfig(config);
   res.json({ ok: true });
@@ -309,6 +342,19 @@ app.post('/api/tasks/:id/start', async (req, res) => {
   const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[taskIdx];
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
+
+  // P2-3: Validate required fields before starting scheduler
+  const missingFields = [];
+  if (!task.sourceTable) missingFields.push('sourceTable');
+  if (!task.targetTableId) missingFields.push('targetTableId');
+  if (!task.sourceConnectionId && !task.sourceId) missingFields.push('sourceConnectionId');
+  if (!task.targetConnectionId && !task.targetId) missingFields.push('targetConnectionId');
+  if (missingFields.length > 0) {
+    return res.status(400).json({ error: `缺少必要字段: ${missingFields.join(', ')}` });
+  }
 
   // Stop existing timer if any
   if (syncScheduler.has(task.id)) {
@@ -423,6 +469,10 @@ app.post('/api/tasks/:id/stop', (req, res) => {
   const config = loadConfig();
   const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
+  const task = config.syncTasks[taskIdx];
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
 
   if (syncScheduler.has(req.params.id)) {
     clearInterval(syncScheduler.get(req.params.id).intervalId);
@@ -452,6 +502,9 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[taskIdx];
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
 
   const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
   const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
@@ -495,9 +548,12 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 });
 
 // Sync Logs
+// P2-1: Support level filter ?level=info|warn|error
 app.get('/api/logs', (req, res) => {
   const config = loadConfig();
-  res.json(config.syncLogs.slice(-100));
+  const level = req.query.level;
+  const logs = level ? config.syncLogs.filter(l => l.level === level) : config.syncLogs;
+  res.json(logs.slice(-100));
 });
 
 app.delete('/api/logs', (req, res) => {

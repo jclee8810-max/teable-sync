@@ -127,6 +127,8 @@ const TEABLE_OAUTH_CLIENT_ID = process.env.TEABLE_OAUTH_CLIENT_ID || '';
 const TEABLE_OAUTH_CLIENT_SECRET = process.env.TEABLE_OAUTH_CLIENT_SECRET || '';
 const SYNC_SERVER_PORT = process.env.PORT || 3100;
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
+// 用于 OAuth 回调，生产环境必须设置（如 https://sync.yourcompany.com）
+const SERVER_PUBLIC_URL = process.env.SERVER_PUBLIC_URL || `http://localhost:${SYNC_SERVER_PORT}`;
 
 // In-memory store for login OAuth state
 const loginOAuthState = new Map();
@@ -140,7 +142,7 @@ router.get('/teable-login', (req, res) => {
   loginOAuthState.set(nonce, { createdAt: Date.now() });
   setTimeout(() => loginOAuthState.delete(nonce), 10 * 60 * 1000);
 
-  const redirectUri = `http://localhost:${SYNC_SERVER_PORT}/api/auth/teable-callback`;
+  const redirectUri = `${SERVER_PUBLIC_URL}/api/auth/teable-callback`;
   const authUrl = `${TEABLE_OAUTH_HOST}/oauth/authorize?${new URLSearchParams({
     client_id: TEABLE_OAUTH_CLIENT_ID,
     redirect_uri: redirectUri,
@@ -193,7 +195,7 @@ router.get('/teable-callback', async (req, res) => {
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code,
-        redirect_uri: `http://localhost:${SYNC_SERVER_PORT}/api/auth/teable-callback`,
+        redirect_uri: `${SERVER_PUBLIC_URL}/api/auth/teable-callback`,
         client_id: TEABLE_OAUTH_CLIENT_ID,
         client_secret: TEABLE_OAUTH_CLIENT_SECRET,
       }).toString(),

@@ -54,8 +54,11 @@ export async function getTeableRecords(conn, tableId, options = {}) {
   if (options.fieldKeyType) params.set('fieldKeyType', options.fieldKeyType || 'name');
   if (options.filter) params.set('filter', JSON.stringify(options.filter));
   if (options.sort) params.set('sort', JSON.stringify(options.sort));
-  if (options.take) params.set('take', options.take);
-  if (options.skip) params.set('skip', options.skip);
+  // Support both naming conventions: take/skip (legacy) and pageSize/page (Teable standard)
+  if (options.pageSize != null) params.set('pageSize', options.pageSize);
+  else if (options.take != null) params.set('pageSize', options.take);
+  if (options.page != null) params.set('page', options.page);
+  else if (options.skip != null) params.set('page', Math.floor(options.skip / (options.pageSize || 100)) + 1);
 
   const qs = params.toString();
   const path = `/api/table/${tableId}/record${qs ? '?' + qs : ''}`;
@@ -121,11 +124,13 @@ export async function createTeableField(conn, tableId, fieldName, sqlType) {
  * Ensure target table has all required fields from source schema.
  * Returns a map of sourceColumnName → targetFieldName (either existing or newly created).
  * Skips attachment fields and already-existing fields.
+ * P0-2 fix: field creation failure → skip column entirely, do NOT map to non-existent field.
  */
 export async function ensureTeableFields(conn, tableId, sourceSchema, columnMapping, existingFields, log) {
   const existingFieldNames = new Set(existingFields.map(f => f.name));
   const createdFields = [];
   const skippedAttachmentCols = [];
+  const skippedFailedCols = []; // P0-2: track columns that failed to create
   const mapping = {};
 
 
@@ -148,15 +153,19 @@ export async function ensureTeableFields(conn, tableId, sourceSchema, columnMapp
       createdFields.push({ col: col.name, fieldId: created.id, fieldName: created.name, type: info.type });
       log('info', `  🆕 自动创建字段: ${col.name} (${col.type}) → ${created.name} [${info.type}]`);
     } catch (e) {
-      // If creation fails (e.g. permission), skip this column
-      log('warn', `  ⚠️ 创建字段失败 ${col.name}: ${e.message}`);
-      mapping[col.name] = col.name; // still try to map to itself in case target has it
+      // P0-2 fix: if creation fails, skip this column — do NOT map to non-existent field
+      log('warn', `  ⚠️ 创建字段失败 ${col.name}，已跳过: ${e.message}`);
+      skippedFailedCols.push(col.name);
+      continue;
     }
   }
 
   if (skippedAttachmentCols.length > 0) {
     log('warn', `  ⚠️ 跳过附件字段(暂不支持同步): ${skippedAttachmentCols.join(', ')}`);
   }
+  if (skippedFailedCols.length > 0) {
+    log('warn', `  ⚠️ 跳过创建失败的字段(数据不会同步): ${skippedFailedCols.join(', ')}`);
+  }
 
-  return { mapping, createdFields, skippedAttachmentCols };
+  return { mapping, createdFields, skippedAttachmentCols, skippedFailedCols };
 }
