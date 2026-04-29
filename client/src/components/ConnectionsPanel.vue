@@ -314,7 +314,7 @@ async function startOAuthFlow() {
   saving.value = false
 
   // Check if we have OAuth credentials configured
-  if (!oauthForm.value.email || !oauthForm.value.password) {
+  if (!oauthForm.value.email || !oauthForm.value.password || !oauthForm.value.clientId) {
     ElMessage.info('请先在下方填写 Teable 管理员邮箱和密码来创建 OAuth 应用')
     showOAuthSetup.value = true
     return
@@ -403,7 +403,13 @@ function openDialog(conn = null) {
   oauthAppResult.value = null
   showOAuthSetup.value = false
   oauthStatus.value = { email: null }
-  oauthForm.value = { email: '', password: '', appName: 'TeableSync' }
+  oauthForm.value = {
+    email: '',
+    password: '',
+    appName: 'TeableSync',
+    clientId: oauthAppResult.value?.clientId || '',
+    clientSecret: oauthAppResult.value?.clientSecret || '',
+  }
   if (conn) {
     editingId.value = conn.id
     form.value = { ...conn }

@@ -67,11 +67,11 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   if (!conn) return res.status(404).json({ error: '连接不存在' });
   if (conn.type !== 'teable') return res.status(400).json({ error: '仅支持 Teable 类型连接' });
 
-  // Build redirect URI — points back to our callback
-  // The server runs on PORT (default 3100)
-  const serverPort = process.env.PORT || 3100;
+  // Build redirect URI — use dynamic host from request (supports any port)
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const host = req.headers.host;
   const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
-  const serverPublicUrl = process.env.SERVER_PUBLIC_URL || `http://localhost:${serverPort}`;
+  const serverPublicUrl = `${proto}://${host}`;
   const redirectUri = `${serverPublicUrl}/api/oauth/teable/callback`;
 
   // Generate state with nonce + connectionId
@@ -171,10 +171,10 @@ router.get('/teable/callback', async (req, res) => {
       throw new Error(`No access token in response: ${JSON.stringify(tokenData)}`);
     }
 
-    // Optionally verify token by calling /api/auth/user/me
+    // Optionally verify token by calling /api/auth/me
     let userInfo = null;
     try {
-      const meRes = await fetch(`${teableHost.replace(/\/$/, '')}/api/auth/user/me`, {
+      const meRes = await fetch(`${teableHost.replace(/\/$/, '')}/api/auth/me`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (meRes.ok) {
@@ -230,7 +230,7 @@ router.get('/teable/status/:connectionId', authMiddleware, async (req, res) => {
   try {
     // teableHost is stored in the connection config
     const teableHost = conn.host || 'http://localhost:3000';
-    const meRes = await fetch(`${teableHost.replace(/\/$/, '')}/api/auth/user/me`, {
+    const meRes = await fetch(`${teableHost.replace(/\/$/, '')}/api/auth/me`, {
       headers: { Authorization: `Bearer ${conn.token}` },
     });
     if (meRes.ok) {
@@ -308,7 +308,7 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
       },
       body: JSON.stringify({
         name: appName,
-        redirectUri: redirectUri || `${process.env.SERVER_PUBLIC_URL || `http://localhost:${process.env.PORT || 3100}`}/api/oauth/teable/callback`,
+        redirectUri: redirectUri || `${req.protocol}://${req.headers.host}/api/oauth/teable/callback`,
         homepage: `${process.env.FRONTEND_BASE_URL || 'http://localhost:5174'}`,
       }),
     });

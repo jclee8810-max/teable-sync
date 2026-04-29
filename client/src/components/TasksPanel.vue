@@ -327,7 +327,7 @@ function intervalLabel(sec) {
   return `${sec / 3600}小时`
 }
 function statusLabel(s) {
-  const map = { idle: '空闲', running: '同步中', scheduled: '已排期', error: '错误' }
+  const map = { idle: '空闲', running: '同步中', scheduled: '定时同步中', error: '错误' }
   return map[s] || s
 }
 function statusClass(s) {

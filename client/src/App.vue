@@ -20,7 +20,7 @@
         <button
           v-for="item in navItems" :key="item.key"
           class="nav-item" :class="{ active: activeTab === item.key }"
-          @click="activeTab = item.key"
+          @click="activeTab = item.key; showProfile = false"
         >
           <el-icon :size="18"><component :is="item.icon" /></el-icon>
           <span>{{ item.label }}</span>
@@ -60,18 +60,18 @@
           <p class="page-desc">{{ currentPageDesc }}</p>
         </div>
         <div class="top-bar-right">
-          <div class="user-menu" @click="showUserMenu = !showUserMenu">
+          <div class="user-menu" @click.stop="toggleUserMenu">
             <div class="user-avatar">{{ currentUser?.email?.[0]?.toUpperCase() || 'U' }}</div>
             <span class="user-name">{{ currentUser?.email || '未登录' }}</span>
             <el-icon><ArrowDown /></el-icon>
           </div>
           <!-- User dropdown -->
-          <div v-if="showUserMenu" class="user-dropdown" v-click-outside="() => showUserMenu = false">
+          <div v-if="showUserMenu" class="user-dropdown" v-click-outside="closeUserMenu">
             <div class="dropdown-item" @click="goProfile">
               <el-icon><User /></el-icon>个人中心
             </div>
             <div class="dropdown-divider"></div>
-            <div class="dropdown-item danger" @click="handleLogout">
+            <div class="dropdown-item danger" @click.stop="handleLogout">
               <el-icon><SwitchButton /></el-icon>退出登录
             </div>
           </div>
@@ -110,7 +110,7 @@ const navItems = computed(() => [
 
 const currentPageTitle = computed(() => {
   const m = { connections: '数据源管理', tasks: '同步任务', logs: '运行日志' }
-  return m[activeTab.value] || ''
+  return m[activeTab.value] || '个人中心'
 })
 const currentPageDesc = computed(() => {
   const m = {
@@ -124,16 +124,30 @@ const currentPageDesc = computed(() => {
 // WebSocket for live logs
 let ws = null
 function connectWS() {
+  // 避免重复连接
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
+    console.log('[WS] Already connected or connecting, skip')
+    return
+  }
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsPort = import.meta.env.VITE_WS_PORT || location.port || '3100'
   const token = getToken()
-  ws = new WebSocket(`${protocol}//${location.hostname}:${wsPort}`)
+  const wsUrl = `${protocol}//${location.hostname}:${wsPort}`
+  console.log('[WS] Connecting to:', wsUrl)
+  ws = new WebSocket(wsUrl)
   ws.onopen = () => {
-    // Send auth token if available
-    if (token) {
-      ws.send(JSON.stringify({ type: 'auth', token }))
-    }
+    console.log('[WS] onopen triggered, readyState:', ws.readyState, '(OPEN=1)')
+    // 延迟 50ms 确保 readyState 已更新
+    setTimeout(() => {
+      if (token && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'auth', token }))
+        console.log('[WS] Auth message sent')
+      } else {
+        console.warn('[WS] Cannot send: token=', !!token, 'readyState=', ws.readyState)
+      }
+    }, 50)
   }
+  ws.onerror = (e) => console.error('[WS] Error:', e)
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data)
@@ -189,8 +203,17 @@ function goProfile() {
 }
 
 function handleLogout() {
+  console.log('[App] handleLogout called')
   clearToken()
   onAuthChanged(null)
+}
+
+function toggleUserMenu() {
+  showUserMenu.value = !showUserMenu.value
+}
+
+function closeUserMenu() {
+  showUserMenu.value = false
 }
 
 // Click outside directive
@@ -434,6 +457,7 @@ body {
   align-items: center;
   gap: 16px;
   position: relative;
+  overflow: visible;
 }
 
 /* User menu */

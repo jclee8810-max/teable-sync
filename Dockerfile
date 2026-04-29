@@ -1,7 +1,7 @@
 # TeableSync Docker 镜像
 # 多阶段构建：构建前端 → 运行后端
 
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ COPY client/ ./client/
 RUN cd client && npm install && npm run build
 
 # 最终运行镜像
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ RUN cd server && npm install --omit=dev
 COPY --from=builder /app/client/dist ./client/dist
 
 # 暴露端口
-EXPOSE 3100
+EXPOSE 3101
 
 # 启动命令
-CMD ["sh", "-c", "cd server && node src/index.js"]
+CMD ["sh", "-c", "cd server && PORT=3101 node src/index.js"]

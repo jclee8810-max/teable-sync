@@ -12,7 +12,7 @@
         <p class="brand-subtitle">SQL → Teable 数据同步引擎</p>
       </div>
 
-      <div class="auth-tabs">
+      <div class="auth-tabs" v-if="!user">
         <button v-for="t in tabs" :key="t.key" class="auth-tab" :class="{ active: mode === t.key }" @click="mode = t.key; error = ''; success = ''">{{ t.label }}</button>
       </div>
 
@@ -58,8 +58,8 @@
         <p class="auth-hint">已有账号？<button type="button" class="text-btn" @click="mode = 'login'">直接登录</button></p>
       </form>
 
-      <!-- Profile / Change Password -->
-      <form v-if="mode === 'profile'" class="auth-form" @submit.prevent="handleChangePassword">
+      <!-- Profile -->
+      <template v-if="mode === 'profile'">
         <div class="user-info-card">
           <div class="user-avatar-lg">{{ user?.email?.[0]?.toUpperCase() }}</div>
           <div>
@@ -67,38 +67,47 @@
             <div class="user-role-tag">{{ user?.role === 'super_admin' ? '管理员' : '普通用户' }}</div>
           </div>
         </div>
-        <div class="form-field">
-          <label>旧密码</label>
-          <el-input v-model="form.oldPassword" type="password" placeholder="输入旧密码" size="large" show-password />
-        </div>
-        <div class="form-field">
-          <label>新密码</label>
-          <el-input v-model="form.newPassword" type="password" placeholder="至少6个字符" size="large" show-password />
-        </div>
-        <div v-if="error" class="auth-error">{{ error }}</div>
-        <div v-if="success" class="auth-success">{{ success }}</div>
-        <button type="submit" class="auth-submit" :disabled="loading">{{ loading ? '修改中...' : '修改密码' }}</button>
-      </form>
 
-      <!-- User list (super_admin only) -->
-      <div v-if="mode === 'profile' && user?.role === 'super_admin'" class="user-list-section">
-        <h3 class="section-title">用户列表</h3>
-        <div v-if="usersLoading" class="loading-text">加载中...</div>
-        <div v-else class="user-list">
-          <div v-for="u in users" :key="u.id" class="user-row">
-            <div class="user-row-left">
-              <div class="user-row-avatar">{{ u.email?.[0]?.toUpperCase() }}</div>
-              <div>
-                <div class="user-row-email">{{ u.email }}</div>
-                <div class="user-row-role">{{ u.role === 'super_admin' ? '管理员' : '普通用户' }}</div>
+        <!-- Profile sub-tabs -->
+        <div class="profile-tabs">
+          <button class="profile-tab" :class="{ active: profileTab === 'password' }" @click="profileTab = 'password'; error = ''; success = ''">修改密码</button>
+          <button v-if="user?.role === 'super_admin'" class="profile-tab" :class="{ active: profileTab === 'users' }" @click="profileTab = 'users'; error = ''; success = ''">用户管理</button>
+        </div>
+
+        <!-- 修改密码 -->
+        <form v-if="profileTab === 'password'" class="auth-form" @submit.prevent="handleChangePassword">
+          <div class="form-field">
+            <label>旧密码</label>
+            <el-input v-model="form.oldPassword" type="password" placeholder="输入旧密码" size="large" show-password />
+          </div>
+          <div class="form-field">
+            <label>新密码</label>
+            <el-input v-model="form.newPassword" type="password" placeholder="至少6个字符" size="large" show-password />
+          </div>
+          <div v-if="error" class="auth-error">{{ error }}</div>
+          <div v-if="success" class="auth-success">{{ success }}</div>
+          <button type="submit" class="auth-submit" :disabled="loading">{{ loading ? '修改中...' : '修改密码' }}</button>
+        </form>
+
+        <!-- 用户管理 (admin only) -->
+        <div v-if="profileTab === 'users'" class="user-list-section">
+          <div v-if="usersLoading" class="loading-text">加载中...</div>
+          <div v-else class="user-list">
+            <div v-for="u in users" :key="u.id" class="user-row">
+              <div class="user-row-left">
+                <div class="user-row-avatar">{{ u.email?.[0]?.toUpperCase() }}</div>
+                <div>
+                  <div class="user-row-email">{{ u.email }}</div>
+                  <div class="user-row-role">{{ u.role === 'super_admin' ? '管理员' : '普通用户' }}</div>
+                </div>
               </div>
+              <button v-if="u.id !== user?.id && u.role !== 'super_admin'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
+                {{ deletingId === u.id ? '删除中...' : '删除' }}
+              </button>
             </div>
-            <button v-if="u.id !== user?.id && u.role !== 'super_admin'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
-              {{ deletingId === u.id ? '删除中...' : '删除' }}
-            </button>
           </div>
         </div>
-      </div>
+      </template>
 
       <div class="auth-footer" v-if="mode === 'profile'">
         <button class="text-btn danger" @click="handleLogout">退出登录</button>
@@ -122,6 +131,7 @@ const user = ref(null)
 const users = ref([])
 const usersLoading = ref(false)
 
+const profileTab = ref('password')
 const form = ref({ email: '', password: '', password2: '', oldPassword: '', newPassword: '' })
 
 const tabs = [
@@ -136,16 +146,22 @@ onMounted(async () => {
   const authError = urlParams.get('auth_error')
 
   if (oauthToken) {
+    console.log('[OAuth] Received token:', oauthToken.substring(0, 50) + '...')
     setToken(oauthToken)
     const email = urlParams.get('email') || ''
+    console.log('[OAuth] Email from URL:', email)
+    console.log('[OAuth] Token in localStorage:', getToken()?.substring(0, 50) + '...')
     // Clean URL
     window.history.replaceState({}, '', window.location.pathname)
     try {
+      console.log('[OAuth] Calling getCurrentUser()...')
       const me = await getCurrentUser()
+      console.log('[OAuth] User info:', me)
       user.value = me
       emit('auth-changed', me)
       return
     } catch (e) {
+      console.error('[OAuth] getCurrentUser failed:', e)
       clearToken()
       error.value = 'OAuth 登录失败，请重试'
     }
@@ -158,6 +174,7 @@ onMounted(async () => {
 
   if (getToken()) {
     mode.value = 'profile'
+    profileTab.value = 'password'
     await loadProfile()
   }
 })
@@ -251,8 +268,9 @@ async function doDeleteUser(id) {
 }
 
 function handleTeableLogin() {
-  // Determine API base URL (same origin)
-  const apiBase = window.location.origin
+  // Redirect to backend OAuth endpoint
+  const host = window.location.hostname || 'localhost'
+  const apiBase = `http://${host}:3100`
   window.location.href = `${apiBase}/api/auth/teable-login`
 }
 
@@ -386,6 +404,32 @@ function handleLogout() {
 }
 .del-btn:hover:not(:disabled) { background: rgba(220,38,38,0.06); }
 .del-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.profile-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  margin-bottom: 20px;
+}
+.profile-tab {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  color: #9495a0;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  font-family: inherit;
+  margin-bottom: -1px;
+}
+.profile-tab:hover { color: #6366f1; }
+.profile-tab.active {
+  color: #6366f1;
+  border-bottom-color: #6366f1;
+  font-weight: 600;
+}
 
 .auth-footer { margin-top: 20px; text-align: center; }
 

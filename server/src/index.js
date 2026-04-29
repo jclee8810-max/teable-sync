@@ -1,5 +1,7 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import { static as expressStatic } from 'express';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -21,6 +23,7 @@ const PORT = process.env.PORT || 3100;
 const syncScheduler = new Map(); // taskId -> { intervalId, syncMode, intervalSec }
 
 app.use(cors());
+app.use(expressStatic(join(__dirname, '..', '..', 'client', 'dist')));
 app.use(express.json({ limit: '50mb' }));
 
 // --- Config persistence (with write lock for concurrency safety) ---
@@ -76,6 +79,20 @@ const wsClients = new Set();
 
 wss.on('connection', (ws) => {
   wsClients.add(ws);
+  ws._userId = null;
+  ws._role = null;
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'auth' && msg.token) {
+        const user = validateToken(msg.token);
+        if (user) {
+          ws._userId = user.id;
+          ws._role = user.role;
+        }
+      }
+    } catch {}
+  });
   ws.on('close', () => wsClients.delete(ws));
 });
 
@@ -83,6 +100,14 @@ function broadcastLog(log) {
   const msg = JSON.stringify({ type: 'sync_log', data: log });
   wsClients.forEach((ws) => {
     if (ws.readyState === 1) ws.send(msg);
+  });
+}
+
+// broadcastLogUser: sends only to the WebSocket client authenticated as the given userId
+function broadcastLogUser(log, userId) {
+  const msg = JSON.stringify({ type: 'sync_log', data: { ...log, userId } });
+  wsClients.forEach((ws) => {
+    if (ws.readyState === 1 && ws._userId === userId) ws.send(msg);
   });
 }
 
@@ -94,9 +119,11 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/connections', (req, res) => {
   const config = loadConfig();
   const { role, id: userId } = req.user;
-  const visible = config.connections.filter(
-    (c) => role === 'super_admin' || c.ownerId === userId || c.shared === true
-  );
+  const includeDeleted = req.query.includeDeleted === 'true';
+  const visible = config.connections.filter((c) => {
+    if (!includeDeleted && c.deletedAt) return false;
+    return role === 'super_admin' || c.ownerId === userId || c.shared === true;
+  });
   res.json(visible);
 });
 
@@ -119,7 +146,7 @@ app.put('/api/connections/:id', (req, res) => {
   const idx = config.connections.findIndex((c) => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const conn = config.connections[idx];
-  // 非 super_admin 只能编辑自己的
+  if (conn.deletedAt) return res.status(400).json({ error: '该连接已删除，请先恢复' });
   if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此连接' });
   }
@@ -135,9 +162,43 @@ app.delete('/api/connections/:id', (req, res) => {
   if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权删除此连接' });
   }
-  config.connections = config.connections.filter((c) => c.id !== req.params.id);
+  // 软删除：标记 deletedAt，不物理删除
+  conn.deletedAt = new Date().toISOString();
   saveConfig(config);
   res.json({ ok: true });
+});
+
+// PUT /api/connections/:id/share — 切换共享状态（仅 owner 或 super_admin）
+app.put('/api/connections/:id/share', (req, res) => {
+  const config = loadConfig();
+  const idx = config.connections.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const conn = config.connections[idx];
+  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此连接' });
+  }
+  const { shared } = req.body;
+  if (typeof shared !== 'boolean') {
+    return res.status(400).json({ error: 'shared 必须是 boolean' });
+  }
+  config.connections[idx].shared = shared;
+  saveConfig(config);
+  res.json(config.connections[idx]);
+});
+
+// POST /api/connections/:id/restore — 恢复已删除的连接（仅 owner 或 super_admin）
+app.post('/api/connections/:id/restore', (req, res) => {
+  const config = loadConfig();
+  const idx = config.connections.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const conn = config.connections[idx];
+  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此连接' });
+  }
+  if (!conn.deletedAt) return res.status(400).json({ error: '该连接未被删除' });
+  delete config.connections[idx].deletedAt;
+  saveConfig(config);
+  res.json(config.connections[idx]);
 });
 
 // Test connection (supports both SQL databases and Teable)
@@ -285,9 +346,11 @@ app.post('/api/teable/test', async (req, res) => {
 app.get('/api/tasks', (req, res) => {
   const config = loadConfig();
   const { role, id: userId } = req.user;
-  const visible = role === 'super_admin'
-    ? config.syncTasks
-    : config.syncTasks.filter((t) => t.userId === userId);
+  const includeDeleted = req.query.includeDeleted === 'true';
+  const visible = config.syncTasks.filter((t) => {
+    if (!includeDeleted && t.deletedAt) return false;
+    return role === 'super_admin' || t.userId === userId;
+  });
   res.json(visible);
 });
 
@@ -312,6 +375,7 @@ app.put('/api/tasks/:id', (req, res) => {
   const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[idx];
+  if (task.deletedAt) return res.status(400).json({ error: '该任务已删除，请先恢复' });
   if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此任务' });
   }
@@ -331,9 +395,25 @@ app.delete('/api/tasks/:id', (req, res) => {
     clearInterval(syncScheduler.get(req.params.id).intervalId);
     syncScheduler.delete(req.params.id);
   }
-  config.syncTasks = config.syncTasks.filter((t) => t.id !== req.params.id);
+  // 软删除：标记 deletedAt，不物理删除
+  task.deletedAt = new Date().toISOString();
   saveConfig(config);
   res.json({ ok: true });
+});
+
+// POST /api/tasks/:id/restore — 恢复已删除的任务
+app.post('/api/tasks/:id/restore', (req, res) => {
+  const config = loadConfig();
+  const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const task = config.syncTasks[idx];
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
+  if (!task.deletedAt) return res.status(400).json({ error: '该任务未被删除' });
+  delete config.syncTasks[idx].deletedAt;
+  saveConfig(config);
+  res.json(config.syncTasks[idx]);
 });
 
 // Start auto-sync for a task (scheduled / realtime)
@@ -397,6 +477,10 @@ app.post('/api/tasks/:id/start', async (req, res) => {
         if (cfg2.syncLogs.length > 500) cfg2.syncLogs = cfg2.syncLogs.slice(-500);
         saveConfig(cfg2);
       };
+      const userId = task.userId;
+      const persistLogUser = (entry) => {
+        persistLog({ ...entry, userId });
+      };
 
       const c1 = loadConfig();
       const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
@@ -404,7 +488,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       c1.syncTasks[idx1].status = 'running';
       saveConfig(c1);
 
-      await runSync(t, srcConn, tgtConn, persistLog);
+      await runSync(t, srcConn, tgtConn, persistLogUser);
 
       const c2 = loadConfig();
       const idx2 = c2.syncTasks.findIndex((x) => x.id === task.id);
@@ -412,7 +496,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       c2.syncTasks[idx2].status = 'scheduled';
       c2.syncTasks[idx2].lastSyncAt = new Date().toISOString();
       saveConfig(c2);
-      broadcastLog({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() });
+      broadcastLogUser({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() }, userId);
     } catch (err) {
       const c3 = loadConfig();
       const idx3 = c3.syncTasks.findIndex((x) => x.id === task.id);
@@ -420,13 +504,13 @@ app.post('/api/tasks/:id/start', async (req, res) => {
         c3.syncTasks[idx3].status = 'scheduled'; // keep running on schedule even if one run fails
         saveConfig(c3);
       }
-      broadcastLog({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() });
+      broadcastLogUser({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() }, userId);
     }
   }, intervalSec * 1000);
 
   syncScheduler.set(task.id, { intervalId, syncMode: mode, intervalSec });
 
-  broadcastLog({ taskId: task.id, level: 'info', message: `已启动${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() });
+  broadcastLogUser({ taskId: task.id, level: 'info', message: `已启动${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
 
   // Run first sync immediately
   try {
@@ -442,12 +526,16 @@ app.post('/api/tasks/:id/start', async (req, res) => {
         if (cfg3.syncLogs.length > 500) cfg3.syncLogs = cfg3.syncLogs.slice(-500);
         saveConfig(cfg3);
       };
+      const userId = task.userId;
+      const persistLogUser = (entry) => {
+        persistLog({ ...entry, userId });
+      };
       const cInit = loadConfig();
       const idxInit = cInit.syncTasks.findIndex((x) => x.id === task.id);
       if (idxInit !== -1) {
         cInit.syncTasks[idxInit].status = 'running';
         saveConfig(cInit);
-        await runSync(task, srcConn, tgtConn, persistLog);
+        await runSync(task, srcConn, tgtConn, persistLogUser);
         const cDone = loadConfig();
         const idxDone = cDone.syncTasks.findIndex((x) => x.id === task.id);
         if (idxDone !== -1) {
@@ -458,7 +546,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       }
     }
   } catch (err) {
-    broadcastLog({ taskId: task.id, level: 'error', message: `首次同步失败: ${err.message}`, ts: new Date().toISOString() });
+    broadcastLogUser({ taskId: task.id, level: 'error', message: `首次同步失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
   }
 
   res.json({ started: true, syncMode: mode, intervalSec });
@@ -483,7 +571,7 @@ app.post('/api/tasks/:id/stop', (req, res) => {
   config.syncTasks[taskIdx].enabled = false;
   saveConfig(config);
 
-  broadcastLog({ taskId: req.params.id, level: 'info', message: '已停止自动同步', ts: new Date().toISOString() });
+  broadcastLogUser({ taskId: req.params.id, level: 'info', message: '已停止自动同步', ts: new Date().toISOString() }, task.userId);
   res.json({ stopped: true });
 });
 
@@ -514,13 +602,12 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
   // Run async — persist logs and update task status
   try {
-    const { runSync } = await import('./services/syncEngine.js');
-
-    const persistLog = (entry) => {
-      broadcastLog(entry);
-      // Persist to config
+    const userId = task.userId;
+    const persistLogUser = (entry) => {
+      const enhanced = { ...entry, userId };
+      broadcastLogUser(enhanced, userId);
       const cfg = loadConfig();
-      cfg.syncLogs.push(entry);
+      cfg.syncLogs.push(enhanced);
       if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
       saveConfig(cfg);
     };
@@ -530,7 +617,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     cfg0.syncTasks[taskIdx].status = 'running';
     saveConfig(cfg0);
 
-    await runSync(task, srcConn, tgtConn, persistLog);
+    await runSync(task, srcConn, tgtConn, persistLogUser);
 
     // Mark done
     const cfg1 = loadConfig();
@@ -538,8 +625,8 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     cfg1.syncTasks[taskIdx].lastSyncAt = new Date().toISOString();
     saveConfig(cfg1);
   } catch (err) {
-    const entry = { taskId: task.id, level: 'error', message: err.message, ts: new Date().toISOString() };
-    broadcastLog(entry);
+    const entry = { taskId: task.id, level: 'error', message: err.message, ts: new Date().toISOString(), userId: task.userId };
+    broadcastLogUser(entry, task.userId);
     const cfg = loadConfig();
     cfg.syncLogs.push(entry);
     cfg.syncTasks[taskIdx].status = syncScheduler.has(task.id) ? 'scheduled' : 'error';
@@ -551,8 +638,13 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 // P2-1: Support level filter ?level=info|warn|error
 app.get('/api/logs', (req, res) => {
   const config = loadConfig();
+  const { role, id: userId } = req.user;
   const level = req.query.level;
-  const logs = level ? config.syncLogs.filter(l => l.level === level) : config.syncLogs;
+  // Super admin sees all logs; regular users only see their own task logs
+  const filtered = role === 'super_admin'
+    ? config.syncLogs
+    : config.syncLogs.filter((l) => !l.userId || l.userId === userId);
+  const logs = level ? filtered.filter((l) => l.level === level) : filtered;
   res.json(logs.slice(-100));
 });
 

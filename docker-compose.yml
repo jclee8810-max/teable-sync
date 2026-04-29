@@ -6,10 +6,13 @@ services:
   teable-sync:
     build: .
     ports:
-      - "3100:3100"   # 后端 API
-      - "5173:5173"   # 前端 UI
+      - "3101:3101"   # 后端 API + 前端静态 + WebSocket
     environment:
       - NODE_ENV=production
+      - PORT=3101
+      - SERVER_PUBLIC_URL=http://192.168.10.2:3101
+      - TEABLE_OAUTH_HOST=http://192.168.10.2:3000
+      - FRONTEND_BASE_URL=http://192.168.10.2:3101
     volumes:
       - teable-sync-data:/app/server/data
     depends_on:
@@ -18,13 +21,13 @@ services:
 
   # SQL Server（测试用，可选）
   sqlserver:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/azure-sql-edge:latest
     environment:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=QClaw2026!Strong
       - TZ=Asia/Shanghai
     ports:
-      - "1433:1433"
+      - "1434:1433"   # SQL Server
     volumes:
       - sqlserver-data:/var/opt/mssql
     restart: unless-stopped
