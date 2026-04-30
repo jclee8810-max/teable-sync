@@ -1,15 +1,23 @@
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'teable-sync-secret-key-change-in-production';
-const JWT_EXPIRES_IN = '24h';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.warn('[Auth] ⚠️ JWT_SECRET not set! Using insecure fallback for development only.');
+  console.warn('[Auth] In production, set JWT_SECRET environment variable.');
+}
+const _jwtSecret = JWT_SECRET || 'teable-sync-dev-only-secret-CHANGE-ME';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
-export function signToken(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+function signToken(payload) {
+  if (!_jwtSecret.includes('CHANGE-ME') && !JWT_SECRET) {
+    // Still warn but allow dev mode
+  }
+  return jwt.sign(payload, _jwtSecret, { expiresIn: JWT_EXPIRES_IN });
 }
 
 export function verifyToken(token) {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, _jwtSecret);
   } catch {
     return null;
   }

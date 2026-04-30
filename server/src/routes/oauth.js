@@ -70,7 +70,7 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   // Build redirect URI — use dynamic host from request (supports any port)
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   const host = req.headers.host;
-  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
+  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5173';
   const serverPublicUrl = `${proto}://${host}`;
   const redirectUri = `${serverPublicUrl}/api/oauth/teable/callback`;
 
@@ -106,7 +106,7 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
 // Called by browser after user authorizes in Teable
 // Teable redirects here with ?code=xxx&state=yyy
 router.get('/teable/callback', async (req, res) => {
-  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5174';
+  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5173';
   const { code, state, error, error_description } = req.query;
 
   // Handle error from Teable (user denied, etc.)
@@ -309,7 +309,7 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
       body: JSON.stringify({
         name: appName,
         redirectUri: redirectUri || `${req.protocol}://${req.headers.host}/api/oauth/teable/callback`,
-        homepage: `${process.env.FRONTEND_BASE_URL || 'http://localhost:5174'}`,
+        homepage: `${process.env.FRONTEND_BASE_URL || 'http://localhost:5173'}`,
       }),
     });
 

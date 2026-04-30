@@ -110,7 +110,7 @@ cd server && npm start
 
 ```bash
 # 克隆项目
-git clone https://github.com/jclee8810-max/teable-sync.git
+git clone https://github.com/jclee8810/teable-sync.git
 cd teable-sync
 
 # 启动全部服务（TeableSync + SQL Server）

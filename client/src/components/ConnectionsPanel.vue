@@ -34,11 +34,11 @@
                 <el-dropdown-item @click="testConn(conn.id)">
                   <el-icon><VideoPlay /></el-icon>测试连接
                 </el-dropdown-item>
-                <el-dropdown-item @click="openDialog(conn)">
-                  <el-icon><Edit /></el-icon>编辑
+                <el-dropdown-item @click="openDialog(conn)" :disabled="!isOwner(conn)">
+                  <el-icon><Edit /></el-icon>编辑{{ !isOwner(conn) ? '（无权限）' : '' }}
                 </el-dropdown-item>
-                <el-dropdown-item @click="removeConn(conn.id)" divided>
-                  <span style="color:var(--red)"><el-icon><Delete /></el-icon>删除</span>
+                <el-dropdown-item @click="removeConn(conn.id)" :disabled="!isOwner(conn)" divided>
+                  <span style="color:var(--red)"><el-icon><Delete /></el-icon>删除{{ !isOwner(conn) ? '（无权限）' : '' }}</span>
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -46,7 +46,9 @@
         </div>
 
         <div class="conn-card-body">
-          <div class="conn-name">{{ conn.name }}</div>
+          <div class="conn-name">{{ conn.name }}
+            <span v-if="conn.ownerId && conn.ownerId !== currentUserId" class="conn-owner-tag" title="创建者">👤 {{ conn.ownerId.slice(0,8) }}…</span>
+          </div>
           <div class="conn-type-label">{{ typeLabel(conn.type) }}</div>
           <div class="conn-endpoint">
             <span class="endpoint-icon">⬡</span>
@@ -207,8 +209,8 @@
       </el-form>
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="dialogVisible = false">取消</button>
-        <button class="fs-btn fs-btn-primary" @click="saveConn" :disabled="saving">
-          保存
+        <button class="fs-btn fs-btn-primary" @click="saveConn" :disabled="saving || (editingId && !isOwner(connById(editingId)))">
+          保存{{ (editingId && !isOwner(connById(editingId))) ? '（无权限）' : '' }}
         </button>
       </template>
     </el-dialog>
@@ -563,6 +565,18 @@ onMounted(loadConnections)
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conn-owner-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  background: var(--bg-secondary);
+  padding: 1px 6px;
+  border-radius: 10px;
 }
 
 .conn-type-label {

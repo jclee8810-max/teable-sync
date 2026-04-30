@@ -12,11 +12,14 @@ dist-ssr/
 .env
 .env.local
 .env.*.local
+.env.example
 
 # Data & logs
 server/data/config.json
+server/data/users.json
 server/data/*.db
 server/data/logs/
+server/data/sync-state/
 data/
 *.log
 
@@ -29,3 +32,6 @@ data/
 
 # OS
 Thumbs.db
+
+# Debug scripts (do not commit)
+test-autofield.mjs

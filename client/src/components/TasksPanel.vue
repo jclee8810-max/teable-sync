@@ -34,10 +34,10 @@
             <button v-if="task.syncMode && (task.syncMode === 'scheduled' || task.syncMode === 'realtime')" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" style="padding:8px 16px;font-size:13px">
               {{ schedulerStatus[task.id] ? '停止' : '启动' }}
             </button>
-            <button class="icon-btn" @click="openDialog(task)" title="编辑">
+            <button class="icon-btn" @click="openDialog(task)" :disabled="!isOwner(task)" :title="isOwner(task) ? '编辑' : '无权限编辑'">
               <el-icon :size="16"><Edit /></el-icon>
             </button>
-            <button class="icon-btn icon-btn-danger" @click="removeTask(task.id)" title="删除">
+            <button class="icon-btn icon-btn-danger" @click="removeTask(task.id)" :disabled="!isOwner(task)" :title="isOwner(task) ? '删除' : '无权限删除'">
               <el-icon :size="16"><Delete /></el-icon>
             </button>
           </div>
@@ -256,8 +256,8 @@
       </el-form>
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="dialogVisible = false">取消</button>
-        <button class="fs-btn fs-btn-primary" @click="saveTask" :disabled="saving">
-          保存
+        <button class="fs-btn fs-btn-primary" @click="saveTask" :disabled="saving || (editingId && !isOwner(tasks.find(t => t.id === editingId)))">
+          保存{{ (editingId && !isOwner(tasks.find(t => t.id === editingId))) ? '（无权限）' : '' }}
         </button>
       </template>
     </el-dialog>
@@ -269,6 +269,15 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getTeableBases, getTeableTables, getTeableFields } from '../api'
 import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, getSchedulerStatus } from '../api'
+
+// 当前用户身份
+const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
+const currentUserId = currentUser?.id || null
+const isSuperAdmin = currentUser?.role === 'super_admin'
+
+function isOwner(task) {
+  return task && (task.userId === currentUserId || isSuperAdmin)
+}
 
 const connections = ref([])
 const tasks = ref([])
@@ -517,10 +526,12 @@ async function manualRun(task) {
   task._running = true
   try {
     await runTask(task.id)
-    ElMessage.success('同步已启动')
-    setTimeout(loadAll, 3000)
+    // 后端立即返回 {started:true} 再异步执行，等待同步完成再显示结果
+    ElMessage.info('正在同步，请稍候…')
+    setTimeout(loadAll, 8000)  // 给足时间等后台同步真正完成
   } catch (err) {
     ElMessage.error('启动失败: ' + err.message)
+    setTimeout(loadAll, 1000)
   } finally {
     task._running = false
   }
