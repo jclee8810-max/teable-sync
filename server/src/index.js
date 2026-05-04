@@ -2,13 +2,14 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { static as expressStatic } from 'express';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import authRouter from './routes/auth.js';
 import oauthRouter from './routes/oauth.js';
-import { authMiddleware } from './middleware/auth.js';
+import { authMiddleware, verifyToken } from './middleware/auth.js';
+import { canReadConnection, validateTaskConnections } from './services/accessControl.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -40,11 +41,28 @@ function loadConfig() {
 
 function saveConfig(config) {
   _writeLock = _writeLock.then(() => {
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+    const tmpFile = `${CONFIG_FILE}.tmp`;
+    writeFileSync(tmpFile, JSON.stringify(config, null, 2), 'utf-8');
+    renameSync(tmpFile, CONFIG_FILE);
   }).catch(err => {
     console.error('❌ Config write error:', err.message);
   });
   return _writeLock;
+}
+
+function quoteSqlIdentifier(type, name) {
+  if (!/^[a-zA-Z0-9_.]+$/.test(name)) {
+    throw new Error(`非法标识符: ${name}`);
+  }
+  const parts = name.split('.');
+  if (type === 'mssql') return parts.map((p) => `[${p.replace(/]/g, ']]')}]`).join('.');
+  if (type === 'mysql') return parts.map((p) => `\`${p.replace(/`/g, '``')}\``).join('.');
+  if (type === 'pg') return parts.map((p) => `"${p.replace(/"/g, '""')}"`).join('.');
+  throw new Error(`Unsupported database type: ${type}`);
+}
+
+function sqlPlaceholder(type, index) {
+  return type === 'pg' ? `$${index + 1}` : '?';
 }
 
 // --- Auth routes (public) ---
@@ -85,13 +103,17 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(data);
       if (msg.type === 'auth' && msg.token) {
-        const user = validateToken(msg.token);
+        const user = verifyToken(msg.token);
         if (user) {
           ws._userId = user.id;
           ws._role = user.role;
+        } else {
+          ws.close(1008, 'Invalid token');
         }
       }
-    } catch {}
+    } catch {
+      ws.close(1008, 'Invalid message');
+    }
   });
   ws.on('close', () => wsClients.delete(ws));
 });
@@ -206,6 +228,7 @@ app.post('/api/connections/:id/test', async (req, res) => {
   const config = loadConfig();
   const conn = config.connections.find((c) => c.id === req.params.id);
   if (!conn) return res.status(404).json({ error: 'Not found' });
+  if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
 
   try {
     if (conn.type === 'teable') {
@@ -222,11 +245,12 @@ app.post('/api/connections/:id/test', async (req, res) => {
   }
 });
 
-// Fetch tables from a SQL connection
+// Fetch tables from a SQL connection (with watermark candidates)
 app.get('/api/connections/:id/tables', async (req, res) => {
   const config = loadConfig();
   const conn = config.connections.find((c) => c.id === req.params.id);
   if (!conn) return res.status(404).json({ error: 'Not found' });
+  if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
 
   try {
     const { getTables, getTableSchema } = await import('./services/dbService.js');
@@ -247,6 +271,61 @@ app.get('/api/connections/:id/tables', async (req, res) => {
   }
 });
 
+// Smart field mapping suggestions
+app.get('/api/mapping-suggestions', async (req, res) => {
+  const config = loadConfig();
+  const { sourceConnectionId, sourceTable, targetTableId, sourceDatabase } = req.query;
+  if (!sourceConnectionId || !sourceTable || !targetTableId) {
+    return res.status(400).json({ error: 'sourceConnectionId, sourceTable, targetTableId required' });
+  }
+
+  const srcConn = config.connections.find((c) => c.id === sourceConnectionId);
+  const tgtConn = config.connections.find((c) => c.id === targetTableId ? c : c.id === (req.query.targetConnectionId));
+  // targetConnectionId is for the Teable connection, targetTableId is the table
+  const tgtConn2 = config.connections.find((c) => c.id === req.query.targetConnectionId);
+  if (!srcConn) return res.status(404).json({ error: 'Source connection not found' });
+  if (!tgtConn2) return res.status(404).json({ error: 'Target connection not found' });
+  if (!canReadConnection(req.user, srcConn)) return res.status(403).json({ error: '无权访问源连接' });
+  if (!canReadConnection(req.user, tgtConn2)) return res.status(403).json({ error: '无权访问目标连接' });
+
+  try {
+    const { getTableSchema } = await import('./services/dbService.js');
+    const { getTeableFields } = await import('./services/teableService.js');
+    const { suggestMappings } = await import('./services/mappingSuggester.js');
+
+    const sourceColumns = await getTableSchema(srcConn, sourceTable, sourceDatabase || null);
+    const targetFields = await getTeableFields(tgtConn2, targetTableId);
+
+    // Normalize Teable field types for compatibility checking
+    // Teable uses: singleLineText, longText, number, date, checkbox, attachment, singleSelect, etc.
+    const normalizedTargetFields = targetFields.map(f => ({ name: f.name, type: f.type }));
+
+    const result = suggestMappings(sourceColumns, normalizedTargetFields);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Detect watermark candidates for a source table
+app.get('/api/connections/:id/watermark-candidates', async (req, res) => {
+  const config = loadConfig();
+  const conn = config.connections.find((c) => c.id === req.params.id);
+  if (!conn) return res.status(404).json({ error: 'Not found' });
+  if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
+
+  const { table, database } = req.query;
+  if (!table) return res.status(400).json({ error: 'table query param required' });
+
+  try {
+    const { detectWatermarkCandidates } = await import('./services/syncEngine.js');
+    const result = await detectWatermarkCandidates(conn, table, database || null);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Teable: list spaces
 app.get('/api/teable/spaces', async (req, res) => {
   try {
@@ -256,6 +335,7 @@ app.get('/api/teable/spaces', async (req, res) => {
       ? config.connections.find((c) => c.id === req.query.connectionId)
       : config.connections.find((c) => c.type === 'teable');
     if (!conn) return res.status(400).json({ error: 'No Teable connection found' });
+    if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
     const spaces = await getTeableSpaces(conn);
     res.json(spaces);
   } catch (err) {
@@ -272,6 +352,7 @@ app.get('/api/teable/bases', async (req, res) => {
       ? config.connections.find((c) => c.id === req.query.connectionId)
       : config.connections.find((c) => c.type === 'teable');
     if (!conn) return res.status(400).json({ error: 'No Teable connection found' });
+    if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
 
     let bases;
     if (req.query.spaceId) {
@@ -305,6 +386,7 @@ app.get('/api/teable/bases/:baseId/tables', async (req, res) => {
       ? config.connections.find((c) => c.id === req.query.connectionId)
       : config.connections.find((c) => c.type === 'teable');
     if (!conn) return res.status(400).json({ error: 'No Teable connection found' });
+    if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
     const tables = await getTeableTables(conn, req.params.baseId);
     res.json(tables);
   } catch (err) {
@@ -321,6 +403,7 @@ app.get('/api/teable/tables/:tableId/fields', async (req, res) => {
       ? config.connections.find((c) => c.id === req.query.connectionId)
       : config.connections.find((c) => c.type === 'teable');
     if (!conn) return res.status(400).json({ error: 'No Teable connection found' });
+    if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
     const fields = await getTeableFields(conn, req.params.tableId);
     res.json(fields);
   } catch (err) {
@@ -356,6 +439,8 @@ app.get('/api/tasks', (req, res) => {
 
 app.post('/api/tasks', (req, res) => {
   const config = loadConfig();
+  const validation = validateTaskConnections(config, req.user, req.body);
+  if (validation.error) return res.status(400).json({ error: validation.error });
   const task = {
     id: crypto.randomUUID(),
     enabled: false,
@@ -379,7 +464,10 @@ app.put('/api/tasks/:id', (req, res) => {
   if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此任务' });
   }
-  config.syncTasks[idx] = { ...task, ...req.body, id: task.id, userId: task.userId };
+  const nextTask = { ...task, ...req.body, id: task.id, userId: task.userId };
+  const validation = validateTaskConnections(config, req.user, nextTask);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  config.syncTasks[idx] = nextTask;
   saveConfig(config);
   res.json(config.syncTasks[idx]);
 });
@@ -416,6 +504,81 @@ app.post('/api/tasks/:id/restore', (req, res) => {
   res.json(config.syncTasks[idx]);
 });
 
+// Preview source data before sync
+app.get('/api/tasks/:id/preview', async (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  
+  const limit = Math.min(parseInt(req.query.limit) || 10, 100); // max 100 rows
+  
+  try {
+    const { getTableSchema, query } = await import('./services/dbService.js');
+    
+    // Find source connection
+    const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
+    if (!srcConn) return res.status(400).json({ error: '源连接不存在' });
+    const validation = validateTaskConnections(config, req.user, task);
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    
+    // Normalize db name
+    const db = task.sourceDatabase || null;
+    
+    // Get table schema
+    const columns = await getTableSchema(srcConn, task.sourceTable, db);
+    
+    // Build SELECT query with LIMIT
+    const tableName = quoteSqlIdentifier(srcConn.type, task.sourceTable);
+    const colNames = columns.map(c => quoteSqlIdentifier(srcConn.type, c.name)).join(', ');
+    let querySql;
+    let params = [];
+    
+    if (srcConn.type === 'mssql') {
+      const fullTableName = db
+        ? `${quoteSqlIdentifier(srcConn.type, db)}.dbo.${tableName}`
+        : tableName;
+      querySql = `SELECT TOP (${sqlPlaceholder(srcConn.type, 0)}) ${colNames} FROM ${fullTableName}`;
+      params = [limit];
+    } else if (srcConn.type === 'mysql') {
+      const fullTableName = db
+        ? `${quoteSqlIdentifier(srcConn.type, db)}.${tableName}`
+        : tableName;
+      querySql = `SELECT ${colNames} FROM ${fullTableName} LIMIT ${sqlPlaceholder(srcConn.type, 0)}`;
+      params = [limit];
+    } else if (srcConn.type === 'pg') {
+      querySql = `SELECT ${colNames} FROM ${tableName} LIMIT ${sqlPlaceholder(srcConn.type, 0)}`;
+      params = [limit];
+    } else {
+      return res.status(400).json({ error: '不支持的数据库类型' });
+    }
+    
+    const rows = await query(srcConn, querySql, params, db);
+    
+    // Normalize values for JSON safety (Date→ISO, Buffer→null)
+    const safeRows = rows.map(row => {
+      const safe = {};
+      for (const [key, val] of Object.entries(row)) {
+        if (val instanceof Date) safe[key] = val.toISOString();
+        else if (Buffer.isBuffer(val)) safe[key] = null;
+        else safe[key] = val;
+      }
+      return safe;
+    });
+    
+    res.json({
+      columns: columns.map(c => ({ name: c.name, type: c.type })),
+      rows: safeRows,
+      totalPreviewed: safeRows.length,
+      limit,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Start auto-sync for a task (scheduled / realtime)
 app.post('/api/tasks/:id/start', async (req, res) => {
   const config = loadConfig();
@@ -435,6 +598,8 @@ app.post('/api/tasks/:id/start', async (req, res) => {
   if (missingFields.length > 0) {
     return res.status(400).json({ error: `缺少必要字段: ${missingFields.join(', ')}` });
   }
+  const startValidation = validateTaskConnections(config, req.user, task);
+  if (startValidation.error) return res.status(400).json({ error: startValidation.error });
 
   // Stop existing timer if any
   if (syncScheduler.has(task.id)) {
@@ -467,7 +632,8 @@ app.post('/api/tasks/:id/start', async (req, res) => {
     try {
       const srcConn = c.connections.find((cn) => cn.id === (t.sourceConnectionId || t.sourceId));
       const tgtConn = c.connections.find((cn) => cn.id === (t.targetConnectionId || t.targetId));
-      if (!srcConn || !tgtConn) return;
+      const runValidation = validateTaskConnections(c, { id: t.userId, role: 'user' }, t);
+      if (runValidation.error || !srcConn || !tgtConn) return;
 
       const { runSync } = await import('./services/syncEngine.js');
       const persistLog = (entry) => {
@@ -517,7 +683,8 @@ app.post('/api/tasks/:id/start', async (req, res) => {
     const c0 = loadConfig();
     const srcConn = c0.connections.find((cn) => cn.id === (task.sourceConnectionId || task.sourceId));
     const tgtConn = c0.connections.find((cn) => cn.id === (task.targetConnectionId || task.targetId));
-    if (srcConn && tgtConn) {
+    const initValidation = validateTaskConnections(c0, req.user, task);
+    if (srcConn && tgtConn && !initValidation.error) {
       const { runSync } = await import('./services/syncEngine.js');
       const persistLog = (entry) => {
         broadcastLog(entry);
@@ -596,12 +763,15 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
   const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
   const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+  const validation = validateTaskConnections(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
 
   res.json({ started: true });
 
   // Run async — persist logs and update task status
   try {
+    const { runSync } = await import('./services/syncEngine.js');
     const userId = task.userId;
     const persistLogUser = (entry) => {
       const enhanced = { ...entry, userId };
@@ -653,6 +823,44 @@ app.delete('/api/logs', (req, res) => {
   config.syncLogs = [];
   saveConfig(config);
   res.json({ ok: true });
+});
+
+// --- Sync History API ---
+import { getSyncHistory, getSyncHistoryRecord } from './services/syncHistory.js';
+
+app.get('/api/sync-history', (req, res) => {
+  const { role, id: userId } = req.user;
+  const taskId = req.query.taskId;
+  const limit = parseInt(req.query.limit) || 50;
+  // Regular users only see their own task history
+  let history;
+  if (role === 'super_admin') {
+    history = getSyncHistory(taskId, limit);
+  } else {
+    // Filter by userId - only show tasks created by this user
+    const config = loadConfig();
+    const userTaskIds = config.syncTasks.filter(t => t.userId === userId).map(t => t.id);
+    history = getSyncHistory(null, limit).filter(h => userTaskIds.includes(h.taskId));
+    if (taskId) {
+      history = history.filter(h => h.taskId === taskId);
+    }
+  }
+  res.json(history);
+});
+
+app.get('/api/sync-history/:id', (req, res) => {
+  const record = getSyncHistoryRecord(req.params.id);
+  if (!record) {
+    return res.status(404).json({ error: '记录不存在' });
+  }
+  // Check access
+  const { role, id: userId } = req.user;
+  const config = loadConfig();
+  const task = config.syncTasks.find(t => t.id === record.taskId);
+  if (role !== 'super_admin' && task?.userId !== userId) {
+    return res.status(403).json({ error: '无权访问' });
+  }
+  res.json(record);
 });
 
 // --- Global error handling ---

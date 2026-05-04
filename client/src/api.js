@@ -49,6 +49,8 @@ export const updateConnection = (id, data) => api.put(`/connections/${id}`, data
 export const deleteConnection = (id) => api.delete(`/connections/${id}`).then(r => r.data)
 export const testConnection = (id) => api.post(`/connections/${id}/test`).then(r => r.data)
 export const getTables = (id, database) => api.get(`/connections/${id}/tables`, { params: database ? { database } : {} }).then(r => r.data)
+export const getWatermarkCandidates = (id, table, database) => api.get(`/connections/${id}/watermark-candidates`, { params: { table, ...(database ? { database } : {}) } }).then(r => r.data)
+export const getMappingSuggestions = (sourceConnectionId, sourceTable, targetTableId, targetConnectionId, sourceDatabase) => api.get('/mapping-suggestions', { params: { sourceConnectionId, sourceTable, targetTableId, targetConnectionId, ...(sourceDatabase ? { sourceDatabase } : {}) } }).then(r => r.data)
 
 // Teable
 export const testTeable = (data) => api.post('/teable/test', data).then(r => r.data)
@@ -59,6 +61,7 @@ export const getTeableFields = (tableId, connectionId) => api.get(`/teable/table
 
 // Tasks
 export const getTasks = () => api.get('/tasks').then(r => r.data)
+export const previewTaskData = (id, limit = 10) => api.get(`/tasks/${id}/preview`, { params: { limit } }).then(r => r.data)
 export const createTask = (data) => api.post('/tasks', data).then(r => r.data)
 export const updateTask = (id, data) => api.put(`/tasks/${id}`, data).then(r => r.data)
 export const deleteTask = (id) => api.delete(`/tasks/${id}`).then(r => r.data)

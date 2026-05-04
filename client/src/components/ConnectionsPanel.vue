@@ -220,7 +220,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getConnections, createConnection, updateConnection, deleteConnection, testConnection, testTeable } from '../api'
+import { getConnections, createConnection, updateConnection, deleteConnection, testConnection, testTeable, getToken } from '../api'
 
 const connections = ref([])
 const dialogVisible = ref(false)
@@ -328,7 +328,7 @@ async function startOAuthFlow() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${localStorage.getItem('token')}`,
+        Authorization: `Bearer ${getToken()}`,
       },
       body: JSON.stringify({
         connectionId: connId,
@@ -363,7 +363,7 @@ async function createOAuthApp() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${localStorage.getItem('token')}`,
+        Authorization: `Bearer ${getToken()}`,
       },
       body: JSON.stringify({
         teableHost: form.value.host,
@@ -389,7 +389,7 @@ async function createOAuthApp() {
 async function checkOAuthStatus(connId) {
   try {
     const res = await fetch(`/api/oauth/teable/status/${connId}`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      headers: { Authorization: `Bearer ${getToken()}` },
     })
     if (res.ok) {
       const data = await res.json()

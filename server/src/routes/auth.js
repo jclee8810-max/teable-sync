@@ -1,7 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { signToken, authMiddleware } from '../middleware/auth.js';
@@ -20,7 +20,9 @@ function loadUsers() {
 }
 
 function saveUsers(users) {
-  writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
+  const tmpFile = `${USERS_FILE}.tmp`;
+  writeFileSync(tmpFile, JSON.stringify(users, null, 2), 'utf-8');
+  renameSync(tmpFile, USERS_FILE);
 }
 
 // GET /api/auth/me

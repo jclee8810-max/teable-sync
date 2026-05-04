@@ -30,6 +30,9 @@
               <el-icon v-else class="is-loading"><Loading /></el-icon>
               {{ (task._running || task.status === 'running') ? '同步中...' : '同步' }}
             </button>
+            <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
+              <el-icon><View /></el-icon>预览
+            </button>
             <!-- 仅定时/实时模式显示启停按钮 -->
             <button v-if="task.syncMode && (task.syncMode === 'scheduled' || task.syncMode === 'realtime')" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" style="padding:8px 16px;font-size:13px">
               {{ schedulerStatus[task.id] ? '停止' : '启动' }}
@@ -44,7 +47,7 @@
         </div>
 
         <div class="task-card-detail">
-          <div class="detail-grid">
+          <div class="detail-grid" style="grid-template-columns: repeat(5, 1fr)">
             <div class="detail-item">
               <span class="detail-label">源表</span>
               <span class="detail-value mono">{{ task.sourceTable }}</span>
@@ -60,6 +63,12 @@
               <span class="detail-label">冲突策略</span>
               <span class="detail-value">
                 <span class="strategy-badge" :class="task.conflictStrategy">{{ conflictLabel(task.conflictStrategy) }}</span>
+              </span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">增量策略</span>
+              <span class="detail-value">
+                <span class="watermark-badge" :class="task.watermarkType || 'auto'">{{ watermarkLabel(task.watermarkType) }}</span>
               </span>
             </div>
             <div class="detail-item">
@@ -142,30 +151,45 @@
         <!-- Field Mapping -->
         <div class="section-divider">
           <span class="section-icon">⟐</span> 字段映射
+          <el-tag v-if="mappingLoading" size="small" type="info" style="margin-left:8px">智能匹配中...</el-tag>
+          <el-tag v-if="mappingSuggestions && !mappingLoading" size="small" :type="mappingSuggestions.mappings.length > 0 ? 'success' : 'info'" style="margin-left:8px">
+            {{ mappingSuggestions.mappings.length }} 个已匹配{{ mappingSuggestions.unmatchedSource.length > 0 ? ` + ${mappingSuggestions.unmatchedSource.length} 待创建` : '' }}
+          </el-tag>
         </div>
         <div v-if="sourceColumns.length > 0 && targetFields.length > 0" class="mapping-area">
           <el-alert type="info" :closable="false" style="margin-bottom:12px">
-            自动匹配同名字段，可手动调整。未匹配的源字段将被忽略。
+            智能匹配支持同名、驼峰转换（user_name↔userName）、模糊匹配。类型兼容性自动检测。
           </el-alert>
-          <el-table :data="mappingRows" size="small" border>
-            <el-table-column label="源字段 (SQL)" min-width="160">
+          <el-table :data="mappingRows" size="small" border row-key="source">
+            <el-table-column label="源字段 (SQL)" min-width="180">
               <template #default="{ row }">
                 <el-select v-model="row.source" placeholder="选择源字段" style="width:100%" filterable>
                   <el-option v-for="c in sourceColumns" :key="c.name" :label="`${c.name} (${c.type})`" :value="c.name" />
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column width="50" align="center">
-              <template #default><span class="flow-arrow-inline">→</span></template>
+            <el-table-column width="60" align="center">
+              <template #default="{ row }">
+                <span :class="confidenceClass(row)">{{ confidenceIcon(row) }}</span>
+              </template>
             </el-table-column>
-            <el-table-column label="目标字段 (Teable)" min-width="160">
+            <el-table-column label="目标字段 (Teable)" min-width="180">
               <template #default="{ row }">
                 <el-select v-model="row.target" placeholder="选择目标字段" style="width:100%" filterable>
                   <el-option v-for="f in targetFields" :key="f.name" :label="`${f.name} (${f.type})`" :value="f.name" />
+                  <!-- For auto-create: add the source name as option -->
+                  <el-option v-if="!targetFields.find(f => f.name === row.source)" :key="'create-'+row.source" :label="`${row.source} (自动创建)`" :value="row.source" />
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column width="60" align="center">
+            <el-table-column width="90" align="center" label="兼容性">
+              <template #default="{ row }">
+                <span v-if="row._typeSafe === undefined" class="compat-tag compat-unknown">—</span>
+                <span v-else-if="row._typeSafe" class="compat-tag compat-safe">✓ 兼容</span>
+                <span v-else class="compat-tag compat-warn" :title="row._typeWarning">⚠ {{ row._typeWarning ? row._typeWarning.slice(0, 8) : '不兼容' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column width="50" align="center">
               <template #default="{ $index }">
                 <button class="icon-btn icon-btn-danger" @click="removeMapping($index)">
                   <el-icon :size="14"><Delete /></el-icon>
@@ -177,8 +201,8 @@
             <button type="button" class="fs-btn fs-btn-ghost" @click="addMapping" style="padding:6px 14px;font-size:12px">
               <el-icon><Plus /></el-icon>添加映射
             </button>
-            <button type="button" class="fs-btn fs-btn-ghost" @click="autoMap" style="padding:6px 14px;font-size:12px;border-color:var(--green);color:var(--green)">
-              <el-icon><MagicStick /></el-icon>自动匹配
+            <button type="button" class="fs-btn fs-btn-ghost" @click="smartMap" :disabled="mappingLoading" style="padding:6px 14px;font-size:12px;border-color:var(--green);color:var(--green)">
+              <el-icon><MagicStick /></el-icon>{{ mappingLoading ? '匹配中...' : '智能匹配' }}
             </button>
           </div>
         </div>
@@ -222,37 +246,66 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="4" v-if="form.syncMode === 'manual'">
-            <el-form-item label="主键列">
-              <el-input v-model="form.sourcePrimaryKey" placeholder="自动检测" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="4" v-if="form.syncMode === 'manual'">
-            <el-form-item label="时间戳列">
-              <el-select v-model="form.sourceTimestampColumn" placeholder="自动检测" clearable style="width:100%" :disabled="datetimeColumns.length === 0">
-                <el-option v-if="datetimeColumns.length > 0" label="— 自动检测 —" value="" />
-                <el-option v-for="col in datetimeColumns" :key="col" :label="col" :value="col" />
-                <el-option v-if="datetimeColumns.length === 0" label="无 datetime 列" value="" disabled />
+        </el-row>
+
+        <!-- Watermark Strategy -->
+        <div class="section-divider">
+          <span class="section-icon">⇌</span> 增量策略
+          <el-tag v-if="watermarkLoading" size="small" type="info" style="margin-left:8px">检测中...</el-tag>
+        </div>
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="增量策略">
+              <el-select v-model="form.watermarkType" style="width:100%" placeholder="自动检测">
+                <el-option
+                  v-for="wt in availableWatermarkTypes"
+                  :key="wt.value"
+                  :label="wt.label"
+                  :value="wt.value"
+                >
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span>{{ wt.label }}</span>
+                    <span style="color:var(--text-tertiary);font-size:11px">{{ wt.desc }}</span>
+                  </div>
+                </el-option>
               </el-select>
             </el-form-item>
           </el-col>
-        </el-row>
-        <el-row :gutter="12" v-if="form.syncMode !== 'manual'">
-          <el-col :span="6">
-            <el-form-item label="主键列">
-              <el-input v-model="form.sourcePrimaryKey" placeholder="自动检测" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="6">
-            <el-form-item label="时间戳列">
-              <el-select v-model="form.sourceTimestampColumn" placeholder="自动检测" clearable style="width:100%" :disabled="datetimeColumns.length === 0">
-                <el-option v-if="datetimeColumns.length > 0" label="— 自动检测 —" value="" />
-                <el-option v-for="col in datetimeColumns" :key="col" :label="col" :value="col" />
-                <el-option v-if="datetimeColumns.length === 0" label="无 datetime 列" value="" disabled />
+          <el-col :span="8">
+            <el-form-item label="增量列">
+              <el-select
+                v-model="form.watermarkColumn"
+                placeholder="自动选择"
+                clearable
+                style="width:100%"
+                :disabled="!form.watermarkType || form.watermarkType === 'full_scan' || watermarkColumnOptions.length === 0"
+              >
+                <el-option v-for="col in watermarkColumnOptions" :key="col" :label="col" :value="col" />
               </el-select>
             </el-form-item>
           </el-col>
+          <el-col :span="8">
+            <el-form-item label="主键列">
+              <el-input v-model="form.sourcePrimaryKey" :placeholder="watermarkCandidates.pkCol || '自动检测'" />
+            </el-form-item>
+          </el-col>
         </el-row>
+        <el-alert
+          v-if="form.watermarkType === 'auto_pk'"
+          type="warning"
+          :closable="false"
+          style="margin-bottom:12px"
+        >
+          ⚠️ 自增主键策略只能捕获新增记录，无法检测已有记录的更新和删除。
+        </el-alert>
+        <el-alert
+          v-if="form.watermarkType === 'full_scan'"
+          type="info"
+          :closable="false"
+          style="margin-bottom:12px"
+        >
+          ℹ️ 全量扫描模式每次同步都会拉取所有记录进行对比，适用于无时间戳/rowversion/自增主键的表，大数据量时可能较慢。
+        </el-alert>
       </el-form>
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="dialogVisible = false">取消</button>
@@ -261,14 +314,41 @@
         </button>
       </template>
     </el-dialog>
+
+    <!-- Preview Dialog -->
+    <el-dialog v-model="previewDialogVisible" title="数据预览" width="80%" top="5vh">
+      <div v-if="previewLoading" style="text-align:center;padding:40px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+        <div style="margin-top:8px;color:var(--text-secondary)">加载中...</div>
+      </div>
+      <div v-else-if="previewData">
+        <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
+          <span>预览行数:</span>
+          <el-select v-model="previewLimit" style="width:100px" @change="handlePreview(editingId || $attrs.taskId)">
+            <el-option :value="10" label="10 行" />
+            <el-option :value="50" label="50 行" />
+            <el-option :value="100" label="100 行" />
+          </el-select>
+          <el-tag type="info">共 {{ previewData.totalPreviewed }} 条</el-tag>
+        </div>
+        <el-table :data="previewData.rows" size="small" border max-height="500" style="width:100%">
+          <el-table-column v-for="col in previewData.columns" :key="col.name" :label="col.name" :prop="col.name" min-width="120">
+            <template #default="{ row }">
+              <span :title="row[col.name]">{{ row[col.name] !== null && row[col.name] !== undefined ? String(row[col.name]).slice(0, 100) : '(null)' }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <div v-else style="text-align:center;padding:40px;color:var(--text-tertiary)">暂无数据</div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getConnections, getTables, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, getSchedulerStatus } from '../api'
+import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, getSchedulerStatus, previewTaskData } from '../api'
 
 // 当前用户身份
 const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
@@ -295,14 +375,24 @@ const teableBases = ref([])
 const teableTables = ref([])
 const targetFields = ref([])
 const mappingRows = ref([])
+const mappingSuggestions = ref(null) // { mappings, unmatchedSource, unmatchedTarget }
+const mappingLoading = ref(false)
+const previewDialogVisible = ref(false)
+const previewData = ref(null)
+const previewLoading = ref(false)
+const previewLimit = ref(10)
 
 const schedulerStatus = ref({})
+
+// Watermark candidates (fetched from API when source table changes)
+const watermarkCandidates = ref({ pkCol: null, candidates: { timestamp: [], rowversion: [], auto_pk: [] } })
+const watermarkLoading = ref(false)
 
 const defaultForm = {
   name: '', sourceConnectionId: '', sourceTable: '', sourceDatabase: '',
   targetConnectionId: '', targetTableId: '', _baseId: '',
   columnMapping: {}, conflictStrategy: 'upsert',
-  sourcePrimaryKey: '', sourceTimestampColumn: '',
+  sourcePrimaryKey: '', watermarkType: '', watermarkColumn: '',
   syncMode: 'manual', syncInterval: 300,
 }
 const form = ref({ ...defaultForm })
@@ -315,10 +405,38 @@ const datetimeColumns = computed(() =>
     .map(c => c.name)
 )
 
+// Available watermark types based on detected candidates
+const availableWatermarkTypes = computed(() => {
+  const c = watermarkCandidates.value.candidates || {}
+  const types = [
+    { value: '', label: '自动检测', desc: '按优先级自动选择' },
+    { value: 'timestamp', label: '时间戳列', desc: c.timestamp.length ? `可用: ${c.timestamp.join(', ')}` : '无可用列' },
+    { value: 'rowversion', label: 'Rowversion', desc: c.rowversion.length ? `可用: ${c.rowversion.join(', ')}` : '仅 MSSQL, 无可用列' },
+    { value: 'auto_pk', label: '自增主键', desc: c.auto_pk.length ? `可用: ${c.auto_pk.join(', ')}` : '仅捕获新增, 无可用列' },
+    { value: 'full_scan', label: '全量扫描', desc: '每次全量拉取，最可靠' },
+  ]
+  return types
+})
+
+// Columns available for the selected watermark type
+const watermarkColumnOptions = computed(() => {
+  const type = form.value.watermarkType
+  if (!type || type === 'full_scan') return []
+  const c = watermarkCandidates.value.candidates || {}
+  if (type === 'timestamp') return c.timestamp || []
+  if (type === 'rowversion') return c.rowversion || []
+  if (type === 'auto_pk') return c.auto_pk || []
+  return []
+})
+
 function connName(id) { return connections.value.find(c => c.id === id)?.name || id }
 function conflictLabel(s) {
   const m = { upsert: '覆盖', skip: '跳过', insert_only: '仅新增' }
   return m[s] || s
+}
+function watermarkLabel(w) {
+  const m = { '': '自动', timestamp: '时间戳', rowversion: 'Rowversion', auto_pk: '自增主键', full_scan: '全量扫描' }
+  return m[w] || '自动'
 }
 function syncModeLabel(m) {
   const map = {
@@ -345,22 +463,93 @@ function statusClass(s) {
 }
 function formatTime(ts) { return new Date(ts).toLocaleString('zh-CN') }
 
+async function handlePreview(taskId) {
+  previewLoading.value = true
+  previewDialogVisible.value = true
+  previewData.value = null
+  try {
+    previewData.value = await previewTaskData(taskId, previewLimit.value)
+  } catch (err) {
+    ElMessage.error('预览失败: ' + err.message)
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function closePreview() {
+  previewDialogVisible.value = false
+  previewData.value = null
+}
+
 function addMapping() { mappingRows.value.push({ source: '', target: '' }) }
 function removeMapping(i) { mappingRows.value.splice(i, 1) }
 
-function autoMap() {
-  mappingRows.value = []
-  for (const col of sourceColumns.value) {
-    const matchField = targetFields.value.find(f => f.name === col.name)
-    if (matchField) {
-      mappingRows.value.push({ source: col.name, target: matchField.name })
+function confidenceClass(row) {
+  if (row._confidenceLevel === 'exact') return 'conf-exact'
+  if (row._confidenceLevel === 'high') return 'conf-high'
+  if (row._confidenceLevel === 'medium') return 'conf-medium'
+  if (row._confidenceLevel === 'auto_create') return 'conf-create'
+  return 'conf-low'
+}
+function confidenceIcon(row) {
+  if (row._confidenceLevel === 'auto_create') return '🆕'
+  if (row._confidenceLevel === 'exact') return '═'
+  if (row._confidenceLevel === 'high') return '≈'
+  if (row._confidenceLevel === 'medium') return '~'
+  return '→'
+}
+
+async function smartMap() {
+  if (!form.value.sourceConnectionId || !form.value.sourceTable || !form.value.targetTableId) return;
+  mappingLoading.value = true;
+  try {
+    const result = await getMappingSuggestions(
+      form.value.sourceConnectionId,
+      form.value.sourceTable,
+      form.value.targetTableId,
+      form.value.targetConnectionId,
+      form.value.sourceDatabase || undefined
+    );
+    mappingSuggestions.value = result;
+    // Build mapping rows from suggestions
+    mappingRows.value = result.mappings.map(m => ({
+      source: m.sourceColumn,
+      target: m.targetField,
+      _similarity: m.similarity,
+      _confidence: m.confidence,
+      _confidenceLevel: m.confidenceLevel,
+      _typeSafe: m.typeSafe,
+      _typeWarning: m.typeWarning,
+    }));
+    // Auto-create unmatched source fields
+    for (const us of result.unmatchedSource) {
+      mappingRows.value.push({
+        source: us.name,
+        target: us.name, // will be auto-created
+        _similarity: 100,
+        _confidence: 100,
+        _confidenceLevel: 'auto_create',
+        _typeSafe: us.suggestionSafe !== false,
+        _typeWarning: us.suggestionWarning,
+      });
     }
+    if (mappingRows.value.length === 0) {
+      ElMessage.info('没有可匹配的字段');
+    } else {
+      const safe = mappingRows.value.filter(r => r._typeSafe).length;
+      const warn = mappingRows.value.length - safe;
+      ElMessage.success(`已智能匹配 ${mappingRows.value.length} 个字段${warn > 0 ? `，${warn} 个存在类型转换风险` : ''}`);
+    }
+  } catch (err) {
+    ElMessage.error('智能匹配失败: ' + err.message);
+  } finally {
+    mappingLoading.value = false;
   }
-  if (mappingRows.value.length === 0) {
-    ElMessage.info('没有同名字段可自动匹配')
-  } else {
-    ElMessage.success(`已自动匹配 ${mappingRows.value.length} 个字段`)
-  }
+}
+
+function autoMap() {
+  // Keep for backward compat but redirect to smartMap
+  smartMap();
 }
 
 async function loadAll() {
@@ -395,8 +584,18 @@ async function onSourceTableChange() {
     const tables = await getTables(form.value.sourceConnectionId)
     const found = tables.find(t => t.name === form.value.sourceTable)
     if (found) sourceColumns.value = found.columns || []
-    if (targetFields.value.length > 0) autoMap()
+    if (targetFields.value.length > 0) smartMap()
   } catch (e) { /* ignore */ }
+  // Fetch watermark candidates
+  watermarkLoading.value = true
+  try {
+    const db = form.value.sourceDatabase || undefined
+    watermarkCandidates.value = await getWatermarkCandidates(form.value.sourceConnectionId, form.value.sourceTable, db)
+  } catch (e) {
+    watermarkCandidates.value = { pkCol: null, candidates: { timestamp: [], rowversion: [], auto_pk: [] } }
+  } finally {
+    watermarkLoading.value = false
+  }
 }
 
 async function onTeableConnChange() {
@@ -435,7 +634,7 @@ async function onTargetTableChange() {
   if (!form.value.targetTableId) return
   try {
     targetFields.value = await getTeableFields(form.value.targetTableId, form.value.targetConnectionId)
-    if (sourceColumns.value.length > 0) autoMap()
+    if (sourceColumns.value.length > 0) smartMap()
   } catch (err) {
     ElMessage.error('获取字段失败: ' + err.message)
   }
@@ -460,6 +659,11 @@ function openDialog(task = null) {
     } else {
       mappingRows.value = Object.entries(mapping || {}).map(([s, t]) => ({ source: s, target: t }))
     }
+    // Migrate sourceTimestampColumn → watermarkType/watermarkColumn
+    if (task.watermarkType === undefined && task.sourceTimestampColumn) {
+      form.value.watermarkType = 'timestamp'
+      form.value.watermarkColumn = task.sourceTimestampColumn
+    }
     if (srcConnId) onSourceChange()
     if (tgtConnId) {
       onTeableConnChange().then(() => {
@@ -477,6 +681,7 @@ function openDialog(task = null) {
     editingId.value = null
     form.value = { ...defaultForm }
     mappingRows.value = []
+    mappingSuggestions.value = null
     sourceTables.value = []
     sourceColumns.value = []
     teableBases.value = []
@@ -498,6 +703,12 @@ async function saveTask() {
     }
     const payload = { ...form.value, columnMapping }
     delete payload._baseId
+    // Backward compat: also set sourceTimestampColumn from watermark config
+    if (payload.watermarkType === 'timestamp' && payload.watermarkColumn) {
+      payload.sourceTimestampColumn = payload.watermarkColumn
+    } else {
+      payload.sourceTimestampColumn = ''
+    }
 
     if (editingId.value) {
       await updateTask(editingId.value, payload)
@@ -659,6 +870,18 @@ onMounted(loadAll)
 .strategy-badge.skip { background: rgba(245,158,11,0.15); color: var(--amber); }
 .strategy-badge.insert_only { background: rgba(16,185,129,0.15); color: var(--green); }
 
+.watermark-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+}
+.watermark-badge.auto, .watermark-badge.timestamp { background: rgba(99,102,241,0.15); color: var(--accent-hover); }
+.watermark-badge.rowversion { background: rgba(16,185,129,0.15); color: var(--green); }
+.watermark-badge.auto_pk { background: rgba(245,158,11,0.15); color: var(--amber); }
+.watermark-badge.full_scan { background: rgba(148,149,160,0.12); color: var(--text-tertiary); }
+
 .status-badge {
   display: inline-block;
   padding: 2px 10px;
@@ -722,4 +945,23 @@ onMounted(loadAll)
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
 }
+
+/* Confidence indicators */
+.conf-exact { color: var(--green); font-weight: bold; font-size: 14px; }
+.conf-high { color: var(--cyan); font-size: 14px; }
+.conf-medium { color: var(--amber); font-size: 14px; }
+.conf-low { color: var(--text-tertiary); font-size: 14px; }
+.conf-create { color: var(--accent); font-size: 14px; }
+
+/* Type compatibility tags */
+.compat-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.compat-safe { background: rgba(16,185,129,0.12); color: var(--green); }
+.compat-warn { background: rgba(245,158,11,0.12); color: var(--amber); cursor: help; }
+.compat-unknown { color: var(--text-tertiary); }
 </style>

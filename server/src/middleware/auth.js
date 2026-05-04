@@ -8,7 +8,7 @@ if (!JWT_SECRET) {
 const _jwtSecret = JWT_SECRET || 'teable-sync-dev-only-secret-CHANGE-ME';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
-function signToken(payload) {
+export function signToken(payload) {
   if (!_jwtSecret.includes('CHANGE-ME') && !JWT_SECRET) {
     // Still warn but allow dev mode
   }

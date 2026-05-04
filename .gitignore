@@ -33,5 +33,7 @@ data/
 # OS
 Thumbs.db
 
-# Debug scripts (do not commit)
+# Debug & temp files
 test-autofield.mjs
+*.bak
+*.tmp

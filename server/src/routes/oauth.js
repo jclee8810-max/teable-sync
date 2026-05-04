@@ -1,9 +1,10 @@
 import express from 'express';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { authMiddleware } from '../middleware/auth.js';
+import { canReadConnection, canWriteConnection } from '../services/accessControl.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -20,7 +21,9 @@ function loadConfig() {
 }
 
 function saveConfig(config) {
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+  const tmpFile = `${CONFIG_FILE}.tmp`;
+  writeFileSync(tmpFile, JSON.stringify(config, null, 2), 'utf-8');
+  renameSync(tmpFile, CONFIG_FILE);
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
@@ -66,6 +69,7 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   const conn = config.connections.find(c => c.id === connectionId);
   if (!conn) return res.status(404).json({ error: '连接不存在' });
   if (conn.type !== 'teable') return res.status(400).json({ error: '仅支持 Teable 类型连接' });
+  if (!canWriteConnection(req.user, conn)) return res.status(403).json({ error: '无权操作此连接' });
 
   // Build redirect URI — use dynamic host from request (supports any port)
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
@@ -219,6 +223,7 @@ router.get('/teable/status/:connectionId', authMiddleware, async (req, res) => {
   const config = loadConfig();
   const conn = config.connections.find(c => c.id === req.params.connectionId);
   if (!conn) return res.status(404).json({ error: '连接不存在' });
+  if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
 
   if (!conn.token) {
     return res.json({ connected: false, connectionId: conn.id, name: conn.name });
@@ -256,6 +261,9 @@ router.delete('/teable/disconnect/:connectionId', authMiddleware, async (req, re
   const config = loadConfig();
   const connIdx = config.connections.findIndex(c => c.id === req.params.connectionId);
   if (connIdx === -1) return res.status(404).json({ error: '连接不存在' });
+  if (!canWriteConnection(req.user, config.connections[connIdx])) {
+    return res.status(403).json({ error: '无权操作此连接' });
+  }
 
   // Clear OAuth fields but keep other connection info
   delete config.connections[connIdx].token;
