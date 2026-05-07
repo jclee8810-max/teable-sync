@@ -25,6 +25,9 @@ if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
 const app = express();
 const PORT = process.env.PORT || 3100;
+const APP_VERSION = process.env.APP_VERSION || '1.0.0';
+const GIT_COMMIT = process.env.GIT_COMMIT || 'unknown';
+const BUILD_TIME = process.env.BUILD_TIME || 'unknown';
 
 // --- Scheduler state (in-memory) ---
 const syncScheduler = new Map(); // taskId -> { intervalId, syncMode, intervalSec }
@@ -181,6 +184,15 @@ app.use('/api/oauth', oauthRouter);
 
 // --- Public health (before auth middleware) ---
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/version', (req, res) => {
+  res.json({
+    name: 'teable-sync',
+    version: APP_VERSION,
+    commit: GIT_COMMIT,
+    buildTime: BUILD_TIME,
+    nodeEnv: process.env.NODE_ENV || 'development',
+  });
+});
 
 // --- Protected API routes ---
 app.use('/api', authMiddleware);

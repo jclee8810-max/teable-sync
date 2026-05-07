@@ -48,7 +48,10 @@
           <span class="status-dot"></span>
           <span class="status-text">服务运行中</span>
         </div>
-        <div class="version">v1.0.0</div>
+        <button class="version" type="button" @click="versionDialogVisible = true">
+          v{{ versionInfo.version || '1.0.0' }}
+          <span v-if="versionInfo.shortCommit"> · {{ versionInfo.shortCommit }}</span>
+        </button>
       </div>
     </aside>
 
@@ -86,6 +89,27 @@
         <AuthPage v-if="showProfile" @auth-changed="onAuthChanged" />
       </div>
     </main>
+
+    <el-dialog v-model="versionDialogVisible" title="运行版本" width="420px">
+      <div class="version-details">
+        <div>
+          <span>版本</span>
+          <strong>v{{ versionInfo.version || '1.0.0' }}</strong>
+        </div>
+        <div>
+          <span>Commit</span>
+          <strong>{{ versionInfo.commit || 'unknown' }}</strong>
+        </div>
+        <div>
+          <span>构建时间</span>
+          <strong>{{ versionInfo.buildTime || 'unknown' }}</strong>
+        </div>
+        <div>
+          <span>环境</span>
+          <strong>{{ versionInfo.nodeEnv || '-' }}</strong>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -96,13 +120,15 @@ import TasksPanel from './components/TasksPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
 import SystemDoctorPanel from './components/SystemDoctorPanel.vue'
 import AuthPage from './components/AuthPage.vue'
-import { getCurrentUser, clearToken, getToken } from './api.js'
+import { getCurrentUser, clearToken, getToken, getVersionInfo } from './api.js'
 
 const activeTab = ref('tasks')
 const isLoggedIn = ref(false)
 const currentUser = ref(null)
 const showUserMenu = ref(false)
 const showProfile = ref(false)
+const versionDialogVisible = ref(false)
+const versionInfo = ref({ version: '1.0.0', commit: 'unknown', buildTime: 'unknown', nodeEnv: '-' })
 
 const navItems = computed(() => {
   const items = [
@@ -174,6 +200,13 @@ function connectWS() {
 }
 
 onMounted(async () => {
+  try {
+    const info = await getVersionInfo()
+    versionInfo.value = {
+      ...info,
+      shortCommit: info.commit && info.commit !== 'unknown' ? info.commit.slice(0, 7) : '',
+    }
+  } catch {}
   // Check if already logged in
   const token = getToken()
   if (token) {
@@ -423,9 +456,39 @@ body {
   color: var(--text-tertiary);
 }
 .version {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
   font-size: 11px;
   color: var(--text-tertiary);
-  opacity: 0.5;
+  opacity: 0.65;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.version:hover {
+  opacity: 1;
+  color: var(--text-secondary);
+}
+.version-details {
+  display: grid;
+  gap: 12px;
+}
+.version-details div {
+  display: grid;
+  gap: 4px;
+}
+.version-details span {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.version-details strong {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
 }
 
 /* ========== MAIN AREA ========== */

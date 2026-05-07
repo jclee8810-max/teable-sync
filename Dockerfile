@@ -14,6 +14,13 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+ARG APP_VERSION=1.0.0
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=unknown
+ENV APP_VERSION=$APP_VERSION
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_TIME=$BUILD_TIME
+
 # 安装生产依赖（只装 server 的）
 COPY server/ ./server/
 RUN cd server && npm install --omit=dev

@@ -85,6 +85,7 @@ export const getLogs = () => api.get('/logs').then(r => r.data)
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
 
 // System
+export const getVersionInfo = () => api.get('/version').then(r => r.data)
 export const getSystemDoctor = () => api.get('/system/doctor').then(r => r.data)
 
 export default api
