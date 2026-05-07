@@ -92,6 +92,18 @@ function sanitizeConnection(conn) {
     }
     delete safe[field];
   }
+  if (safe.config && typeof safe.config === 'object') {
+    safe.config = { ...safe.config };
+    for (const field of CONNECTION_SECRET_FIELDS) {
+      if (safe.config[field]) {
+        const flag = field === 'oauthClientSecret'
+          ? 'hasOauthClientSecret'
+          : `has${field[0].toUpperCase()}${field.slice(1)}`;
+        safe[flag] = true;
+      }
+      delete safe.config[field];
+    }
+  }
   return safe;
 }
 
