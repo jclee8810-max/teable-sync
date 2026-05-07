@@ -266,6 +266,10 @@ function resolveWatermark(task, pkCol, candidates) {
 
 
 export async function runSync(task, srcConn, tgtConn, broadcastLog) {
+  return runSyncWithControl(task, srcConn, tgtConn, broadcastLog);
+}
+
+export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, control = {}) {
   const taskId = task.id;
   const startTime = Date.now();
   const db = task.sourceDatabase || null;
@@ -279,6 +283,25 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     const entry = { taskId, level, message: msg, ts: new Date().toISOString() };
     broadcastLog(entry);
   };
+  const report = (patch) => {
+    if (typeof control.onProgress === 'function') {
+      control.onProgress({
+        taskId,
+        taskName: task.name,
+        startedAt: new Date(startTime).toISOString(),
+        updatedAt: new Date().toISOString(),
+        elapsedMs: Date.now() - startTime,
+        ...patch,
+      });
+    }
+  };
+  const checkCancelled = () => {
+    if (control.signal?.aborted || control.isCancelled?.()) {
+      const err = new Error('同步已取消');
+      err.code = 'SYNC_CANCELLED';
+      throw err;
+    }
+  };
 
   if (syncLocks.has(taskId)) {
     log('warn', '任务正在执行中，忽略本次请求');
@@ -286,9 +309,11 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
   }
   syncLocks.add(taskId);
   log('info', '开始同步任务: ' + task.name);
+  report({ status: 'running', phase: 'starting', processedRows: 0, inserted: 0, updated: 0, skipped: 0, deleted: 0, softDeleted: 0, failed: 0 });
 
   let historyRec = null;
   try {
+    checkCancelled();
     const { pkCol: autoPkCol, candidates } = await detectWatermarkCandidates(srcConn, task.sourceTable, db);
     const pkCol = task.sourcePrimaryKey || autoPkCol;
     if (!pkCol) throw new Error('无法检测到主键列,请手动配置 sourcePrimaryKey');
@@ -337,7 +362,9 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     historyRec = createSyncHistory(taskId, task.name, task.sourceTable, task.targetTableId);
     historyRec.mode = mode;
     log('info', '主键列: ' + pkCol + ' | 增量策略: ' + watermark.description + ' | 分页: ' + pageSize + '/页 | 写入批量: ' + batchSize);
+    report({ phase: 'preparing', mode, pageSize, batchSize, watermark: watermark.type, processedRows: 0 });
 
+    checkCancelled();
     const fields = await getTeableFields(tgtConn, task.targetTableId);
     const columnMapping = task.columnMapping || {};
     const sourceSchema = await getTableSchema(srcConn, task.sourceTable, db);
@@ -375,6 +402,8 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     let targetOffset = 0;
     const targetPageSize = 1000;
     while (true) {
+      checkCancelled();
+      report({ phase: 'loading_target', targetRows: existingRecords.length, processedRows: sourceRowsCount || 0 });
       const result = await withRetry(() => getTeableRecords(tgtConn, task.targetTableId, { skip: targetOffset, take: targetPageSize }), retryCount, log, '读取 Teable 记录');
       let page;
       if (Array.isArray(result)) page = result;
@@ -386,6 +415,7 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       targetOffset += targetPageSize;
     }
     log('info', '目标表已有 ' + existingRecords.length + ' 条记录');
+    report({ phase: 'syncing_source', targetRows: existingRecords.length, processedRows: 0 });
 
     const existingMap = new Map();
     for (const rec of existingRecords) {
@@ -426,6 +456,7 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     let sourceCursor = null;
     const useKeysetPaging = watermark.type !== 'rowversion';
     while (true) {
+      checkCancelled();
       const { sql: pageSql, params: pageParams } = useKeysetPaging
         ? buildKeysetSql(srcConn.type, baseSql, orderIdentifier, sourceCursor, pageSize, baseParams.length)
         : buildPagedSql(srcConn.type, baseSql, orderIdentifier + ' ASC', pageSize, sourceOffset, baseParams.length);
@@ -436,6 +467,7 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       const toInsert = [];
       const toUpdate = [];
       for (const row of sourceRows) {
+        checkCancelled();
         try {
           const pkValRaw = row[pkCol];
           const pkVal = String(pkValRaw);
@@ -461,6 +493,17 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       }
       await flushWrites(toInsert, toUpdate);
       log('info', '已处理源数据 ' + sourceRowsCount + ' 行');
+      report({
+        phase: 'syncing_source',
+        processedRows: sourceRowsCount,
+        inserted: insertCount,
+        updated: updateCount,
+        skipped: skipCount,
+        deleted: deleteCount,
+        softDeleted: softDeleteCount,
+        failed: errorCount,
+        targetRows: existingRecords.length,
+      });
       if (sourceRows.length < pageSize) break;
       if (useKeysetPaging) sourceCursor = sourceRows[sourceRows.length - 1][pkCol];
       else sourceOffset += pageSize;
@@ -469,6 +512,7 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     if (sourceRowsCount === 0) log('info', '没有需要同步的记录');
 
     if (deletionMode !== 'ignore' && watermark.type === 'full_scan' && errorCount === 0) {
+      report({ phase: 'detecting_deletes', processedRows: sourceRowsCount, targetRows: existingRecords.length });
       const missing = [];
       for (const [pkVal, existing] of existingMap.entries()) {
         if (!seenSourcePks.has(pkVal) && existing.id) missing.push(existing);
@@ -476,10 +520,12 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       if (missing.length > 0) log('info', '检测到目标表 ' + missing.length + ' 条记录源端已不存在，删除策略: ' + deletionMode);
       if (deletionMode === 'soft_delete') {
         for (let i = 0; i < missing.length; i += batchSize) {
+          checkCancelled();
           const batch = missing.slice(i, i + batchSize).map((rec) => ({ id: rec.id, fields: { [softDeleteField]: true } }));
           try {
             await withRetry(() => updateTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '软删除标记');
             softDeleteCount += batch.length;
+            report({ phase: 'applying_deletes', processedRows: sourceRowsCount, softDeleted: softDeleteCount, deleted: deleteCount, failed: errorCount });
           } catch (err) {
             errorCount += batch.length;
             log('warn', '软删除标记失败: ' + err.message);
@@ -487,10 +533,12 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
         }
       } else if (deletionMode === 'hard_delete') {
         for (let i = 0; i < missing.length; i += batchSize) {
+          checkCancelled();
           const ids = missing.slice(i, i + batchSize).map((rec) => rec.id);
           try {
             await withRetry(() => deleteTeableRecords(tgtConn, task.targetTableId, ids), retryCount, log, '物理删除');
             deleteCount += ids.length;
+            report({ phase: 'applying_deletes', processedRows: sourceRowsCount, softDeleted: softDeleteCount, deleted: deleteCount, failed: errorCount });
           } catch (err) {
             errorCount += ids.length;
             log('warn', '物理删除失败: ' + err.message);
@@ -519,6 +567,17 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     log('info', '同步完成: 源 ' + sourceRowsCount + ', 新增 ' + insertCount + ', 更新 ' + updateCount + ', 跳过 ' + skipCount + ', 软删 ' + softDeleteCount + ', 删除 ' + deleteCount + ', 失败 ' + errorCount + ' | 耗时 ' + elapsed + 's');
+    report({
+      status: 'success',
+      phase: 'completed',
+      processedRows: sourceRowsCount,
+      inserted: insertCount,
+      updated: updateCount,
+      skipped: skipCount,
+      deleted: deleteCount,
+      softDeleted: softDeleteCount,
+      failed: errorCount,
+    });
     updateSyncHistory(historyRec.id, {
       status: 'success', mode, sourceRows: sourceRowsCount, inserted: insertCount, updated: updateCount,
       skipped: skipCount, deleted: deleteCount, softDeleted: softDeleteCount, failed: errorCount, durationMs: Date.now() - startTime,
@@ -536,9 +595,11 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       durationMs: Date.now() - startTime,
     };
   } catch (err) {
-    log('error', '同步失败: ' + err.message);
+    const cancelled = err.code === 'SYNC_CANCELLED';
+    log(cancelled ? 'warn' : 'error', cancelled ? '同步已取消' : '同步失败: ' + err.message);
     console.error(err);
-    if (historyRec) updateSyncHistory(historyRec.id, { status: 'failed', errorMessage: err.message, durationMs: Date.now() - startTime });
+    if (historyRec) updateSyncHistory(historyRec.id, { status: cancelled ? 'cancelled' : 'failed', errorMessage: err.message, durationMs: Date.now() - startTime });
+    report({ status: cancelled ? 'cancelled' : 'failed', phase: cancelled ? 'cancelled' : 'failed', errorMessage: err.message });
     throw err;
   } finally {
     syncLocks.delete(taskId);

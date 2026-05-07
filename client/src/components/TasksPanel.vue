@@ -30,6 +30,9 @@
               <el-icon v-else class="is-loading"><Loading /></el-icon>
               {{ (task._running || task.status === 'running') ? '同步中...' : '同步' }}
             </button>
+            <button v-if="isTaskRunning(task)" class="fs-btn fs-btn-danger" @click="cancelRunningTask(task)" style="padding:8px 16px;font-size:13px">
+              取消
+            </button>
             <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
               <el-icon><View /></el-icon>预览
             </button>
@@ -76,6 +79,18 @@
               <span class="detail-value" v-if="task.lastSyncAt">{{ formatTime(task.lastSyncAt) }}</span>
               <span class="detail-value empty" v-else>从未执行</span>
             </div>
+          </div>
+          <div v-if="taskProgress[task.id] && taskProgress[task.id].status !== 'idle'" class="progress-panel">
+            <div class="progress-line">
+              <span class="progress-phase">{{ progressPhaseLabel(taskProgress[task.id].phase) }}</span>
+              <span class="progress-meta">{{ progressSummary(taskProgress[task.id]) }}</span>
+            </div>
+            <el-progress
+              :percentage="progressPercent(taskProgress[task.id])"
+              :indeterminate="taskProgress[task.id].status === 'running' || taskProgress[task.id].status === 'cancelling'"
+              :status="progressStatus(taskProgress[task.id])"
+              :stroke-width="8"
+            />
           </div>
         </div>
       </div>
@@ -392,10 +407,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, getSchedulerStatus, previewTaskData } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getSchedulerStatus, previewTaskData } from '../api'
 
 // 当前用户身份
 const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
@@ -430,6 +445,8 @@ const previewLoading = ref(false)
 const previewLimit = ref(10)
 
 const schedulerStatus = ref({})
+const taskProgress = ref({})
+let progressTimer = null
 
 // Watermark candidates (fetched from API when source table changes)
 const watermarkCandidates = ref({ pkCol: null, candidates: { timestamp: [], rowversion: [], auto_pk: [] } })
@@ -511,6 +528,48 @@ function statusClass(s) {
   return map[s] || ''
 }
 function formatTime(ts) { return new Date(ts).toLocaleString('zh-CN') }
+function isTaskRunning(task) {
+  const p = taskProgress.value[task.id]
+  return task.status === 'running' || task._running || p?.status === 'running' || p?.status === 'cancelling'
+}
+function progressPhaseLabel(phase) {
+  const map = {
+    starting: '启动中',
+    preparing: '准备同步',
+    loading_target: '读取目标表',
+    syncing_source: '同步源数据',
+    detecting_deletes: '检测删除',
+    applying_deletes: '应用删除',
+    cancelling: '正在取消',
+    cancelled: '已取消',
+    completed: '已完成',
+    failed: '失败',
+    skipped: '已跳过',
+  }
+  return map[phase] || '同步中'
+}
+function progressSummary(p) {
+  const parts = [`源 ${p.processedRows || 0}`]
+  if (p.targetRows) parts.push(`目标 ${p.targetRows}`)
+  parts.push(`新增 ${p.inserted || 0}`)
+  parts.push(`更新 ${p.updated || 0}`)
+  if (p.deleted || p.softDeleted) parts.push(`删除 ${p.deleted || 0}/${p.softDeleted || 0}`)
+  if (p.failed) parts.push(`失败 ${p.failed}`)
+  return parts.join(' · ')
+}
+function progressPercent(p) {
+  if (['success', 'completed'].includes(p.status) || p.phase === 'completed') return 100
+  if (['failed', 'cancelled'].includes(p.status)) return 100
+  const total = Number(p.totalEstimate || p.targetRows || 0)
+  if (!total) return 35
+  return Math.max(5, Math.min(95, Math.round((Number(p.processedRows || 0) / total) * 100)))
+}
+function progressStatus(p) {
+  if (p.status === 'failed') return 'exception'
+  if (p.status === 'cancelled') return 'warning'
+  if (p.status === 'success' || p.phase === 'completed') return 'success'
+  return undefined
+}
 
 async function handlePreview(taskId) {
   previewLoading.value = true
@@ -605,6 +664,38 @@ async function loadAll() {
   connections.value = await getConnections()
   tasks.value = await getTasks()
   try { schedulerStatus.value = await getSchedulerStatus() } catch {}
+  await refreshProgress()
+}
+
+async function refreshProgress() {
+  const next = { ...taskProgress.value }
+  await Promise.all(tasks.value.map(async (task) => {
+    try {
+      const progress = await getTaskProgress(task.id)
+      if (progress.status === 'idle' && !['running', 'cancelling'].includes(next[task.id]?.status)) {
+        delete next[task.id]
+      } else {
+        next[task.id] = progress
+      }
+    } catch {
+      delete next[task.id]
+    }
+  }))
+  taskProgress.value = next
+}
+
+function startProgressPolling() {
+  if (progressTimer) return
+  progressTimer = window.setInterval(async () => {
+    await refreshProgress()
+    const hasActive = Object.values(taskProgress.value).some(p => ['running', 'cancelling'].includes(p.status))
+    if (!hasActive) {
+      try {
+        tasks.value = await getTasks()
+        schedulerStatus.value = await getSchedulerStatus()
+      } catch {}
+    }
+  }, 2000)
 }
 
 watch(() => form.value.sourceDatabase, () => {
@@ -788,12 +879,26 @@ async function manualRun(task) {
     await runTask(task.id)
     // 后端立即返回 {started:true} 再异步执行，等待同步完成再显示结果
     ElMessage.info('正在同步，请稍候…')
-    setTimeout(loadAll, 8000)  // 给足时间等后台同步真正完成
+    taskProgress.value[task.id] = { taskId: task.id, status: 'running', phase: 'starting', processedRows: 0 }
+    startProgressPolling()
+    setTimeout(loadAll, 2000)
   } catch (err) {
     ElMessage.error('启动失败: ' + err.message)
     setTimeout(loadAll, 1000)
   } finally {
     task._running = false
+  }
+}
+
+async function cancelRunningTask(task) {
+  try {
+    await ElMessageBox.confirm('确定取消当前正在执行的同步？已写入的数据会保留，本次不会推进增量水位。', '取消同步', { type: 'warning' })
+    await cancelTask(task.id)
+    taskProgress.value[task.id] = { ...(taskProgress.value[task.id] || {}), taskId: task.id, status: 'cancelling', phase: 'cancelling' }
+    ElMessage.warning('已请求取消同步')
+    startProgressPolling()
+  } catch (err) {
+    if (err !== 'cancel') ElMessage.error('取消失败: ' + (err.message || err))
   }
 }
 
@@ -816,6 +921,7 @@ async function toggleSync(task) {
     try {
       await startTask(task.id)
       ElMessage.success(`已启动${syncModeLabel(task.syncMode)}同步`)
+      startProgressPolling()
       await loadAll()
     } catch (err) {
       ElMessage.error('启动失败: ' + err.message)
@@ -823,7 +929,15 @@ async function toggleSync(task) {
   }
 }
 
-onMounted(loadAll)
+onMounted(async () => {
+  await loadAll()
+  startProgressPolling()
+})
+
+onUnmounted(() => {
+  if (progressTimer) window.clearInterval(progressTimer)
+  progressTimer = null
+})
 </script>
 
 <style scoped>
@@ -907,6 +1021,33 @@ onMounted(loadAll)
 }
 .detail-value.mono { font-family: var(--font-mono); }
 .detail-value.empty { color: var(--text-tertiary); font-style: italic; }
+
+.progress-panel {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.progress-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.progress-phase {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.progress-meta {
+  color: var(--text-tertiary);
+  text-align: right;
+}
 
 .strategy-badge {
   display: inline-block;

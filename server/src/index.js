@@ -23,6 +23,7 @@ const PORT = process.env.PORT || 3100;
 
 // --- Scheduler state (in-memory) ---
 const syncScheduler = new Map(); // taskId -> { intervalId, syncMode, intervalSec }
+const syncRuns = new Map(); // taskId -> { controller, state }
 
 app.use(cors());
 app.use(expressStatic(join(__dirname, '..', '..', 'client', 'dist')));
@@ -106,6 +107,66 @@ function cleanTaskInput(body = {}) {
   if (!['ignore', 'soft_delete', 'hard_delete'].includes(cleaned.deletionMode)) cleaned.deletionMode = 'ignore';
   if (!/^[a-zA-Z0-9_]+$/.test(cleaned.softDeleteField || 'deleted')) cleaned.softDeleteField = 'deleted';
   return cleaned;
+}
+
+function createRunState(task, trigger) {
+  return {
+    taskId: task.id,
+    taskName: task.name,
+    trigger,
+    status: 'running',
+    phase: 'starting',
+    processedRows: 0,
+    targetRows: 0,
+    inserted: 0,
+    updated: 0,
+    skipped: 0,
+    deleted: 0,
+    softDeleted: 0,
+    failed: 0,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    cancellable: true,
+  };
+}
+
+function startTrackedRun(task, trigger) {
+  const existing = syncRuns.get(task.id);
+  if (['running', 'cancelling'].includes(existing?.state.status)) {
+    return {
+      owned: false,
+      signal: existing.controller.signal,
+      onProgress: () => {},
+      finish: () => {},
+    };
+  }
+  const controller = new AbortController();
+  const state = createRunState(task, trigger);
+  syncRuns.set(task.id, { controller, state });
+  return {
+    owned: true,
+    signal: controller.signal,
+    onProgress: (patch) => {
+      const current = syncRuns.get(task.id);
+      if (!current) return;
+      current.state = { ...current.state, ...patch, updatedAt: new Date().toISOString() };
+      syncRuns.set(task.id, current);
+    },
+    finish: (patch = {}) => {
+      const current = syncRuns.get(task.id);
+      if (!current) return;
+      current.state = { ...current.state, ...patch, cancellable: false, updatedAt: new Date().toISOString() };
+      syncRuns.set(task.id, current);
+      setTimeout(() => {
+        const latest = syncRuns.get(task.id);
+        if (latest?.state.updatedAt === current.state.updatedAt) syncRuns.delete(task.id);
+      }, 5 * 60 * 1000);
+    },
+  };
+}
+
+function getRunState(taskId) {
+  return syncRuns.get(taskId)?.state || { taskId, status: 'idle', phase: 'idle', cancellable: false };
 }
 
 // --- Auth routes (public) ---
@@ -682,7 +743,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       const runValidation = validateTaskConnections(c, { id: t.userId, role: 'user' }, t);
       if (runValidation.error || !srcConn || !tgtConn) return;
 
-      const { runSync } = await import('./services/syncEngine.js');
+      const { runSyncWithControl } = await import('./services/syncEngine.js');
       const persistLog = (entry) => {
         broadcastLog(entry);
         const cfg2 = loadConfig();
@@ -701,7 +762,15 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       c1.syncTasks[idx1].status = 'running';
       saveConfig(c1);
 
-      const result = await runSync(t, srcConn, tgtConn, persistLogUser);
+      const runControl = startTrackedRun(t, mode);
+      let result;
+      try {
+        result = await runSyncWithControl(t, srcConn, tgtConn, persistLogUser, runControl);
+        runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
+      } catch (err) {
+        runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
+        throw err;
+      }
       if (result?.status === 'skipped') {
         const cSkip = loadConfig();
         const idxSkip = cSkip.syncTasks.findIndex((x) => x.id === task.id);
@@ -742,7 +811,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
     const tgtConn = c0.connections.find((cn) => cn.id === (task.targetConnectionId || task.targetId));
     const initValidation = validateTaskConnections(c0, req.user, task);
     if (srcConn && tgtConn && !initValidation.error) {
-      const { runSync } = await import('./services/syncEngine.js');
+      const { runSyncWithControl } = await import('./services/syncEngine.js');
       const persistLog = (entry) => {
         broadcastLog(entry);
         const cfg3 = loadConfig();
@@ -759,7 +828,15 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       if (idxInit !== -1) {
         cInit.syncTasks[idxInit].status = 'running';
         saveConfig(cInit);
-        const result = await runSync(task, srcConn, tgtConn, persistLogUser);
+        const runControl = startTrackedRun(task, 'initial');
+        let result;
+        try {
+          result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, runControl);
+          runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
+        } catch (err) {
+          runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
+          throw err;
+        }
         if (result?.status === 'skipped') {
           const cSkip = loadConfig();
           const idxSkip = cSkip.syncTasks.findIndex((x) => x.id === task.id);
@@ -799,6 +876,12 @@ app.post('/api/tasks/:id/stop', (req, res) => {
     clearInterval(syncScheduler.get(req.params.id).intervalId);
     syncScheduler.delete(req.params.id);
   }
+  const run = syncRuns.get(req.params.id);
+  if (run?.state.status === 'running') {
+    run.controller.abort();
+    run.state = { ...run.state, status: 'cancelling', phase: 'cancelling', updatedAt: new Date().toISOString() };
+    syncRuns.set(req.params.id, run);
+  }
 
   config.syncTasks[taskIdx].status = 'idle';
   config.syncTasks[taskIdx].enabled = false;
@@ -806,6 +889,34 @@ app.post('/api/tasks/:id/stop', (req, res) => {
 
   broadcastLogUser({ taskId: req.params.id, level: 'info', message: '已停止自动同步', ts: new Date().toISOString() }, task.userId);
   res.json({ stopped: true });
+});
+
+app.get('/api/tasks/:id/progress', (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  res.json(getRunState(req.params.id));
+});
+
+app.post('/api/tasks/:id/cancel', (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
+  const run = syncRuns.get(req.params.id);
+  if (!run || !['running', 'cancelling'].includes(run.state.status)) {
+    return res.status(409).json({ error: '当前没有正在执行的同步' });
+  }
+  run.controller.abort();
+  run.state = { ...run.state, status: 'cancelling', phase: 'cancelling', updatedAt: new Date().toISOString() };
+  syncRuns.set(req.params.id, run);
+  broadcastLogUser({ taskId: req.params.id, level: 'warn', message: '已请求取消正在执行的同步', ts: new Date().toISOString() }, task.userId);
+  res.json({ cancelling: true });
 });
 
 // Scheduler status
@@ -837,7 +948,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
   // Run async — persist logs and update task status
   try {
-    const { runSync } = await import('./services/syncEngine.js');
+    const { runSyncWithControl } = await import('./services/syncEngine.js');
     const userId = task.userId;
     const persistLogUser = (entry) => {
       const enhanced = { ...entry, userId };
@@ -853,7 +964,15 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     cfg0.syncTasks[taskIdx].status = 'running';
     saveConfig(cfg0);
 
-    const result = await runSync(task, srcConn, tgtConn, persistLogUser);
+    const runControl = startTrackedRun(task, 'manual');
+    let result;
+    try {
+      result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, runControl);
+      runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
+    } catch (err) {
+      runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
+      throw err;
+    }
     if (result?.status === 'skipped') {
       const cfgSkip = loadConfig();
       const idxSkip = cfgSkip.syncTasks.findIndex((x) => x.id === task.id);
@@ -868,11 +987,12 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     cfg1.syncTasks[taskIdx].lastSyncAt = new Date().toISOString();
     saveConfig(cfg1);
   } catch (err) {
-    const entry = { taskId: task.id, level: 'error', message: err.message, ts: new Date().toISOString(), userId: task.userId };
+    const cancelled = err.code === 'SYNC_CANCELLED';
+    const entry = { taskId: task.id, level: cancelled ? 'warn' : 'error', message: err.message, ts: new Date().toISOString(), userId: task.userId };
     broadcastLogUser(entry, task.userId);
     const cfg = loadConfig();
     cfg.syncLogs.push(entry);
-    cfg.syncTasks[taskIdx].status = syncScheduler.has(task.id) ? 'scheduled' : 'error';
+    cfg.syncTasks[taskIdx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled ? 'idle' : 'error');
     saveConfig(cfg);
   }
 });
