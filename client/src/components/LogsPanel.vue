@@ -167,6 +167,7 @@ function actionLabel(action) {
     'task.delete': '删除任务',
     'task.restore': '恢复任务',
     'task.start': '启动任务',
+    'task.resume': '恢复任务',
     'task.stop': '停止任务',
     'task.cancel': '取消任务',
     'task.run': '手动运行',
@@ -179,7 +180,7 @@ function actionLabel(action) {
 
 function actionTagType(action) {
   if (action?.includes('delete') || action?.includes('cancel') || action?.includes('clear')) return 'danger'
-  if (action?.includes('start') || action?.includes('run') || action?.includes('retry')) return 'success'
+  if (action?.includes('start') || action?.includes('resume') || action?.includes('run') || action?.includes('retry')) return 'success'
   if (action?.includes('update') || action?.includes('reconcile') || action?.includes('doctor')) return 'warning'
   return 'info'
 }

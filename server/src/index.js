@@ -199,19 +199,7 @@ app.get('/api/version', (req, res) => {
 app.use('/api', authMiddleware);
 const server = app.listen(PORT, () => {
   console.log(`🚀 TeableSync Server running on http://localhost:${PORT}`);
-    // 启动时自动恢复定时任务（默认关闭，通过环境变量 AUTO_RESUME_TASKS=true 开启）
-  if (process.env.AUTO_RESUME_TASKS === 'true') {
-    const config = loadConfig();
-    for (const task of config.syncTasks) {
-      if (task.enabled && (task.syncMode === 'scheduled' || task.syncMode === 'realtime' || task.syncMode === 'incremental')) {
-        fetch(`http://127.0.0.1:${PORT}/api/tasks/${task.id}/start`, { method: 'POST' })
-          .then(() => console.log(`↻ 自动恢复: ${task.name} (${task.syncMode})`))
-          .catch(() => {});
-      }
-    }
-  } else {
-    console.log('💡 自动恢复已关闭，设置 AUTO_RESUME_TASKS=true 可启用');
-  }
+  resumeEnabledTasks().catch((err) => console.warn(`↻ 自动恢复检查失败: ${err.message}`));
 });
 
 const wss = new WebSocketServer({ server });
@@ -253,6 +241,176 @@ function broadcastLogUser(log, userId) {
   wsClients.forEach((ws) => {
     if (ws.readyState === 1 && ws._userId === userId) ws.send(msg);
   });
+}
+
+function persistSyncLog(entry) {
+  broadcastLog(entry);
+  const cfg = loadConfig();
+  cfg.syncLogs.push(entry);
+  if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
+  saveConfig(cfg);
+}
+
+function persistUserSyncLog(entry, userId) {
+  const enhanced = { ...entry, userId };
+  broadcastLogUser(enhanced, userId);
+  const cfg = loadConfig();
+  cfg.syncLogs.push(enhanced);
+  if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
+  saveConfig(cfg);
+}
+
+function getTaskStartMissingFields(task) {
+  const missingFields = [];
+  if (!task.sourceTable) missingFields.push('sourceTable');
+  if (!task.targetTableId) missingFields.push('targetTableId');
+  if (!task.sourceConnectionId && !task.sourceId) missingFields.push('sourceConnectionId');
+  if (!task.targetConnectionId && !task.targetId) missingFields.push('targetConnectionId');
+  return missingFields;
+}
+
+async function runScheduledTask(taskId, trigger, mode, intervalSec) {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === taskId);
+  if (!task || !task.enabled) {
+    const scheduled = syncScheduler.get(taskId);
+    if (scheduled) clearInterval(scheduled.intervalId);
+    syncScheduler.delete(taskId);
+    return { status: 'disabled' };
+  }
+  if (task.status === 'running') return { status: 'skipped' };
+
+  const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
+  const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+  const validation = validateTaskConnections(config, { id: task.userId, role: 'user' }, task);
+  if (validation.error || !srcConn || !tgtConn) return { status: 'invalid', error: validation.error || 'Connection not found' };
+
+  const c1 = loadConfig();
+  const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
+  if (idx1 === -1) return { status: 'missing' };
+  c1.syncTasks[idx1].status = 'running';
+  saveConfig(c1);
+
+  const { runSyncWithControl } = await import('./services/syncEngine.js');
+  const runControl = startTrackedRun(task, trigger);
+  if (!runControl.owned) {
+    persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
+    return { status: 'skipped' };
+  }
+
+  try {
+    const result = await runSyncWithControl(
+      task,
+      srcConn,
+      tgtConn,
+      (entry) => persistUserSyncLog(entry, task.userId),
+      runControl,
+    );
+    runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
+
+    const done = loadConfig();
+    const idxDone = done.syncTasks.findIndex((x) => x.id === task.id);
+    if (idxDone !== -1) {
+      done.syncTasks[idxDone].status = 'scheduled';
+      if (result?.status !== 'skipped') done.syncTasks[idxDone].lastSyncAt = new Date().toISOString();
+      saveConfig(done);
+    }
+    if (result?.status === 'skipped') {
+      persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
+    } else {
+      persistUserSyncLog({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() }, task.userId);
+    }
+    return result || { status: 'success' };
+  } catch (err) {
+    runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
+    const failed = loadConfig();
+    const idxFailed = failed.syncTasks.findIndex((x) => x.id === task.id);
+    if (idxFailed !== -1) {
+      failed.syncTasks[idxFailed].status = 'scheduled';
+      saveConfig(failed);
+    }
+    persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
+    return { status: 'failed', error: err.message };
+  }
+}
+
+async function startTaskScheduler(taskId, actorUser, options = {}) {
+  const { audit = true, runImmediately = true, resume = false } = options;
+  const config = loadConfig();
+  const taskIdx = config.syncTasks.findIndex((t) => t.id === taskId);
+  if (taskIdx === -1) throw Object.assign(new Error('Not found'), { status: 404 });
+  const task = config.syncTasks[taskIdx];
+  if (actorUser.role !== 'super_admin' && task.userId !== actorUser.id) {
+    throw Object.assign(new Error('无权操作此任务'), { status: 403 });
+  }
+
+  const missingFields = getTaskStartMissingFields(task);
+  if (missingFields.length > 0) {
+    throw Object.assign(new Error(`缺少必要字段: ${missingFields.join(', ')}`), { status: 400 });
+  }
+  const validation = validateTaskConnections(config, actorUser, task);
+  if (validation.error) throw Object.assign(new Error(validation.error), { status: 400 });
+
+  if (syncScheduler.has(task.id)) {
+    clearInterval(syncScheduler.get(task.id).intervalId);
+    syncScheduler.delete(task.id);
+  }
+
+  const intervalSec = task.syncInterval || 300;
+  const mode = task.syncMode || 'scheduled';
+
+  const cfg = loadConfig();
+  const idx = cfg.syncTasks.findIndex((t) => t.id === task.id);
+  if (idx === -1) throw Object.assign(new Error('Not found'), { status: 404 });
+  cfg.syncTasks[idx].status = 'scheduled';
+  cfg.syncTasks[idx].enabled = true;
+  saveConfig(cfg);
+
+  const intervalId = setInterval(() => {
+    runScheduledTask(task.id, mode, mode, intervalSec).catch((err) => {
+      persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 调度失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
+    });
+  }, intervalSec * 1000);
+  syncScheduler.set(task.id, { intervalId, syncMode: mode, intervalSec });
+
+  if (audit) {
+    appendAuditLog(actorUser, resume ? 'task.resume' : 'task.start', {
+      resourceType: 'task',
+      resourceId: task.id,
+      resourceName: task.name,
+      message: `${resume ? '恢复' : '启动'}任务 ${task.name || task.id}`,
+      metadata: { syncMode: mode, intervalSec },
+    });
+  }
+
+  persistUserSyncLog({ taskId: task.id, level: 'info', message: `已${resume ? '恢复' : '启动'}${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
+
+  if (runImmediately) {
+    await runScheduledTask(task.id, resume ? 'resume' : 'initial', mode, intervalSec);
+  }
+  return { started: true, syncMode: mode, intervalSec };
+}
+
+async function resumeEnabledTasks() {
+  if (process.env.AUTO_RESUME_TASKS !== 'true') {
+    console.log('💡 自动恢复已关闭，设置 AUTO_RESUME_TASKS=true 可启用');
+    return;
+  }
+  const config = loadConfig();
+  const resumable = config.syncTasks.filter((task) => {
+    return task.enabled && !task.deletedAt && ['scheduled', 'realtime', 'incremental'].includes(task.syncMode || 'scheduled');
+  });
+  const runImmediately = process.env.AUTO_RESUME_RUN_IMMEDIATELY === 'true';
+  let restored = 0;
+  for (const task of resumable) {
+    try {
+      await startTaskScheduler(task.id, { id: task.userId, role: 'user' }, { audit: false, resume: true, runImmediately });
+      restored += 1;
+    } catch (err) {
+      console.warn(`↻ 自动恢复失败: ${task.name || task.id}: ${err.message}`);
+    }
+  }
+  console.log(`↻ 自动恢复完成: ${restored}/${resumable.length} 个任务`);
 }
 
 // --- Routes ---
@@ -793,184 +951,11 @@ app.get('/api/tasks/:id/preview', async (req, res) => {
 
 // Start auto-sync for a task (scheduled / realtime)
 app.post('/api/tasks/:id/start', async (req, res) => {
-  const config = loadConfig();
-  const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
-  if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
-  const task = config.syncTasks[taskIdx];
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
-    return res.status(403).json({ error: '无权操作此任务' });
-  }
-
-  // P2-3: Validate required fields before starting scheduler
-  const missingFields = [];
-  if (!task.sourceTable) missingFields.push('sourceTable');
-  if (!task.targetTableId) missingFields.push('targetTableId');
-  if (!task.sourceConnectionId && !task.sourceId) missingFields.push('sourceConnectionId');
-  if (!task.targetConnectionId && !task.targetId) missingFields.push('targetConnectionId');
-  if (missingFields.length > 0) {
-    return res.status(400).json({ error: `缺少必要字段: ${missingFields.join(', ')}` });
-  }
-  const startValidation = validateTaskConnections(config, req.user, task);
-  if (startValidation.error) return res.status(400).json({ error: startValidation.error });
-
-  // Stop existing timer if any
-  if (syncScheduler.has(task.id)) {
-    clearInterval(syncScheduler.get(task.id).intervalId);
-    syncScheduler.delete(task.id);
-  }
-
-  const intervalSec = task.syncInterval || 300; // default 5 min
-  const mode = task.syncMode || 'scheduled';
-
-  // Mark as running in config
-  const cfg = loadConfig();
-  cfg.syncTasks[taskIdx].status = 'scheduled';
-  cfg.syncTasks[taskIdx].enabled = true;
-  saveConfig(cfg);
-
-  const intervalId = setInterval(async () => {
-    // Check if task still exists and is enabled
-    const c = loadConfig();
-    const t = c.syncTasks.find((x) => x.id === task.id);
-    if (!t || !t.enabled) {
-      clearInterval(intervalId);
-      syncScheduler.delete(task.id);
-      return;
-    }
-    // Skip if already running
-    if (t.status === 'running') return;
-
-    // Trigger sync
-    try {
-      const srcConn = c.connections.find((cn) => cn.id === (t.sourceConnectionId || t.sourceId));
-      const tgtConn = c.connections.find((cn) => cn.id === (t.targetConnectionId || t.targetId));
-      const runValidation = validateTaskConnections(c, { id: t.userId, role: 'user' }, t);
-      if (runValidation.error || !srcConn || !tgtConn) return;
-
-      const { runSyncWithControl } = await import('./services/syncEngine.js');
-      const persistLog = (entry) => {
-        broadcastLog(entry);
-        const cfg2 = loadConfig();
-        cfg2.syncLogs.push(entry);
-        if (cfg2.syncLogs.length > 500) cfg2.syncLogs = cfg2.syncLogs.slice(-500);
-        saveConfig(cfg2);
-      };
-      const userId = task.userId;
-      const persistLogUser = (entry) => {
-        persistLog({ ...entry, userId });
-      };
-
-      const c1 = loadConfig();
-      const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
-      if (idx1 === -1) return;
-      c1.syncTasks[idx1].status = 'running';
-      saveConfig(c1);
-
-      const runControl = startTrackedRun(t, mode);
-      let result;
-      try {
-        result = await runSyncWithControl(t, srcConn, tgtConn, persistLogUser, runControl);
-        runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
-      } catch (err) {
-        runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
-        throw err;
-      }
-      if (result?.status === 'skipped') {
-        const cSkip = loadConfig();
-        const idxSkip = cSkip.syncTasks.findIndex((x) => x.id === task.id);
-        if (idxSkip !== -1) {
-          cSkip.syncTasks[idxSkip].status = 'scheduled';
-          saveConfig(cSkip);
-        }
-        broadcastLogUser({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, userId);
-        return;
-      }
-
-      const c2 = loadConfig();
-      const idx2 = c2.syncTasks.findIndex((x) => x.id === task.id);
-      if (idx2 === -1) return;
-      c2.syncTasks[idx2].status = 'scheduled';
-      c2.syncTasks[idx2].lastSyncAt = new Date().toISOString();
-      saveConfig(c2);
-      broadcastLogUser({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() }, userId);
-    } catch (err) {
-      const c3 = loadConfig();
-      const idx3 = c3.syncTasks.findIndex((x) => x.id === task.id);
-      if (idx3 !== -1) {
-        c3.syncTasks[idx3].status = 'scheduled'; // keep running on schedule even if one run fails
-        saveConfig(c3);
-      }
-      broadcastLogUser({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() }, userId);
-    }
-  }, intervalSec * 1000);
-
-  syncScheduler.set(task.id, { intervalId, syncMode: mode, intervalSec });
-  appendAuditLog(req.user, 'task.start', {
-    resourceType: 'task',
-    resourceId: task.id,
-    resourceName: task.name,
-    message: `启动任务 ${task.name || task.id}`,
-    metadata: { syncMode: mode, intervalSec },
-  });
-
-  broadcastLogUser({ taskId: task.id, level: 'info', message: `已启动${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
-
-  // Run first sync immediately
   try {
-    const c0 = loadConfig();
-    const srcConn = c0.connections.find((cn) => cn.id === (task.sourceConnectionId || task.sourceId));
-    const tgtConn = c0.connections.find((cn) => cn.id === (task.targetConnectionId || task.targetId));
-    const initValidation = validateTaskConnections(c0, req.user, task);
-    if (srcConn && tgtConn && !initValidation.error) {
-      const { runSyncWithControl } = await import('./services/syncEngine.js');
-      const persistLog = (entry) => {
-        broadcastLog(entry);
-        const cfg3 = loadConfig();
-        cfg3.syncLogs.push(entry);
-        if (cfg3.syncLogs.length > 500) cfg3.syncLogs = cfg3.syncLogs.slice(-500);
-        saveConfig(cfg3);
-      };
-      const userId = task.userId;
-      const persistLogUser = (entry) => {
-        persistLog({ ...entry, userId });
-      };
-      const cInit = loadConfig();
-      const idxInit = cInit.syncTasks.findIndex((x) => x.id === task.id);
-      if (idxInit !== -1) {
-        cInit.syncTasks[idxInit].status = 'running';
-        saveConfig(cInit);
-        const runControl = startTrackedRun(task, 'initial');
-        let result;
-        try {
-          result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, runControl);
-          runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
-        } catch (err) {
-          runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
-          throw err;
-        }
-        if (result?.status === 'skipped') {
-          const cSkip = loadConfig();
-          const idxSkip = cSkip.syncTasks.findIndex((x) => x.id === task.id);
-          if (idxSkip !== -1) {
-            cSkip.syncTasks[idxSkip].status = 'scheduled';
-            saveConfig(cSkip);
-          }
-        } else {
-          const cDone = loadConfig();
-          const idxDone = cDone.syncTasks.findIndex((x) => x.id === task.id);
-          if (idxDone !== -1) {
-            cDone.syncTasks[idxDone].status = 'scheduled';
-            cDone.syncTasks[idxDone].lastSyncAt = new Date().toISOString();
-            saveConfig(cDone);
-          }
-        }
-      }
-    }
+    res.json(await startTaskScheduler(req.params.id, req.user, { audit: true, runImmediately: true }));
   } catch (err) {
-    broadcastLogUser({ taskId: task.id, level: 'error', message: `首次同步失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
+    res.status(err.status || 500).json({ error: err.message });
   }
-
-  res.json({ started: true, syncMode: mode, intervalSec });
 });
 
 // Stop auto-sync for a task
