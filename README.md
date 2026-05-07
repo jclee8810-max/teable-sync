@@ -144,6 +144,25 @@ docker run -d -p 3101:3101 --name teable-sync teable-sync
 
 如外部已有 SQL Server 或 Teable，修改 `docker-compose.yml` 中对应地址后重启即可。
 
+### 端到端 Smoke 验收
+
+部署后可以运行一条 API 级端到端验收，模拟管理员和普通用户完成权限检查、共享连接读取、私有数据源创建、任务创建、预览、手动同步、一致性校验、审计和备份检查。
+
+```bash
+npm run e2e:smoke
+```
+
+验收脚本在 `teable-sync` 容器内执行，默认访问 `http://127.0.0.1:3101/api`，并读取容器内 `/app/server/data/config.json` 和 `users.json`。脚本只创建 `codex-e2e-*` 临时用户、连接、任务和 Teable 测试表；任务和连接会在结束时软删除，Teable 测试表保留用于人工复查。
+
+可选环境变量：
+
+```bash
+E2E_API_BASE=http://127.0.0.1:3101/api \
+E2E_TEABLE_BASE_HINT=SyncPilot \
+E2E_RUN_TIMEOUT_MS=30000 \
+npm run e2e:smoke
+```
+
 ## 字段类型映射
 
 | SQL 类型 | Teable 类型 |
