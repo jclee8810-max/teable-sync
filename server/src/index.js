@@ -701,7 +701,17 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       c1.syncTasks[idx1].status = 'running';
       saveConfig(c1);
 
-      await runSync(t, srcConn, tgtConn, persistLogUser);
+      const result = await runSync(t, srcConn, tgtConn, persistLogUser);
+      if (result?.status === 'skipped') {
+        const cSkip = loadConfig();
+        const idxSkip = cSkip.syncTasks.findIndex((x) => x.id === task.id);
+        if (idxSkip !== -1) {
+          cSkip.syncTasks[idxSkip].status = 'scheduled';
+          saveConfig(cSkip);
+        }
+        broadcastLogUser({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, userId);
+        return;
+      }
 
       const c2 = loadConfig();
       const idx2 = c2.syncTasks.findIndex((x) => x.id === task.id);
@@ -749,13 +759,22 @@ app.post('/api/tasks/:id/start', async (req, res) => {
       if (idxInit !== -1) {
         cInit.syncTasks[idxInit].status = 'running';
         saveConfig(cInit);
-        await runSync(task, srcConn, tgtConn, persistLogUser);
-        const cDone = loadConfig();
-        const idxDone = cDone.syncTasks.findIndex((x) => x.id === task.id);
-        if (idxDone !== -1) {
-          cDone.syncTasks[idxDone].status = 'scheduled';
-          cDone.syncTasks[idxDone].lastSyncAt = new Date().toISOString();
-          saveConfig(cDone);
+        const result = await runSync(task, srcConn, tgtConn, persistLogUser);
+        if (result?.status === 'skipped') {
+          const cSkip = loadConfig();
+          const idxSkip = cSkip.syncTasks.findIndex((x) => x.id === task.id);
+          if (idxSkip !== -1) {
+            cSkip.syncTasks[idxSkip].status = 'scheduled';
+            saveConfig(cSkip);
+          }
+        } else {
+          const cDone = loadConfig();
+          const idxDone = cDone.syncTasks.findIndex((x) => x.id === task.id);
+          if (idxDone !== -1) {
+            cDone.syncTasks[idxDone].status = 'scheduled';
+            cDone.syncTasks[idxDone].lastSyncAt = new Date().toISOString();
+            saveConfig(cDone);
+          }
         }
       }
     }
@@ -834,7 +853,14 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     cfg0.syncTasks[taskIdx].status = 'running';
     saveConfig(cfg0);
 
-    await runSync(task, srcConn, tgtConn, persistLogUser);
+    const result = await runSync(task, srcConn, tgtConn, persistLogUser);
+    if (result?.status === 'skipped') {
+      const cfgSkip = loadConfig();
+      const idxSkip = cfgSkip.syncTasks.findIndex((x) => x.id === task.id);
+      if (idxSkip !== -1) cfgSkip.syncTasks[idxSkip].status = syncScheduler.has(task.id) ? 'scheduled' : 'idle';
+      saveConfig(cfgSkip);
+      return;
+    }
 
     // Mark done
     const cfg1 = loadConfig();

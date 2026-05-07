@@ -38,6 +38,8 @@ export function createSyncHistory(taskId, taskName, sourceTable, targetTableId) 
     inserted: 0,
     updated: 0,
     skipped: 0,
+    deleted: 0,
+    softDeleted: 0,
     failed: 0,
     errorMessage: null,
     durationMs: 0
@@ -61,6 +63,8 @@ export function updateSyncHistory(recordId, stats) {
   record.inserted = stats.inserted || 0;
   record.updated = stats.updated || 0;
   record.skipped = stats.skipped || 0;
+  record.deleted = stats.deleted || 0;
+  record.softDeleted = stats.softDeleted || 0;
   record.failed = stats.failed || 0;
   record.errorMessage = stats.errorMessage || null;
   record.durationMs = stats.durationMs || 0;

@@ -58,6 +58,23 @@ function buildPagedSql(type, baseSql, orderBy, limit, offset, paramStart) {
   };
 }
 
+function buildKeysetSql(type, baseSql, orderIdentifier, cursor, limit, paramStart) {
+  const hasWhere = /\swhere\s/i.test(baseSql);
+  let sql = baseSql;
+  const params = [];
+  if (cursor !== undefined && cursor !== null) {
+    sql += (hasWhere ? ' AND ' : ' WHERE ') + orderIdentifier + ' > ' + placeholder(type, paramStart);
+    params.push(cursor);
+  }
+  if (type === 'mssql') {
+    sql += ' ORDER BY ' + orderIdentifier + ' ASC OFFSET 0 ROWS FETCH NEXT ' + placeholder(type, paramStart + params.length) + ' ROWS ONLY';
+  } else {
+    sql += ' ORDER BY ' + orderIdentifier + ' ASC LIMIT ' + placeholder(type, paramStart + params.length);
+  }
+  params.push(limit);
+  return { sql, params };
+}
+
 async function withRetry(fn, attempts, log, label) {
   let lastErr;
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -265,7 +282,7 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
 
   if (syncLocks.has(taskId)) {
     log('warn', '任务正在执行中，忽略本次请求');
-    return;
+    return { status: 'skipped', reason: 'already_running' };
   }
   syncLocks.add(taskId);
   log('info', '开始同步任务: ' + task.name);
@@ -406,8 +423,12 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
     }
 
     let sourceOffset = 0;
+    let sourceCursor = null;
+    const useKeysetPaging = watermark.type !== 'rowversion';
     while (true) {
-      const { sql: pageSql, params: pageParams } = buildPagedSql(srcConn.type, baseSql, orderIdentifier + ' ASC', pageSize, sourceOffset, baseParams.length);
+      const { sql: pageSql, params: pageParams } = useKeysetPaging
+        ? buildKeysetSql(srcConn.type, baseSql, orderIdentifier, sourceCursor, pageSize, baseParams.length)
+        : buildPagedSql(srcConn.type, baseSql, orderIdentifier + ' ASC', pageSize, sourceOffset, baseParams.length);
       const sourceRows = await query(srcConn, pageSql, [...baseParams, ...pageParams], db);
       if (sourceRows.length === 0) break;
 
@@ -441,7 +462,8 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       await flushWrites(toInsert, toUpdate);
       log('info', '已处理源数据 ' + sourceRowsCount + ' 行');
       if (sourceRows.length < pageSize) break;
-      sourceOffset += pageSize;
+      if (useKeysetPaging) sourceCursor = sourceRows[sourceRows.length - 1][pkCol];
+      else sourceOffset += pageSize;
     }
 
     if (sourceRowsCount === 0) log('info', '没有需要同步的记录');
@@ -501,6 +523,18 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
       status: 'success', mode, sourceRows: sourceRowsCount, inserted: insertCount, updated: updateCount,
       skipped: skipCount, deleted: deleteCount, softDeleted: softDeleteCount, failed: errorCount, durationMs: Date.now() - startTime,
     });
+    return {
+      status: 'success',
+      mode,
+      sourceRows: sourceRowsCount,
+      inserted: insertCount,
+      updated: updateCount,
+      skipped: skipCount,
+      deleted: deleteCount,
+      softDeleted: softDeleteCount,
+      failed: errorCount,
+      durationMs: Date.now() - startTime,
+    };
   } catch (err) {
     log('error', '同步失败: ' + err.message);
     console.error(err);
