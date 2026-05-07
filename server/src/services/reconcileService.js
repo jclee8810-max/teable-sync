@@ -5,6 +5,7 @@ import { convertValue } from './typeConverter.js';
 const DEFAULT_LIMIT = 10000;
 const DEFAULT_SAMPLE_LIMIT = 100;
 const PAGE_SIZE = 1000;
+const DEFAULT_DATE_TIME_ZONE = process.env.RECONCILE_DATE_TIME_ZONE || 'Asia/Shanghai';
 
 function quoteIdentifier(type, name) {
   if (!/^[a-zA-Z0-9_.]+$/.test(name)) throw new Error(`非法标识符: ${name}`);
@@ -19,10 +20,64 @@ function placeholder(type, index) {
   return type === 'pg' ? `$${index + 1}` : '?';
 }
 
-function valuesEqual(a, b) {
+function isSqlDateType(type) {
+  return ['date', 'datetime', 'datetime2', 'smalldatetime', 'timestamp', 'timestamp without time zone', 'timestamp with time zone'].includes(String(type || '').toLowerCase());
+}
+
+function datePartsInTimeZone(value, timeZone = DEFAULT_DATE_TIME_ZONE) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+function normalizeDateOnlyValue(value, timeZone = DEFAULT_DATE_TIME_ZONE) {
+  if (value === null || value === undefined || value === '') return null;
+  if (value instanceof Date) return datePartsInTimeZone(value, timeZone);
+  if (typeof value === 'string') {
+    const direct = value.match(/^(\d{4}-\d{2}-\d{2})(?:$|[T\s])/);
+    if (direct && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(value)) return direct[1];
+  }
+  return datePartsInTimeZone(value, timeZone);
+}
+
+function normalizeDateTimeValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function comparisonValue(value, srcType, tgtField) {
+  if ((value === null || value === undefined || value === '')) return null;
+  const targetType = String(tgtField?.type || '').toLowerCase();
+  const targetDateOptions = tgtField?.options?.formatting || tgtField?.options || {};
+  const timeZone = targetDateOptions.timeZone || DEFAULT_DATE_TIME_ZONE;
+  const targetHasTime = targetDateOptions.time && String(targetDateOptions.time).toLowerCase() !== 'none';
+
+  if (targetType === 'date') {
+    if (targetHasTime) return normalizeDateTimeValue(value);
+    return normalizeDateOnlyValue(value, timeZone);
+  }
+  if (isSqlDateType(srcType)) {
+    return normalizeDateTimeValue(value) || normalizeDateOnlyValue(value, timeZone);
+  }
+  return value;
+}
+
+function valuesEqual(a, b, srcType, tgtField) {
   if (a === b) return true;
   if ((a === null || a === undefined || a === '') && (b === null || b === undefined || b === '')) return true;
-  return String(a) === String(b);
+  const left = comparisonValue(a, srcType, tgtField);
+  const right = comparisonValue(b, srcType, tgtField);
+  if (left === right) return true;
+  return String(left) === String(right);
 }
 
 function normalizeSourceRow(row, mapping, srcTypeMap, tgtTypeMap) {
@@ -112,6 +167,8 @@ export async function reconcileTask(task, srcConn, tgtConn, options = {}) {
   const pkFieldName = effectiveMapping[pkCol] || pkCol;
   const srcTypeMap = Object.fromEntries(sourceSchema.map((col) => [col.name, col.type]));
   const tgtTypeMap = Object.fromEntries(targetFields.map((field) => [field.name, field.type]));
+  const targetFieldMap = Object.fromEntries(targetFields.map((field) => [field.name, field]));
+  const sourceFieldByTarget = Object.fromEntries(Object.entries(effectiveMapping).map(([src, tgt]) => [tgt, src]));
 
   const sourceRows = await loadSourceRows(task, srcConn, srcTypeMap, tgtTypeMap, effectiveMapping, pkCol, limit);
   const targetRows = await loadTargetRows(tgtConn, task.targetTableId, pkFieldName, limit);
@@ -130,7 +187,8 @@ export async function reconcileTask(task, srcConn, tgtConn, options = {}) {
     }
     const diffs = [];
     for (const field of Object.values(effectiveMapping)) {
-      if (!valuesEqual(source.fields[field], target.fields[field])) {
+      const srcCol = sourceFieldByTarget[field];
+      if (!valuesEqual(source.fields[field], target.fields[field], srcTypeMap[srcCol], targetFieldMap[field])) {
         diffs.push({ field, source: source.fields[field], target: target.fields[field] });
       }
     }
@@ -147,7 +205,10 @@ export async function reconcileTask(task, srcConn, tgtConn, options = {}) {
   for (const [pk, source] of sourceMap.entries()) {
     const target = targetMap.get(pk);
     if (!target) continue;
-    if (Object.values(effectiveMapping).some((field) => !valuesEqual(source.fields[field], target.fields[field]))) mismatchCount++;
+    if (Object.values(effectiveMapping).some((field) => {
+      const srcCol = sourceFieldByTarget[field];
+      return !valuesEqual(source.fields[field], target.fields[field], srcTypeMap[srcCol], targetFieldMap[field]);
+    })) mismatchCount++;
   }
 
   return {
