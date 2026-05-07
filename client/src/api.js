@@ -83,6 +83,7 @@ export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r
 // Logs
 export const getLogs = () => api.get('/logs').then(r => r.data)
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
+export const getAuditLogs = (params = {}) => api.get('/audit-logs', { params }).then(r => r.data)
 
 // System
 export const getVersionInfo = () => api.get('/version').then(r => r.data)

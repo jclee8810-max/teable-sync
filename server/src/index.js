@@ -16,6 +16,7 @@ import { createTeableRecords, updateTeableRecords, deleteTeableRecords } from '.
 import { runSystemDoctor } from './services/systemDoctor.js';
 import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
 import { reconcileTask } from './services/reconcileService.js';
+import { appendAuditLog, getAuditLogs } from './services/auditLog.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -261,6 +262,10 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/system/doctor', (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可执行系统检查' });
   try {
+    appendAuditLog(req.user, 'system.doctor', {
+      resourceType: 'system',
+      message: '执行系统检查',
+    });
     res.json(runSystemDoctor({ dataDir: DATA_DIR, configFile: CONFIG_FILE, config: loadConfig() }));
   } catch (err) {
     res.status(500).json({
@@ -270,6 +275,15 @@ app.get('/api/system/doctor', (req, res) => {
       checks: [{ status: 'fail', title: '系统检查失败', message: err.message }],
     });
   }
+});
+
+app.get('/api/audit-logs', (req, res) => {
+  res.json(getAuditLogs({
+    user: req.user,
+    limit: req.query.limit,
+    action: req.query.action,
+    resourceType: req.query.resourceType,
+  }));
 });
 
 // Connections CRUD (multi-tenant: owner can see/edit + shared connections)
@@ -296,6 +310,13 @@ app.post('/api/connections', (req, res) => {
   };
   config.connections.push(conn);
   saveConfig(config);
+  appendAuditLog(req.user, 'connection.create', {
+    resourceType: 'connection',
+    resourceId: conn.id,
+    resourceName: conn.name,
+    message: `创建连接 ${conn.name || conn.id}`,
+    metadata: { type: conn.type, shared: conn.shared === true },
+  });
   res.json(sanitizeConnection(conn));
 });
 
@@ -311,6 +332,13 @@ app.put('/api/connections/:id', (req, res) => {
   const updates = cleanConnectionInput(req.body);
   config.connections[idx] = { ...conn, ...updates, id: conn.id, ownerId: conn.ownerId, createdAt: conn.createdAt };
   saveConfig(config);
+  appendAuditLog(req.user, 'connection.update', {
+    resourceType: 'connection',
+    resourceId: conn.id,
+    resourceName: config.connections[idx].name,
+    message: `更新连接 ${config.connections[idx].name || conn.id}`,
+    metadata: { fields: Object.keys(updates).filter((field) => !CONNECTION_SECRET_FIELDS.includes(field)) },
+  });
   res.json(sanitizeConnection(config.connections[idx]));
 });
 
@@ -324,6 +352,12 @@ app.delete('/api/connections/:id', (req, res) => {
   // 软删除：标记 deletedAt，不物理删除
   conn.deletedAt = new Date().toISOString();
   saveConfig(config);
+  appendAuditLog(req.user, 'connection.delete', {
+    resourceType: 'connection',
+    resourceId: conn.id,
+    resourceName: conn.name,
+    message: `删除连接 ${conn.name || conn.id}`,
+  });
   res.json({ ok: true });
 });
 
@@ -342,6 +376,13 @@ app.put('/api/connections/:id/share', (req, res) => {
   }
   config.connections[idx].shared = shared;
   saveConfig(config);
+  appendAuditLog(req.user, 'connection.share', {
+    resourceType: 'connection',
+    resourceId: conn.id,
+    resourceName: conn.name,
+    message: `${shared ? '共享' : '取消共享'}连接 ${conn.name || conn.id}`,
+    metadata: { shared },
+  });
   res.json(sanitizeConnection(config.connections[idx]));
 });
 
@@ -357,6 +398,12 @@ app.post('/api/connections/:id/restore', (req, res) => {
   if (!conn.deletedAt) return res.status(400).json({ error: '该连接未被删除' });
   delete config.connections[idx].deletedAt;
   saveConfig(config);
+  appendAuditLog(req.user, 'connection.restore', {
+    resourceType: 'connection',
+    resourceId: conn.id,
+    resourceName: conn.name,
+    message: `恢复连接 ${conn.name || conn.id}`,
+  });
   res.json(sanitizeConnection(config.connections[idx]));
 });
 
@@ -590,6 +637,13 @@ app.post('/api/tasks', (req, res) => {
   };
   config.syncTasks.push(task);
   saveConfig(config);
+  appendAuditLog(req.user, 'task.create', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `创建任务 ${task.name || task.id}`,
+    metadata: { syncMode: task.syncMode, sourceTable: task.sourceTable, targetTableId: task.targetTableId },
+  });
   res.json(task);
 });
 
@@ -608,6 +662,13 @@ app.put('/api/tasks/:id', (req, res) => {
   if (validation.error) return res.status(400).json({ error: validation.error });
   config.syncTasks[idx] = nextTask;
   saveConfig(config);
+  appendAuditLog(req.user, 'task.update', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: nextTask.name,
+    message: `更新任务 ${nextTask.name || task.id}`,
+    metadata: { fields: Object.keys(updates) },
+  });
   res.json(config.syncTasks[idx]);
 });
 
@@ -625,6 +686,12 @@ app.delete('/api/tasks/:id', (req, res) => {
   // 软删除：标记 deletedAt，不物理删除
   task.deletedAt = new Date().toISOString();
   saveConfig(config);
+  appendAuditLog(req.user, 'task.delete', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `删除任务 ${task.name || task.id}`,
+  });
   res.json({ ok: true });
 });
 
@@ -640,6 +707,12 @@ app.post('/api/tasks/:id/restore', (req, res) => {
   if (!task.deletedAt) return res.status(400).json({ error: '该任务未被删除' });
   delete config.syncTasks[idx].deletedAt;
   saveConfig(config);
+  appendAuditLog(req.user, 'task.restore', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `恢复任务 ${task.name || task.id}`,
+  });
   res.json(config.syncTasks[idx]);
 });
 
@@ -832,6 +905,13 @@ app.post('/api/tasks/:id/start', async (req, res) => {
   }, intervalSec * 1000);
 
   syncScheduler.set(task.id, { intervalId, syncMode: mode, intervalSec });
+  appendAuditLog(req.user, 'task.start', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `启动任务 ${task.name || task.id}`,
+    metadata: { syncMode: mode, intervalSec },
+  });
 
   broadcastLogUser({ taskId: task.id, level: 'info', message: `已启动${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
 
@@ -919,6 +999,12 @@ app.post('/api/tasks/:id/stop', (req, res) => {
   saveConfig(config);
 
   broadcastLogUser({ taskId: req.params.id, level: 'info', message: '已停止自动同步', ts: new Date().toISOString() }, task.userId);
+  appendAuditLog(req.user, 'task.stop', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `停止任务 ${task.name || task.id}`,
+  });
   res.json({ stopped: true });
 });
 
@@ -947,6 +1033,12 @@ app.post('/api/tasks/:id/cancel', (req, res) => {
   run.state = { ...run.state, status: 'cancelling', phase: 'cancelling', updatedAt: new Date().toISOString() };
   syncRuns.set(req.params.id, run);
   broadcastLogUser({ taskId: req.params.id, level: 'warn', message: '已请求取消正在执行的同步', ts: new Date().toISOString() }, task.userId);
+  appendAuditLog(req.user, 'task.cancel', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `取消任务 ${task.name || task.id}`,
+  });
   res.json({ cancelling: true });
 });
 
@@ -984,7 +1076,15 @@ app.delete('/api/tasks/:id/failures', (req, res) => {
   if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
-  res.json({ removed: clearSyncFailures(req.params.id) });
+  const removed = clearSyncFailures(req.params.id);
+  appendAuditLog(req.user, 'task.failures.clear', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `清除任务失败记录 ${task.name || task.id}`,
+    metadata: { removed },
+  });
+  res.json({ removed });
 });
 
 app.post('/api/tasks/:id/retry-failures', async (req, res) => {
@@ -1018,6 +1118,13 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
     }
   }
   if (retried.length > 0) removeSyncFailures(retried);
+  appendAuditLog(req.user, 'task.failures.retry', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `重试任务失败记录 ${task.name || task.id}`,
+    metadata: { retried: retried.length, failed: stillFailed.length },
+  });
   res.json({ retried: retried.length, failed: stillFailed.length, errors: stillFailed });
 });
 
@@ -1055,6 +1162,18 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
   try {
     const result = await reconcileTask(task, srcConn, tgtConn, req.body || {});
+    appendAuditLog(req.user, 'task.reconcile', {
+      resourceType: 'task',
+      resourceId: task.id,
+      resourceName: task.name,
+      message: `校验任务 ${task.name || task.id}`,
+      metadata: {
+        missingInTarget: result.missingInTarget,
+        extraInTarget: result.extraInTarget,
+        mismatched: result.mismatched,
+        limited: result.limited,
+      },
+    });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1087,6 +1206,12 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
 
   res.json({ started: true });
+  appendAuditLog(req.user, 'task.run', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `手动运行任务 ${task.name || task.id}`,
+  });
 
   // Run async — persist logs and update task status
   try {

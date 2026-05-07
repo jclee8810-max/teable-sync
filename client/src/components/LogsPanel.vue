@@ -2,7 +2,8 @@
   <div class="logs-page">
     <!-- Header -->
     <div class="page-actions">
-      <div class="log-stats">
+      <el-segmented v-model="activeView" :options="viewOptions" />
+      <div v-if="activeView === 'sync'" class="log-stats">
         <span class="stat-item" v-if="stats.info > 0">
           <span class="stat-dot info"></span>{{ stats.info }} 信息
         </span>
@@ -13,13 +14,23 @@
           <span class="stat-dot error"></span>{{ stats.error }} 错误
         </span>
       </div>
-      <button class="fs-btn fs-btn-ghost" @click="clearAll" style="padding:8px 16px;font-size:13px">
+      <div v-else class="audit-tools">
+        <el-select v-model="auditResourceType" placeholder="资源" clearable size="small" style="width:120px" @change="loadAuditLogs">
+          <el-option label="连接" value="connection" />
+          <el-option label="任务" value="task" />
+          <el-option label="系统" value="system" />
+        </el-select>
+        <button class="fs-btn fs-btn-ghost" @click="loadAuditLogs" style="padding:8px 16px;font-size:13px">
+          <el-icon><Refresh /></el-icon>刷新
+        </button>
+      </div>
+      <button v-if="activeView === 'sync'" class="fs-btn fs-btn-ghost" @click="clearAll" style="padding:8px 16px;font-size:13px">
         <el-icon><Delete /></el-icon>清空
       </button>
     </div>
 
     <!-- Terminal-style Log Viewer -->
-    <div class="terminal" ref="logContainer">
+    <div v-if="activeView === 'sync'" class="terminal" ref="logContainer">
       <div class="terminal-header">
         <div class="terminal-dots">
           <span class="dot red"></span>
@@ -40,16 +51,45 @@
         </div>
       </div>
     </div>
+
+    <div v-else class="audit-card">
+      <el-table :data="auditLogs" size="small" border v-loading="auditLoading" empty-text="暂无审计记录">
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">{{ formatDateTime(row.ts) }}</template>
+        </el-table-column>
+        <el-table-column prop="userEmail" label="用户" min-width="180" show-overflow-tooltip />
+        <el-table-column label="动作" width="130">
+          <template #default="{ row }">
+            <el-tag size="small" :type="actionTagType(row.action)">{{ actionLabel(row.action) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="资源" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span>{{ resourceLabel(row.resourceType) }}</span>
+            <span v-if="row.resourceName"> · {{ row.resourceName }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="message" label="说明" min-width="240" show-overflow-tooltip />
+      </el-table>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { getLogs, clearLogs } from '../api'
+import { getLogs, clearLogs, getAuditLogs } from '../api'
 import { ElMessage } from 'element-plus'
 
 const logs = ref([])
 const logContainer = ref(null)
+const activeView = ref('sync')
+const auditLogs = ref([])
+const auditLoading = ref(false)
+const auditResourceType = ref('')
+const viewOptions = [
+  { label: '实时日志', value: 'sync' },
+  { label: '操作审计', value: 'audit' },
+]
 
 const stats = computed(() => {
   const s = { info: 0, warn: 0, error: 0 }
@@ -62,6 +102,11 @@ const stats = computed(() => {
 function formatTime(ts) {
   if (!ts) return ''
   return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function formatDateTime(ts) {
+  if (!ts) return ''
+  return new Date(ts).toLocaleString('zh-CN', { hour12: false })
 }
 
 function scrollToBottom() {
@@ -82,6 +127,20 @@ async function loadLogs() {
   scrollToBottom()
 }
 
+async function loadAuditLogs() {
+  auditLoading.value = true
+  try {
+    auditLogs.value = await getAuditLogs({
+      limit: 300,
+      ...(auditResourceType.value ? { resourceType: auditResourceType.value } : {}),
+    })
+  } catch {
+    auditLogs.value = []
+  } finally {
+    auditLoading.value = false
+  }
+}
+
 async function clearAll() {
   logs.value = []
   await clearLogs()
@@ -92,8 +151,42 @@ function onSyncLog(event) {
   addLog(event.detail)
 }
 
+function resourceLabel(type) {
+  return ({ connection: '连接', task: '任务', system: '系统' }[type] || type || '-')
+}
+
+function actionLabel(action) {
+  return ({
+    'connection.create': '创建连接',
+    'connection.update': '更新连接',
+    'connection.delete': '删除连接',
+    'connection.restore': '恢复连接',
+    'connection.share': '共享连接',
+    'task.create': '创建任务',
+    'task.update': '更新任务',
+    'task.delete': '删除任务',
+    'task.restore': '恢复任务',
+    'task.start': '启动任务',
+    'task.stop': '停止任务',
+    'task.cancel': '取消任务',
+    'task.run': '手动运行',
+    'task.reconcile': '一致性校验',
+    'task.failures.clear': '清除失败',
+    'task.failures.retry': '重试失败',
+    'system.doctor': '系统检查',
+  }[action] || action)
+}
+
+function actionTagType(action) {
+  if (action?.includes('delete') || action?.includes('cancel') || action?.includes('clear')) return 'danger'
+  if (action?.includes('start') || action?.includes('run') || action?.includes('retry')) return 'success'
+  if (action?.includes('update') || action?.includes('reconcile') || action?.includes('doctor')) return 'warning'
+  return 'info'
+}
+
 onMounted(() => {
   loadLogs()
+  loadAuditLogs()
   window.addEventListener('sync-log', onSyncLog)
 })
 
@@ -110,11 +203,29 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+  gap: 12px;
 }
 
 .log-stats {
   display: flex;
   gap: 16px;
+  flex: 1;
+}
+
+.audit-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.audit-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
 }
 
 .stat-item {
