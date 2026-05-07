@@ -17,6 +17,7 @@ import { runSystemDoctor } from './services/systemDoctor.js';
 import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
 import { reconcileTask } from './services/reconcileService.js';
 import { appendAuditLog, getAuditLogs } from './services/auditLog.js';
+import { createConfigBackup, getConfigBackups } from './services/configBackup.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -53,6 +54,7 @@ function loadConfig() {
 function saveConfig(config) {
   _writeLock = _writeLock.then(() => {
     const tmpFile = `${CONFIG_FILE}.tmp`;
+    createConfigBackup(CONFIG_FILE);
     writeFileSync(tmpFile, JSON.stringify(encryptConfigSecrets(config), null, 2), 'utf-8');
     renameSync(tmpFile, CONFIG_FILE);
   }).catch(err => {
@@ -433,6 +435,11 @@ app.get('/api/system/doctor', (req, res) => {
       checks: [{ status: 'fail', title: '系统检查失败', message: err.message }],
     });
   }
+});
+
+app.get('/api/system/config-backups', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可查看配置备份' });
+  res.json(getConfigBackups(CONFIG_FILE, req.query.limit));
 });
 
 app.get('/api/audit-logs', (req, res) => {

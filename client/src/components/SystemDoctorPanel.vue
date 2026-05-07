@@ -1,6 +1,10 @@
 <template>
   <div class="doctor-page">
     <div class="doctor-actions">
+      <button class="fs-btn fs-btn-ghost" @click="loadBackups" :disabled="backupsLoading">
+        <el-icon v-if="backupsLoading" class="is-loading"><Loading /></el-icon>
+        刷新备份
+      </button>
       <button class="fs-btn fs-btn-primary" @click="loadDoctor" :disabled="loading">
         <el-icon v-if="loading" class="is-loading"><Loading /></el-icon>
         重新检查
@@ -30,17 +34,38 @@
       </div>
     </div>
 
-    <el-empty v-else-if="!loading" description="暂无检查结果" />
+    <div class="fs-card backup-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">配置备份</div>
+          <div class="section-desc">自动保留最近的加密配置快照</div>
+        </div>
+        <span class="backup-count">{{ backups.length }} 个</span>
+      </div>
+      <el-table :data="backups" size="small" border v-loading="backupsLoading" empty-text="暂无备份">
+        <el-table-column label="时间" min-width="180">
+          <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+        </el-table-column>
+        <el-table-column prop="name" label="文件" min-width="260" show-overflow-tooltip />
+        <el-table-column label="大小" width="120">
+          <template #default="{ row }">{{ formatSize(row.size) }}</template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <el-empty v-if="!doctor && !loading" description="暂无检查结果" />
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getSystemDoctor } from '../api'
+import { getSystemDoctor, getConfigBackups } from '../api'
 
 const loading = ref(false)
+const backupsLoading = ref(false)
 const doctor = ref(null)
+const backups = ref([])
 
 function statusLabel(status) {
   return { pass: '健康', warn: '需关注', fail: '异常' }[status] || status
@@ -54,14 +79,32 @@ function formatTime(ts) {
   return ts ? new Date(ts).toLocaleString('zh-CN') : '-'
 }
 
+function formatSize(size) {
+  if (!Number.isFinite(Number(size))) return '-'
+  if (size < 1024) return `${size} B`
+  return `${(size / 1024).toFixed(1)} KB`
+}
+
 async function loadDoctor() {
   loading.value = true
   try {
     doctor.value = await getSystemDoctor()
+    await loadBackups()
   } catch (err) {
     ElMessage.error('系统检查失败: ' + err.message)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadBackups() {
+  backupsLoading.value = true
+  try {
+    backups.value = await getConfigBackups({ limit: 20 })
+  } catch {
+    backups.value = []
+  } finally {
+    backupsLoading.value = false
   }
 }
 
@@ -78,6 +121,7 @@ onMounted(loadDoctor)
 .doctor-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
 }
 
 .doctor-summary {
@@ -165,5 +209,35 @@ onMounted(loadDoctor)
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.backup-card {
+  padding: 16px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.section-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.section-desc {
+  margin-top: 4px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.backup-count {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
 }
 </style>

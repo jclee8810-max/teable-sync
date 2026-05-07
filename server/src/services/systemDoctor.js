@@ -3,6 +3,7 @@ import { join } from 'path';
 import crypto from 'crypto';
 import { decryptConfigSecrets, isEncryptedSecret } from './secretStore.js';
 import { getSyncFailureCounts } from './syncFailures.js';
+import { getConfigBackupStatus } from './configBackup.js';
 
 function addCheck(checks, status, title, message, meta = {}) {
   checks.push({ id: crypto.randomUUID(), status, title, message, ...meta });
@@ -58,6 +59,21 @@ export function runSystemDoctor({ dataDir, configFile, config }) {
       return sum + ['password', 'token', 'oauthClientSecret', 'teableOAuthToken'].filter((field) => isEncryptedSecret(conn[field])).length;
     }, 0);
     addCheck(checks, encryptedCount > 0 ? 'pass' : 'warn', '敏感字段加密', encryptedCount > 0 ? `检测到 ${encryptedCount} 个已加密敏感字段` : '尚未检测到加密敏感字段，保存连接后会自动加密');
+  }
+
+  try {
+    const backupStatus = getConfigBackupStatus(configFile);
+    addCheck(
+      checks,
+      backupStatus.count > 0 ? 'pass' : 'warn',
+      '配置自动备份',
+      backupStatus.count > 0
+        ? `已保留 ${backupStatus.count}/${backupStatus.maxBackups} 个备份，最近一次 ${backupStatus.latest.createdAt}`
+        : '暂未生成配置备份，下一次配置写入时会自动创建',
+      { backupStatus },
+    );
+  } catch (err) {
+    addCheck(checks, 'fail', '配置自动备份', `无法读取配置备份状态: ${err.message}`);
   }
 
   const connections = config.connections || [];

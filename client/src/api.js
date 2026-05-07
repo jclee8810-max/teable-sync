@@ -88,5 +88,6 @@ export const getAuditLogs = (params = {}) => api.get('/audit-logs', { params }).
 // System
 export const getVersionInfo = () => api.get('/version').then(r => r.data)
 export const getSystemDoctor = () => api.get('/system/doctor').then(r => r.data)
+export const getConfigBackups = (params = {}) => api.get('/system/config-backups', { params }).then(r => r.data)
 
 export default api
