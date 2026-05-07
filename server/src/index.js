@@ -1214,6 +1214,17 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   if (validation.error) return res.status(400).json({ error: validation.error });
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
 
+  const { runSyncWithControl } = await import('./services/syncEngine.js');
+  const runControl = startTrackedRun(task, 'manual');
+  if (!runControl.owned) return res.status(409).json({ error: '任务正在执行' });
+
+  const cfg0 = loadConfig();
+  const idx0 = cfg0.syncTasks.findIndex((x) => x.id === task.id);
+  if (idx0 !== -1) {
+    cfg0.syncTasks[idx0].status = 'running';
+    saveConfig(cfg0);
+  }
+
   res.json({ started: true });
   appendAuditLog(req.user, 'task.run', {
     resourceType: 'task',
@@ -1224,7 +1235,6 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
   // Run async — persist logs and update task status
   try {
-    const { runSyncWithControl } = await import('./services/syncEngine.js');
     const userId = task.userId;
     const persistLogUser = (entry) => {
       const enhanced = { ...entry, userId };
@@ -1235,12 +1245,6 @@ app.post('/api/tasks/:id/run', async (req, res) => {
       saveConfig(cfg);
     };
 
-    // Mark running
-    const cfg0 = loadConfig();
-    cfg0.syncTasks[taskIdx].status = 'running';
-    saveConfig(cfg0);
-
-    const runControl = startTrackedRun(task, 'manual');
     let result;
     try {
       result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, runControl);
