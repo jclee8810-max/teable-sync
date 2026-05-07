@@ -13,6 +13,7 @@ import { canReadConnection, validateTaskConnections } from './services/accessCon
 import { decryptConfigSecrets, encryptConfigSecrets } from './services/secretStore.js';
 import { getSyncFailures, getSyncFailureCounts, clearSyncFailures, removeSyncFailures, markSyncFailureRetried } from './services/syncFailures.js';
 import { createTeableRecords, updateTeableRecords, deleteTeableRecords } from './services/teableService.js';
+import { runSystemDoctor } from './services/systemDoctor.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -242,6 +243,20 @@ function broadcastLogUser(log, userId) {
 // --- Routes ---
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+app.get('/api/system/doctor', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可执行系统检查' });
+  try {
+    res.json(runSystemDoctor({ dataDir: DATA_DIR, configFile: CONFIG_FILE, config: loadConfig() }));
+  } catch (err) {
+    res.status(500).json({
+      status: 'fail',
+      checkedAt: new Date().toISOString(),
+      summary: { pass: 0, warn: 0, fail: 1 },
+      checks: [{ status: 'fail', title: '系统检查失败', message: err.message }],
+    });
+  }
+});
 
 // Connections CRUD (multi-tenant: owner can see/edit + shared connections)
 app.get('/api/connections', (req, res) => {

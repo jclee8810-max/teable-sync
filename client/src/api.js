@@ -81,4 +81,7 @@ export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r
 export const getLogs = () => api.get('/logs').then(r => r.data)
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
 
+// System
+export const getSystemDoctor = () => api.get('/system/doctor').then(r => r.data)
+
 export default api
