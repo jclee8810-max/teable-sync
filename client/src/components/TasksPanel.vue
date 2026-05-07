@@ -37,6 +37,9 @@
             <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
               <el-icon><View /></el-icon>预览
             </button>
+            <button class="fs-btn fs-btn-ghost" @click="runReconcile(task)" :disabled="reconcileLoading" style="padding:8px 16px;font-size:13px">
+              校验
+            </button>
             <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)" style="padding:8px 16px;font-size:13px">
               失败 {{ failureCounts[task.id] }}
             </button>
@@ -437,6 +440,49 @@
         </el-table>
       </div>
     </el-dialog>
+
+    <el-dialog v-model="reconcileDialogVisible" title="一致性校验" width="760px" top="8vh">
+      <div v-if="reconcileLoading" style="text-align:center;padding:32px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+        <div style="margin-top:8px;color:var(--text-secondary)">正在校验...</div>
+      </div>
+      <div v-else-if="reconcileResult">
+        <div class="reconcile-summary">
+          <div><span class="detail-label">源记录</span><strong>{{ reconcileResult.sourceRows }}</strong></div>
+          <div><span class="detail-label">目标记录</span><strong>{{ reconcileResult.targetRows }}</strong></div>
+          <div><span class="detail-label">目标缺失</span><strong>{{ reconcileResult.missingInTarget }}</strong></div>
+          <div><span class="detail-label">目标多余</span><strong>{{ reconcileResult.extraInTarget }}</strong></div>
+          <div><span class="detail-label">字段不一致</span><strong>{{ reconcileResult.mismatched }}</strong></div>
+        </div>
+        <el-alert v-if="reconcileResult.limited" type="warning" :closable="false" style="margin-bottom:12px">
+          本次达到扫描上限 {{ reconcileResult.limit }} 行，结果为抽样校验。
+        </el-alert>
+        <el-tabs>
+          <el-tab-pane label="目标缺失">
+            <el-table :data="reconcileResult.samples.missingInTarget" size="small" border max-height="260">
+              <el-table-column prop="pk" label="主键" />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="目标多余">
+            <el-table :data="reconcileResult.samples.extraInTarget" size="small" border max-height="260">
+              <el-table-column prop="pk" label="主键" />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="字段不一致">
+            <el-table :data="reconcileResult.samples.mismatched" size="small" border max-height="260">
+              <el-table-column prop="pk" label="主键" width="160" />
+              <el-table-column label="差异">
+                <template #default="{ row }">
+                  <div v-for="diff in row.diffs" :key="diff.field" class="diff-line">
+                    {{ diff.field }}: {{ diff.source }} → {{ diff.target }}
+                  </div>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -444,7 +490,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, getSchedulerStatus, previewTaskData } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, getSchedulerStatus, previewTaskData } from '../api'
 
 // 当前用户身份
 const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
@@ -486,6 +532,9 @@ const failuresDialogVisible = ref(false)
 const failuresLoading = ref(false)
 const taskFailures = ref([])
 const selectedFailureTask = ref(null)
+const reconcileDialogVisible = ref(false)
+const reconcileLoading = ref(false)
+const reconcileResult = ref(null)
 let progressTimer = null
 
 // Watermark candidates (fetched from API when source table changes)
@@ -973,6 +1022,23 @@ async function cancelRunningTask(task) {
   }
 }
 
+async function runReconcile(task) {
+  reconcileDialogVisible.value = true
+  reconcileLoading.value = true
+  reconcileResult.value = null
+  try {
+    reconcileResult.value = await reconcileTask(task.id, { limit: 10000, sampleLimit: 100 })
+    const drift = reconcileResult.value.missingInTarget + reconcileResult.value.extraInTarget + reconcileResult.value.mismatched
+    if (drift === 0) ElMessage.success('校验完成：源端和目标端一致')
+    else ElMessage.warning(`校验完成：发现 ${drift} 处差异`)
+  } catch (err) {
+    ElMessage.error('校验失败: ' + err.message)
+    reconcileDialogVisible.value = false
+  } finally {
+    reconcileLoading.value = false
+  }
+}
+
 async function openFailures(task) {
   selectedFailureTask.value = task
   failuresDialogVisible.value = true
@@ -1230,6 +1296,34 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--red);
+}
+
+.reconcile-summary {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.reconcile-summary > div {
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.reconcile-summary strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.diff-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
 }
 
 @keyframes pulse {

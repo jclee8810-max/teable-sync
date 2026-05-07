@@ -77,6 +77,7 @@ export const retryTaskFailures = (id) => api.post(`/tasks/${id}/retry-failures`)
 export const clearTaskFailures = (id) => api.delete(`/tasks/${id}/failures`).then(r => r.data)
 export const getTasksHealth = () => api.get('/tasks-health').then(r => r.data)
 export const getTaskHealth = (id) => api.get(`/tasks/${id}/health`).then(r => r.data)
+export const reconcileTask = (id, options = {}) => api.post(`/tasks/${id}/reconcile`, options).then(r => r.data)
 export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r.data)
 
 // Logs

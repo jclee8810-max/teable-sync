@@ -15,6 +15,7 @@ import { getSyncFailures, getSyncFailureCounts, clearSyncFailures, removeSyncFai
 import { createTeableRecords, updateTeableRecords, deleteTeableRecords } from './services/teableService.js';
 import { runSystemDoctor } from './services/systemDoctor.js';
 import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
+import { reconcileTask } from './services/reconcileService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -1026,6 +1027,26 @@ app.get('/api/tasks-health', (req, res) => {
     return role === 'super_admin' || task.userId === userId;
   });
   res.json(getTaskHealthMap(tasks));
+});
+
+app.post('/api/tasks/:id/reconcile', async (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  const validation = validateTaskConnections(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
+  const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+  if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
+  try {
+    const result = await reconcileTask(task, srcConn, tgtConn, req.body || {});
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Scheduler status
