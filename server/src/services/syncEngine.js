@@ -407,6 +407,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     const pkFieldName = mapping[pkCol] || pkCol;
     log('info', '字段映射: ' + Object.entries(mapping).map(([k, v]) => k + '->' + v).join(', '));
 
+    let sourceRowsCount = 0, insertCount = 0, updateCount = 0, skipCount = 0, deleteCount = 0, softDeleteCount = 0, errorCount = 0;
     const existingRecords = [];
     let targetOffset = 0;
     const targetPageSize = 1000;
@@ -433,7 +434,6 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       if (pkVal !== undefined && pkVal !== null) existingMap.set(String(pkVal), { id: rec.id || rec.recordId, fields: recFields });
     }
 
-    let sourceRowsCount = 0, insertCount = 0, updateCount = 0, skipCount = 0, deleteCount = 0, softDeleteCount = 0, errorCount = 0;
     const seenSourcePks = new Set();
     const rowversionValues = [];
     const pkValues = [];
