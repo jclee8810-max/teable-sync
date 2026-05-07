@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { signToken, authMiddleware } from '../middleware/auth.js';
+import { appendAuditLog } from '../services/auditLog.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -129,8 +130,8 @@ router.get('/users', authMiddleware, (req, res) => {
 const TEABLE_OAUTH_HOST = process.env.TEABLE_OAUTH_HOST || 'http://localhost:3000';
 const TEABLE_OAUTH_CLIENT_ID = process.env.TEABLE_OAUTH_CLIENT_ID || '';
 const TEABLE_OAUTH_CLIENT_SECRET = process.env.TEABLE_OAUTH_CLIENT_SECRET || '';
-const SYNC_SERVER_PORT = process.env.PORT || 3100;
-const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'http://localhost:5173';
+const SYNC_SERVER_PORT = process.env.PORT || 3101;
+const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || `http://localhost:${SYNC_SERVER_PORT}`;
 // 用于 OAuth 回调，生产环境必须设置（如 https://sync.yourcompany.com）
 const SERVER_PUBLIC_URL = process.env.SERVER_PUBLIC_URL || `http://localhost:${SYNC_SERVER_PORT}`;
 
@@ -174,7 +175,7 @@ router.get('/teable-login', (req, res) => {
     `scope=${encodeURIComponent('record|read table|read user|email_read')}&` +
     `state=${state}`;
 
-  console.log(`[Auth OAuth] Redirecting to Teable: ${authUrl}`);
+  console.log(`[Auth OAuth] Redirecting to Teable for login, callback=${redirectUri}`);
   res.redirect(authUrl);
 });
 
@@ -236,7 +237,6 @@ router.get('/teable-callback', async (req, res) => {
 
     // Get Teable user info — required for login
     const meUrl = `${TEABLE_OAUTH_HOST}/api/auth/user`;
-    console.log(`[Auth OAuth] Fetching user info from: ${meUrl}`);
     const meRes = await fetch(meUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
@@ -249,13 +249,11 @@ router.get('/teable-callback', async (req, res) => {
     }
 
     const teableUser = await meRes.json();
-    console.log(`[Auth OAuth] User data:`, JSON.stringify(teableUser).slice(0, 200));
 
     const email = teableUser?.email;
     if (!email) {
       throw new Error('Teable 用户没有邮箱信息，请检查账户配置');
     }
-    console.log(`[Auth OAuth] Using email: ${email}`);
 
     // Find or create user
     const users = loadUsers();
@@ -273,7 +271,7 @@ router.get('/teable-callback', async (req, res) => {
       };
       users.push(user);
       saveUsers(users);
-      console.log(`[Auth OAuth] Auto-created user: ${email}`);
+      console.log(`[Auth OAuth] Auto-created user from Teable login`);
     } else {
       const idx = users.findIndex(u => u.id === user.id);
       users[idx].teableOAuthToken = accessToken;
@@ -288,7 +286,7 @@ router.get('/teable-callback', async (req, res) => {
     setTimeout(() => loginCodeStore.delete(loginCode), LOGIN_CODE_TTL_MS);
 
     // Redirect with a short-lived one-time code instead of a bearer token.
-    const redirectUrl = `${FRONTEND_BASE_URL}/?oauth_code=${loginCode}&email=${encodeURIComponent(email)}`;
+    const redirectUrl = `${FRONTEND_BASE_URL}/?oauth_code=${loginCode}`;
     console.log(`[Auth OAuth] Redirecting to frontend after successful login`);
     res.redirect(redirectUrl);
 
@@ -316,6 +314,12 @@ router.delete('/users/:id', authMiddleware, (req, res) => {
   }
   users = users.filter(u => u.id !== req.params.id);
   saveUsers(users);
+  appendAuditLog(req.user, 'user.delete', {
+    resourceType: 'user',
+    resourceId: target.id,
+    resourceName: target.email,
+    message: `删除用户 ${target.email}`,
+  });
   res.json({ ok: true });
 });
 
@@ -334,8 +338,16 @@ router.put('/users/:id/role', authMiddleware, (req, res) => {
   const users = loadUsers();
   const idx = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: '用户不存在' });
+  const previousRole = users[idx].role;
   users[idx].role = role;
   saveUsers(users);
+  appendAuditLog(req.user, 'user.role.update', {
+    resourceType: 'user',
+    resourceId: users[idx].id,
+    resourceName: users[idx].email,
+    message: `更新用户角色 ${users[idx].email}`,
+    metadata: { previousRole, role },
+  });
   res.json(sanitizeUser(users[idx]));
 });
 

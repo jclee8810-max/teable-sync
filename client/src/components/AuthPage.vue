@@ -101,9 +101,21 @@
                   <div class="user-row-role">{{ u.role === 'super_admin' ? '管理员' : '普通用户' }}</div>
                 </div>
               </div>
-              <button v-if="u.id !== user?.id && u.role !== 'super_admin'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
-                {{ deletingId === u.id ? '删除中...' : '删除' }}
-              </button>
+              <div v-if="u.id !== user?.id" class="user-actions">
+                <el-select
+                  :model-value="u.role"
+                  size="small"
+                  class="role-select"
+                  :disabled="roleUpdatingId === u.id"
+                  @change="role => doUpdateRole(u, role)"
+                >
+                  <el-option label="普通用户" value="user" />
+                  <el-option label="管理员" value="super_admin" />
+                </el-select>
+                <button v-if="u.role !== 'super_admin'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
+                  {{ deletingId === u.id ? '删除中...' : '删除' }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -118,13 +130,14 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, exchangeTeableLoginCode, setToken, clearToken, getToken } from '../api.js'
+import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, updateUserRole, exchangeTeableLoginCode, setToken, clearToken, getToken } from '../api.js'
 
 const emit = defineEmits(['auth-changed'])
 
 const mode = ref('login')
 const loading = ref(false)
 const deletingId = ref(null)
+const roleUpdatingId = ref(null)
 const error = ref('')
 const success = ref('')
 const user = ref(null)
@@ -176,8 +189,11 @@ async function loadProfile() {
     user.value = await getCurrentUser()
     if (user.value.role === 'super_admin') {
       usersLoading.value = true
-      users.value = await getUsers()
-      usersLoading.value = false
+      try {
+        users.value = await getUsers()
+      } finally {
+        usersLoading.value = false
+      }
     }
   } catch (e) {
     clearToken()
@@ -247,6 +263,22 @@ async function handleChangePassword() {
   }
 }
 
+async function doUpdateRole(targetUser, role) {
+  if (targetUser.role === role) return
+  const previousRole = targetUser.role
+  roleUpdatingId.value = targetUser.id
+  error.value = ''
+  try {
+    const updated = await updateUserRole(targetUser.id, role)
+    users.value = users.value.map(u => u.id === updated.id ? updated : u)
+  } catch (e) {
+    targetUser.role = previousRole
+    error.value = e.response?.data?.error || '角色更新失败'
+  } finally {
+    roleUpdatingId.value = null
+  }
+}
+
 async function doDeleteUser(id) {
   deletingId.value = id
   try {
@@ -260,10 +292,7 @@ async function doDeleteUser(id) {
 }
 
 function handleTeableLogin() {
-  // Redirect to backend OAuth endpoint
-  const host = window.location.hostname || 'localhost'
-  const apiBase = `http://${host}:3100`
-  window.location.href = `${apiBase}/api/auth/teable-login`
+  window.location.href = `${window.location.origin}/api/auth/teable-login`
 }
 
 function handleLogout() {
@@ -396,6 +425,15 @@ function handleLogout() {
 }
 .del-btn:hover:not(:disabled) { background: rgba(220,38,38,0.06); }
 .del-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.user-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.role-select {
+  width: 108px;
+}
 
 .profile-tabs {
   display: flex;

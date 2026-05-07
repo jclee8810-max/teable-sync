@@ -26,7 +26,7 @@ const CONFIG_FILE = join(DATA_DIR, 'config.json');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
 const app = express();
-const PORT = process.env.PORT || 3100;
+const PORT = process.env.PORT || 3101;
 const APP_VERSION = process.env.APP_VERSION || '1.0.0';
 const GIT_COMMIT = process.env.GIT_COMMIT || 'unknown';
 const BUILD_TIME = process.env.BUILD_TIME || 'unknown';
@@ -640,9 +640,8 @@ app.get('/api/mapping-suggestions', async (req, res) => {
     return res.status(400).json({ error: 'sourceConnectionId, sourceTable, targetTableId required' });
   }
 
-  const srcConn = config.connections.find((c) => c.id === sourceConnectionId);
-  const tgtConn = config.connections.find((c) => c.id === targetTableId ? c : c.id === (req.query.targetConnectionId));
   // targetConnectionId is for the Teable connection, targetTableId is the table
+  const srcConn = config.connections.find((c) => c.id === sourceConnectionId);
   const tgtConn2 = config.connections.find((c) => c.id === req.query.targetConnectionId);
   if (!srcConn) return res.status(404).json({ error: 'Source connection not found' });
   if (!tgtConn2) return res.status(404).json({ error: 'Target connection not found' });
@@ -1186,9 +1185,15 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
 
 // Scheduler status
 app.get('/api/scheduler/status', (req, res) => {
+  const config = loadConfig();
+  const visibleTaskIds = new Set(config.syncTasks
+    .filter((task) => !task.deletedAt && (req.user.role === 'super_admin' || task.userId === req.user.id))
+    .map((task) => task.id));
   const status = {};
   for (const [taskId, info] of syncScheduler) {
-    status[taskId] = { syncMode: info.syncMode, intervalSec: info.intervalSec };
+    if (visibleTaskIds.has(taskId)) {
+      status[taskId] = { syncMode: info.syncMode, intervalSec: info.intervalSec };
+    }
   }
   res.json(status);
 });

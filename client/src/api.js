@@ -39,6 +39,7 @@ export const changePassword = (data) => api.put('/auth/password', data).then(r =
 export const exchangeTeableLoginCode = (code) => api.post('/auth/teable-token-exchange', { code }).then(r => r.data)
 export const getUsers = () => api.get('/auth/users').then(r => r.data)
 export const deleteUser = (id) => api.delete(`/auth/users/${id}`).then(r => r.data)
+export const updateUserRole = (id, role) => api.put(`/auth/users/${id}/role`, { role }).then(r => r.data)
 export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
 export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY)

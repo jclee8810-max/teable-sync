@@ -101,8 +101,7 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   // Build Teable authorization URL
   const authUrl = buildAuthUrl(teableHost, clientId, redirectUri, state);
 
-  console.log(`[OAuth] Initiating flow for connection ${connectionId}`);
-  console.log(`[OAuth] Auth URL: ${authUrl}`);
+  console.log(`[OAuth] Initiating flow for connection ${connectionId}, callback=${redirectUri}`);
 
   // Return the URL — frontend should redirect browser to this URL
   res.json({ authUrl, state });
@@ -113,7 +112,7 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
 // Called by browser after user authorizes in Teable
 // Teable redirects here with ?code=xxx&state=yyy
 router.get('/teable/callback', async (req, res) => {
-  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5173';
+  const frontendBase = process.env.FRONTEND_BASE_URL || `http://localhost:${process.env.PORT || 3101}`;
   const { code, state, error, error_description } = req.query;
 
   // Handle error from Teable (user denied, etc.)
@@ -166,7 +165,6 @@ router.get('/teable/callback', async (req, res) => {
 
     const tokenData = await tokenRes.json();
     console.log(`[OAuth] Token response status: ${tokenRes.status}`);
-    console.log(`[OAuth] Token data keys: ${Object.keys(tokenData)}`);
 
     if (!tokenRes.ok) {
       throw new Error(`Token exchange failed: ${JSON.stringify(tokenData)}`);
@@ -186,7 +184,7 @@ router.get('/teable/callback', async (req, res) => {
       });
       if (meRes.ok) {
         userInfo = await meRes.json();
-        console.log(`[OAuth] Authenticated as: ${userInfo.email || userInfo.name || userInfo.id}`);
+        console.log(`[OAuth] Token verified for connection ${connectionId}`);
       }
     } catch (e) {
       console.warn(`[OAuth] Could not verify token: ${e.message}`);
@@ -206,7 +204,7 @@ router.get('/teable/callback', async (req, res) => {
     }
     saveConfig(config);
 
-    console.log(`[OAuth] Successfully connected! Token saved to connection ${connectionId}`);
+    console.log(`[OAuth] Successfully connected connection ${connectionId}`);
 
     // Redirect to frontend success page
     const frontendUrl = userInfo
@@ -303,12 +301,11 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
     if (!signinRes.ok) {
       throw new Error(`登录失败: ${signinData.message || signinData.error || 'Unknown error'}`);
     }
-    const userToken = signinRes.headers.get('set-cookie') || '';
     const cookieHeader = signinRes.headers.get('set-cookie') || '';
     // For cookie-based auth, we need to extract and use the cookie
     const cookie = cookieHeader.split(';')[0] || '';
 
-    console.log(`[OAuth App] Logged in as ${email}`);
+    console.log(`[OAuth App] Logged in to Teable for app provisioning`);
 
     // Step 2: Create OAuth app
     const appCreateRes = await fetch(`${baseUrl}/api/oauth/client`, {
@@ -320,7 +317,7 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
       body: JSON.stringify({
         name: appName,
         redirectUri: redirectUri || `${req.protocol}://${req.headers.host}/api/oauth/teable/callback`,
-        homepage: `${process.env.FRONTEND_BASE_URL || 'http://localhost:5173'}`,
+        homepage: `${process.env.FRONTEND_BASE_URL || `http://localhost:${process.env.PORT || 3101}`}`,
       }),
     });
 
@@ -336,7 +333,7 @@ router.post('/teable/app', authMiddleware, async (req, res) => {
       throw new Error(`创建 OAuth App 失败: ${JSON.stringify(appData)}`);
     }
 
-    console.log(`[OAuth App] Created app: ${JSON.stringify(appData)}`);
+    console.log(`[OAuth App] Created app`);
 
     // Step 3: Generate client secret
     const clientId = appData.clientId || appData.id;

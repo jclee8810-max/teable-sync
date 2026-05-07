@@ -1,4 +1,10 @@
 import jwt from 'jsonwebtoken';
+import { readFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const USERS_FILE = join(__dirname, '..', '..', 'data', 'users.json');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -23,6 +29,24 @@ export function verifyToken(token) {
   }
 }
 
+function loadCurrentUser(decoded) {
+  if (!decoded?.id || !existsSync(USERS_FILE)) return decoded;
+  try {
+    const users = JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
+    const current = users.find((user) => user.id === decoded.id);
+    if (!current) return null;
+    return {
+      id: current.id,
+      email: current.email,
+      role: current.role,
+      iat: decoded.iat,
+      exp: decoded.exp,
+    };
+  } catch {
+    return decoded;
+  }
+}
+
 export function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -33,7 +57,11 @@ export function authMiddleware(req, res, next) {
   if (!decoded) {
     return res.status(401).json({ error: 'Token无效或已过期' });
   }
-  req.user = decoded;
+  const currentUser = loadCurrentUser(decoded);
+  if (!currentUser) {
+    return res.status(401).json({ error: '用户不存在或已被删除' });
+  }
+  req.user = currentUser;
   next();
 }
 
@@ -42,7 +70,7 @@ export function optionalAuth(req, res, next) {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     const decoded = verifyToken(token);
-    if (decoded) req.user = decoded;
+    if (decoded) req.user = loadCurrentUser(decoded) || undefined;
   }
   next();
 }
