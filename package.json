@@ -9,7 +9,7 @@
     "dev:client": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "cd server && node src/index.js",
-    "e2e:smoke": "/Applications/Docker.app/Contents/Resources/bin/docker compose exec -T teable-sync sh -lc \"cd /app/server && node scripts/e2e-smoke.mjs\"",
+    "e2e:smoke": "node server/scripts/run-e2e-smoke.mjs",
     "docker:build": "npm run build && docker build -t teable-sync .",
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down"
