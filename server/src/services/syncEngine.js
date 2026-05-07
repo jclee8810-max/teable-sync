@@ -163,7 +163,11 @@ export async function detectWatermarkCandidates(srcConn, tableName, database = n
 
     // Auto-increment (IDENTITY) columns
     const aiRows = await query(srcConn,
-      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ? AND IS_IDENTITY = 'YES' ORDER BY ORDINAL_POSITION`,
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_NAME = ?
+         AND COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') = 1
+       ORDER BY ORDINAL_POSITION`,
       [tableName], db);
     candidates.auto_pk = aiRows.map(r => r.COLUMN_NAME);
 
