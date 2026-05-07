@@ -66,7 +66,7 @@
             </span>
             <span v-if="conn.type === 'teable'" class="conn-meta-item">
               <span class="meta-label">Token</span>
-              <span class="meta-value">{{ conn.token ? conn.token.substring(0, 12) + '…' : '未设置' }}</span>
+              <span class="meta-value">{{ conn.hasToken ? '已设置' : '未设置' }}</span>
             </span>
           </div>
         </div>
@@ -137,7 +137,7 @@
             </el-button>
           </div>
 
-          <el-button type="success" plain @click="testTeableInDialog" :loading="testingInline" style="margin-top:12px" v-if="form.token">
+          <el-button type="success" plain @click="testTeableInDialog" :loading="testingInline" style="margin-top:12px" v-if="form.token || form.hasToken">
             <el-icon><Connection /></el-icon>测试连接
           </el-button>
           <el-alert v-if="testResult" :title="testResult.message" :type="testResult.success ? 'success' : 'error'"
@@ -275,6 +275,13 @@ function onTypeChange() {
 }
 
 async function testTeableInDialog() {
+  if (editingId.value && form.value.hasToken && !form.value.token) {
+    const result = await testConn(editingId.value)
+    testResult.value = result.success
+      ? { success: true, message: result.message || '连接成功' }
+      : { success: false, message: result.error || '连接失败' }
+    return
+  }
   if (!form.value.host || !form.value.token) {
     ElMessage.warning('请填写服务器地址和 Token')
     return
@@ -467,11 +474,13 @@ async function testConn(id) {
     } else {
       ElMessage.error('连接失败: ' + (result.error || '未知错误'))
     }
+    return result
   } catch (err) {
     loading.close()
     const conn = connections.value.find(c => c.id === id)
     if (conn) conn._tested = false
     ElMessage.error('测试失败: ' + err.message)
+    return { success: false, error: err.message }
   }
 }
 

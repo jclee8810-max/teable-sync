@@ -118,7 +118,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, setToken, clearToken, getToken } from '../api.js'
+import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, exchangeTeableLoginCode, setToken, clearToken, getToken } from '../api.js'
 
 const emit = defineEmits(['auth-changed'])
 
@@ -140,30 +140,22 @@ const tabs = [
 ]
 
 onMounted(async () => {
-  // Check URL params for OAuth callback token
+  // Check URL params for OAuth callback code
   const urlParams = new URLSearchParams(window.location.search)
-  const oauthToken = urlParams.get('oauth_token')
+  const oauthCode = urlParams.get('oauth_code')
   const authError = urlParams.get('auth_error')
 
-  if (oauthToken) {
-    console.log('[OAuth] Received token:', oauthToken.substring(0, 50) + '...')
-    setToken(oauthToken)
-    const email = urlParams.get('email') || ''
-    console.log('[OAuth] Email from URL:', email)
-    console.log('[OAuth] Token in localStorage:', getToken()?.substring(0, 50) + '...')
-    // Clean URL
+  if (oauthCode) {
     window.history.replaceState({}, '', window.location.pathname)
     try {
-      console.log('[OAuth] Calling getCurrentUser()...')
-      const me = await getCurrentUser()
-      console.log('[OAuth] User info:', me)
-      user.value = me
-      emit('auth-changed', me)
+      const data = await exchangeTeableLoginCode(oauthCode)
+      setToken(data.token)
+      user.value = data.user
+      emit('auth-changed', data.user)
       return
     } catch (e) {
-      console.error('[OAuth] getCurrentUser failed:', e)
       clearToken()
-      error.value = 'OAuth 登录失败，请重试'
+      error.value = e.response?.data?.error || 'OAuth 登录失败，请重试'
     }
   }
 

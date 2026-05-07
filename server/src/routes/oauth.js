@@ -71,11 +71,13 @@ router.post('/teable/start', authMiddleware, async (req, res) => {
   if (conn.type !== 'teable') return res.status(400).json({ error: '仅支持 Teable 类型连接' });
   if (!canWriteConnection(req.user, conn)) return res.status(403).json({ error: '无权操作此连接' });
 
-  // Build redirect URI — use dynamic host from request (supports any port)
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.headers.host;
-  const frontendBase = process.env.FRONTEND_BASE_URL || 'http://localhost:5173';
-  const serverPublicUrl = `${proto}://${host}`;
+  // Build redirect URI — prefer env var for production LAN deployments
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  const serverPublicUrl = (process.env.SERVER_PUBLIC_URL || `${proto}://${host}`).replace(/\/$/, '');
+  if (!serverPublicUrl || serverPublicUrl.endsWith('://')) {
+    return res.status(400).json({ error: '无法确定 OAuth 回调地址，请设置 SERVER_PUBLIC_URL' });
+  }
   const redirectUri = `${serverPublicUrl}/api/oauth/teable/callback`;
 
   // Generate state with nonce + connectionId

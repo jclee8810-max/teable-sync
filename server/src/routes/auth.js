@@ -25,13 +25,17 @@ function saveUsers(users) {
   renameSync(tmpFile, USERS_FILE);
 }
 
+function sanitizeUser(user) {
+  const { passwordHash, teableOAuthToken, ...safeUser } = user;
+  return safeUser;
+}
+
 // GET /api/auth/me
 router.get('/me', authMiddleware, (req, res) => {
   const users = loadUsers();
   const user = users.find(u => u.id === req.user.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
-  const { passwordHash, ...safeUser } = user;
-  res.json(safeUser);
+  res.json(sanitizeUser(user));
 });
 
 // POST /api/auth/register
@@ -66,8 +70,7 @@ router.post('/register', async (req, res) => {
   saveUsers(users);
 
   const token = signToken({ id: user.id, email: user.email, role: user.role });
-  const { passwordHash: _, ...safeUser } = user;
-  res.json({ token, user: safeUser });
+  res.json({ token, user: sanitizeUser(user) });
 });
 
 // POST /api/auth/login
@@ -89,8 +92,7 @@ router.post('/login', async (req, res) => {
   }
 
   const token = signToken({ id: user.id, email: user.email, role: user.role });
-  const { passwordHash: _, ...safeUser } = user;
-  res.json({ token, user: safeUser });
+  res.json({ token, user: sanitizeUser(user) });
 });
 
 // PUT /api/auth/password
@@ -119,7 +121,7 @@ router.get('/users', authMiddleware, (req, res) => {
     return res.status(403).json({ error: '仅超级管理员可操作' });
   }
   const users = loadUsers();
-  res.json(users.map(({ passwordHash, ...u }) => u));
+  res.json(users.map(sanitizeUser));
 });
 
 // ─── Teable OAuth Login ───────────────────────────────────────────────
@@ -132,8 +134,27 @@ const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'http://localhost:517
 // 用于 OAuth 回调，生产环境必须设置（如 https://sync.yourcompany.com）
 const SERVER_PUBLIC_URL = process.env.SERVER_PUBLIC_URL || `http://localhost:${SYNC_SERVER_PORT}`;
 
-// In-memory store for login OAuth state
+// In-memory stores for login OAuth state and one-time frontend exchange codes
 const loginOAuthState = new Map();
+const loginCodeStore = new Map();
+const LOGIN_CODE_TTL_MS = 5 * 60 * 1000;
+
+// POST /api/auth/teable-token-exchange
+// Exchanges the short-lived OAuth callback code for a JWT.
+router.post('/teable-token-exchange', (req, res) => {
+  const { code } = req.body || {};
+  if (!code) return res.status(400).json({ error: '缺少 code' });
+
+  const stored = loginCodeStore.get(code);
+  if (!stored) return res.status(400).json({ error: '登录 code 无效或已过期' });
+  loginCodeStore.delete(code);
+
+  if (Date.now() - stored.createdAt > LOGIN_CODE_TTL_MS) {
+    return res.status(400).json({ error: '登录 code 已过期' });
+  }
+
+  res.json({ token: stored.token, user: stored.user });
+});
 
 // GET /api/auth/teable-login
 // Redirect browser to Teable authorization page
@@ -261,11 +282,14 @@ router.get('/teable-callback', async (req, res) => {
 
     // Issue JWT
     const jwtToken = signToken({ id: user.id, email: user.email, role: user.role });
-    const { passwordHash: _, ...safeUser } = user;
+    const safeUser = sanitizeUser(user);
+    const loginCode = crypto.randomBytes(32).toString('hex');
+    loginCodeStore.set(loginCode, { token: jwtToken, user: safeUser, createdAt: Date.now() });
+    setTimeout(() => loginCodeStore.delete(loginCode), LOGIN_CODE_TTL_MS);
 
-    // Redirect to frontend with token
-    const redirectUrl = `${FRONTEND_BASE_URL}/?oauth_token=${jwtToken}&email=${encodeURIComponent(email)}`;
-    console.log(`[Auth OAuth] Redirecting to frontend: ${redirectUrl}`);
+    // Redirect with a short-lived one-time code instead of a bearer token.
+    const redirectUrl = `${FRONTEND_BASE_URL}/?oauth_code=${loginCode}&email=${encodeURIComponent(email)}`;
+    console.log(`[Auth OAuth] Redirecting to frontend after successful login`);
     res.redirect(redirectUrl);
 
   } catch (err) {
@@ -312,8 +336,7 @@ router.put('/users/:id/role', authMiddleware, (req, res) => {
   if (idx === -1) return res.status(404).json({ error: '用户不存在' });
   users[idx].role = role;
   saveUsers(users);
-  const { passwordHash: _, ...safeUser } = users[idx];
-  res.json(safeUser);
+  res.json(sanitizeUser(users[idx]));
 });
 
 export default router;

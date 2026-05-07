@@ -65,6 +65,32 @@ function sqlPlaceholder(type, index) {
   return type === 'pg' ? `$${index + 1}` : '?';
 }
 
+const CONNECTION_SECRET_FIELDS = ['password', 'token', 'oauthClientSecret', 'teableOAuthToken'];
+const CONNECTION_DTO_ONLY_FIELDS = ['hasPassword', 'hasToken', 'hasOauthClientSecret'];
+
+function sanitizeConnection(conn) {
+  const safe = { ...conn };
+  for (const field of CONNECTION_SECRET_FIELDS) {
+    if (safe[field]) {
+      const flag = field === 'oauthClientSecret'
+        ? 'hasOauthClientSecret'
+        : `has${field[0].toUpperCase()}${field.slice(1)}`;
+      safe[flag] = true;
+    }
+    delete safe[field];
+  }
+  return safe;
+}
+
+function cleanConnectionInput(body = {}) {
+  const { id, ownerId, createdAt, deletedAt, ...cleaned } = body;
+  for (const field of CONNECTION_DTO_ONLY_FIELDS) delete cleaned[field];
+  for (const field of CONNECTION_SECRET_FIELDS) {
+    if (cleaned[field] === '') delete cleaned[field];
+  }
+  return cleaned;
+}
+
 // --- Auth routes (public) ---
 app.use('/api/auth', authRouter);
 // --- OAuth routes ---
@@ -146,21 +172,22 @@ app.get('/api/connections', (req, res) => {
     if (!includeDeleted && c.deletedAt) return false;
     return role === 'super_admin' || c.ownerId === userId || c.shared === true;
   });
-  res.json(visible);
+  res.json(visible.map(sanitizeConnection));
 });
 
 app.post('/api/connections', (req, res) => {
   const config = loadConfig();
+  const body = cleanConnectionInput(req.body);
   const conn = {
+    ...body,
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     ownerId: req.user.id,
-    shared: false, // 默认为私有
-    ...req.body,
+    shared: body.shared === true, // 默认为私有
   };
   config.connections.push(conn);
   saveConfig(config);
-  res.json(conn);
+  res.json(sanitizeConnection(conn));
 });
 
 app.put('/api/connections/:id', (req, res) => {
@@ -172,9 +199,10 @@ app.put('/api/connections/:id', (req, res) => {
   if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此连接' });
   }
-  config.connections[idx] = { ...conn, ...req.body, id: conn.id, ownerId: conn.ownerId };
+  const updates = cleanConnectionInput(req.body);
+  config.connections[idx] = { ...conn, ...updates, id: conn.id, ownerId: conn.ownerId, createdAt: conn.createdAt };
   saveConfig(config);
-  res.json(config.connections[idx]);
+  res.json(sanitizeConnection(config.connections[idx]));
 });
 
 app.delete('/api/connections/:id', (req, res) => {
@@ -441,14 +469,15 @@ app.post('/api/tasks', (req, res) => {
   const config = loadConfig();
   const validation = validateTaskConnections(config, req.user, req.body);
   if (validation.error) return res.status(400).json({ error: validation.error });
+  const { id, userId, createdAt, deletedAt, ...body } = req.body;
   const task = {
+    ...body,
     id: crypto.randomUUID(),
     enabled: false,
     createdAt: new Date().toISOString(),
     lastSyncAt: null,
     status: 'idle',
     userId: req.user.id, // 任务归属当前用户
-    ...req.body,
   };
   config.syncTasks.push(task);
   saveConfig(config);
@@ -464,7 +493,8 @@ app.put('/api/tasks/:id', (req, res) => {
   if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此任务' });
   }
-  const nextTask = { ...task, ...req.body, id: task.id, userId: task.userId };
+  const { id, userId, createdAt, deletedAt, ...updates } = req.body;
+  const nextTask = { ...task, ...updates, id: task.id, userId: task.userId, createdAt: task.createdAt };
   const validation = validateTaskConnections(config, req.user, nextTask);
   if (validation.error) return res.status(400).json({ error: validation.error });
   config.syncTasks[idx] = nextTask;
