@@ -24,6 +24,7 @@
             </div>
           </div>
           <div class="task-actions">
+            <span v-if="taskHealth[task.id]" class="health-badge" :class="taskHealth[task.id].status">{{ healthLabel(taskHealth[task.id].status) }}</span>
             <span class="status-badge" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
             <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running'" style="padding:8px 16px;font-size:13px">
               <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
@@ -82,6 +83,12 @@
               <span class="detail-value" v-if="task.lastSyncAt">{{ formatTime(task.lastSyncAt) }}</span>
               <span class="detail-value empty" v-else>从未执行</span>
             </div>
+          </div>
+          <div v-if="taskHealth[task.id]" class="health-line">
+            <span>成功率 {{ healthRate(taskHealth[task.id]) }}</span>
+            <span>平均耗时 {{ formatDuration(taskHealth[task.id].averageDurationMs) }}</span>
+            <span>最近 {{ latestStatusLabel(taskHealth[task.id].latestStatus) }}</span>
+            <span v-if="taskHealth[task.id].latestError" class="health-error" :title="taskHealth[task.id].latestError">错误：{{ taskHealth[task.id].latestError }}</span>
           </div>
           <div v-if="taskProgress[task.id] && taskProgress[task.id].status !== 'idle'" class="progress-panel">
             <div class="progress-line">
@@ -437,7 +444,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getSchedulerStatus, previewTaskData } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, getSchedulerStatus, previewTaskData } from '../api'
 
 // 当前用户身份
 const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
@@ -473,6 +480,7 @@ const previewLimit = ref(10)
 
 const schedulerStatus = ref({})
 const taskProgress = ref({})
+const taskHealth = ref({})
 const failureCounts = ref({})
 const failuresDialogVisible = ref(false)
 const failuresLoading = ref(false)
@@ -560,6 +568,33 @@ function statusClass(s) {
   return map[s] || ''
 }
 function formatTime(ts) { return new Date(ts).toLocaleString('zh-CN') }
+function formatDuration(ms) {
+  const n = Number(ms || 0)
+  if (!n) return '-'
+  if (n < 1000) return `${n}ms`
+  if (n < 60000) return `${(n / 1000).toFixed(1)}s`
+  return `${Math.round(n / 60000)}min`
+}
+function healthLabel(status) {
+  const map = {
+    healthy: '健康',
+    has_failures: '有失败',
+    recent_failed: '最近失败',
+    cancelled: '已取消',
+    never_run: '未运行',
+    running: '运行中',
+    deleted: '已删除',
+    unknown: '未知',
+  }
+  return map[status] || status
+}
+function latestStatusLabel(status) {
+  const map = { success: '成功', failed: '失败', cancelled: '取消', running: '运行中', never_run: '未运行' }
+  return map[status] || status
+}
+function healthRate(health) {
+  return health.successRate === null || health.successRate === undefined ? '-' : `${health.successRate}%`
+}
 function isTaskRunning(task) {
   const p = taskProgress.value[task.id]
   return task.status === 'running' || task._running || p?.status === 'running' || p?.status === 'cancelling'
@@ -697,6 +732,7 @@ async function loadAll() {
   tasks.value = await getTasks()
   try { schedulerStatus.value = await getSchedulerStatus() } catch {}
   try { failureCounts.value = await getFailureCounts() } catch {}
+  try { taskHealth.value = await getTasksHealth() } catch {}
   await refreshProgress()
 }
 
@@ -727,6 +763,7 @@ function startProgressPolling() {
         tasks.value = await getTasks()
         schedulerStatus.value = await getSchedulerStatus()
         failureCounts.value = await getFailureCounts()
+        taskHealth.value = await getTasksHealth()
       } catch {}
     }
   }, 2000)
@@ -1162,6 +1199,38 @@ onUnmounted(() => {
 .status-running { background: rgba(99,102,241,0.12); color: var(--accent); animation: pulse 2s ease-in-out infinite; }
 .status-scheduled { background: rgba(5,150,105,0.12); color: var(--green); }
 .status-error { background: rgba(220,38,38,0.12); color: var(--red); }
+
+.health-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+.health-badge.healthy { background: rgba(5,150,105,0.12); color: var(--green); }
+.health-badge.has_failures,
+.health-badge.recent_failed { background: rgba(220,38,38,0.12); color: var(--red); }
+.health-badge.cancelled,
+.health-badge.never_run,
+.health-badge.unknown { background: rgba(148,149,160,0.12); color: var(--text-tertiary); }
+.health-badge.running { background: rgba(99,102,241,0.12); color: var(--accent); }
+
+.health-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.health-error {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--red);
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

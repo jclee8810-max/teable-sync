@@ -14,6 +14,7 @@ import { decryptConfigSecrets, encryptConfigSecrets } from './services/secretSto
 import { getSyncFailures, getSyncFailureCounts, clearSyncFailures, removeSyncFailures, markSyncFailureRetried } from './services/syncFailures.js';
 import { createTeableRecords, updateTeableRecords, deleteTeableRecords } from './services/teableService.js';
 import { runSystemDoctor } from './services/systemDoctor.js';
+import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -1005,6 +1006,26 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
   }
   if (retried.length > 0) removeSyncFailures(retried);
   res.json({ retried: retried.length, failed: stillFailed.length, errors: stillFailed });
+});
+
+app.get('/api/tasks/:id/health', (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  res.json(getTaskHealth(task));
+});
+
+app.get('/api/tasks-health', (req, res) => {
+  const config = loadConfig();
+  const { role, id: userId } = req.user;
+  const tasks = config.syncTasks.filter((task) => {
+    if (task.deletedAt) return false;
+    return role === 'super_admin' || task.userId === userId;
+  });
+  res.json(getTaskHealthMap(tasks));
 });
 
 // Scheduler status
