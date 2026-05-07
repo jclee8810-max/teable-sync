@@ -248,6 +248,24 @@
           </el-col>
         </el-row>
 
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="源分页大小">
+              <el-input-number v-model="form.pageSize" :min="100" :max="5000" :step="100" style="width:100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="写入批量">
+              <el-input-number v-model="form.batchSize" :min="50" :max="1000" :step="50" style="width:100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="失败重试次数">
+              <el-input-number v-model="form.retryCount" :min="1" :max="8" style="width:100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
         <!-- Watermark Strategy -->
         <div class="section-divider">
           <span class="section-icon">⇌</span> 增量策略
@@ -305,6 +323,35 @@
           style="margin-bottom:12px"
         >
           ℹ️ 全量扫描模式每次同步都会拉取所有记录进行对比，适用于无时间戳/rowversion/自增主键的表，大数据量时可能较慢。
+        </el-alert>
+
+        <!-- Deletion Strategy -->
+        <div class="section-divider">
+          <span class="section-icon">⌫</span> 删除同步
+        </div>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="源端删除后的处理">
+              <el-select v-model="form.deletionMode" style="width:100%">
+                <el-option label="不处理删除" value="ignore" />
+                <el-option label="软删除标记" value="soft_delete" />
+                <el-option label="从 Teable 删除" value="hard_delete" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" v-if="form.deletionMode === 'soft_delete'">
+            <el-form-item label="软删除字段名">
+              <el-input v-model="form.softDeleteField" placeholder="deleted" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-alert
+          v-if="form.deletionMode !== 'ignore' && form.watermarkType !== 'full_scan'"
+          type="warning"
+          :closable="false"
+          style="margin-bottom:12px"
+        >
+          删除检测需要全量扫描。当前增量策略下会跳过删除同步。
         </el-alert>
       </el-form>
       <template #footer>
@@ -394,6 +441,8 @@ const defaultForm = {
   columnMapping: {}, conflictStrategy: 'upsert',
   sourcePrimaryKey: '', watermarkType: '', watermarkColumn: '',
   syncMode: 'manual', syncInterval: 300,
+  pageSize: 1000, batchSize: 500, retryCount: 3,
+  deletionMode: 'ignore', softDeleteField: 'deleted',
 }
 const form = ref({ ...defaultForm })
 

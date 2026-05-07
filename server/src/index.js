@@ -10,6 +10,7 @@ import authRouter from './routes/auth.js';
 import oauthRouter from './routes/oauth.js';
 import { authMiddleware, verifyToken } from './middleware/auth.js';
 import { canReadConnection, validateTaskConnections } from './services/accessControl.js';
+import { decryptConfigSecrets, encryptConfigSecrets } from './services/secretStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -32,7 +33,7 @@ let _writeLock = Promise.resolve();
 
 function loadConfig() {
   if (existsSync(CONFIG_FILE)) {
-    return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    return decryptConfigSecrets(JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')));
   }
   const defaults = { connections: [], syncTasks: [], syncLogs: [] };
   saveConfig(defaults);
@@ -42,7 +43,7 @@ function loadConfig() {
 function saveConfig(config) {
   _writeLock = _writeLock.then(() => {
     const tmpFile = `${CONFIG_FILE}.tmp`;
-    writeFileSync(tmpFile, JSON.stringify(config, null, 2), 'utf-8');
+    writeFileSync(tmpFile, JSON.stringify(encryptConfigSecrets(config), null, 2), 'utf-8');
     renameSync(tmpFile, CONFIG_FILE);
   }).catch(err => {
     console.error('❌ Config write error:', err.message);
@@ -88,6 +89,22 @@ function cleanConnectionInput(body = {}) {
   for (const field of CONNECTION_SECRET_FIELDS) {
     if (cleaned[field] === '') delete cleaned[field];
   }
+  return cleaned;
+}
+
+function clampInt(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+function cleanTaskInput(body = {}) {
+  const { id, userId, createdAt, deletedAt, status, enabled, lastSyncAt, ...cleaned } = body;
+  cleaned.pageSize = clampInt(cleaned.pageSize, 1000, 100, 5000);
+  cleaned.batchSize = clampInt(cleaned.batchSize, 500, 50, 1000);
+  cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
+  if (!['ignore', 'soft_delete', 'hard_delete'].includes(cleaned.deletionMode)) cleaned.deletionMode = 'ignore';
+  if (!/^[a-zA-Z0-9_]+$/.test(cleaned.softDeleteField || 'deleted')) cleaned.softDeleteField = 'deleted';
   return cleaned;
 }
 
@@ -233,7 +250,7 @@ app.put('/api/connections/:id/share', (req, res) => {
   }
   config.connections[idx].shared = shared;
   saveConfig(config);
-  res.json(config.connections[idx]);
+  res.json(sanitizeConnection(config.connections[idx]));
 });
 
 // POST /api/connections/:id/restore — 恢复已删除的连接（仅 owner 或 super_admin）
@@ -248,7 +265,7 @@ app.post('/api/connections/:id/restore', (req, res) => {
   if (!conn.deletedAt) return res.status(400).json({ error: '该连接未被删除' });
   delete config.connections[idx].deletedAt;
   saveConfig(config);
-  res.json(config.connections[idx]);
+  res.json(sanitizeConnection(config.connections[idx]));
 });
 
 // Test connection (supports both SQL databases and Teable)
@@ -469,7 +486,7 @@ app.post('/api/tasks', (req, res) => {
   const config = loadConfig();
   const validation = validateTaskConnections(config, req.user, req.body);
   if (validation.error) return res.status(400).json({ error: validation.error });
-  const { id, userId, createdAt, deletedAt, ...body } = req.body;
+  const body = cleanTaskInput(req.body);
   const task = {
     ...body,
     id: crypto.randomUUID(),
@@ -493,7 +510,7 @@ app.put('/api/tasks/:id', (req, res) => {
   if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此任务' });
   }
-  const { id, userId, createdAt, deletedAt, ...updates } = req.body;
+  const updates = cleanTaskInput(req.body);
   const nextTask = { ...task, ...updates, id: task.id, userId: task.userId, createdAt: task.createdAt };
   const validation = validateTaskConnections(config, req.user, nextTask);
   if (validation.error) return res.status(400).json({ error: validation.error });

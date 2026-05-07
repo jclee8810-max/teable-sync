@@ -1,20 +1,65 @@
 // Teable API service - corrected API paths
 
+const DEFAULT_RETRY_COUNT = 3;
+const DEFAULT_RETRY_BASE_MS = 500;
+const DEFAULT_REQUEST_GAP_MS = 120;
+
+let lastRequestAt = 0;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function throttleTeableRequests(options = {}) {
+  const gapMs = Number(options.rateLimitMs ?? process.env.TEABLE_RATE_LIMIT_MS ?? DEFAULT_REQUEST_GAP_MS);
+  if (gapMs <= 0) return;
+  const now = Date.now();
+  const waitMs = Math.max(0, lastRequestAt + gapMs - now);
+  if (waitMs > 0) await sleep(waitMs);
+  lastRequestAt = Date.now();
+}
+
+function shouldRetry(status) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
 async function teableRequest(conn, path, options = {}) {
   const baseUrl = (conn.host || conn.baseUrl || '').replace(/\/+$/, '');
   const url = `${baseUrl}${path}`;
+  const retryCount = Number(options.retryCount ?? conn.retryCount ?? DEFAULT_RETRY_COUNT);
+  const retryBaseMs = Number(options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS);
+  const { retryCount: _retryCount, retryBaseMs: _retryBaseMs, rateLimitMs: _rateLimitMs, ...fetchOptions } = options;
   const headers = {
     Authorization: `Bearer ${conn.token}`,
     'Content-Type': 'application/json',
     ...(options.headers || {}),
   };
 
-  const res = await fetch(url, { ...options, headers });
-  if (!res.ok) {
+  for (let attempt = 0; attempt <= retryCount; attempt++) {
+    await throttleTeableRequests(options);
+    let res;
+    try {
+      res = await fetch(url, { ...fetchOptions, headers });
+    } catch (err) {
+      if (attempt >= retryCount) throw err;
+      await sleep(retryBaseMs * 2 ** attempt);
+      continue;
+    }
+
+    if (res.ok) {
+      if (res.status === 204) return null;
+      const text = await res.text();
+      return text ? JSON.parse(text) : null;
+    }
+
     const text = await res.text();
+    if (attempt < retryCount && shouldRetry(res.status)) {
+      const retryAfter = Number(res.headers.get('retry-after'));
+      await sleep(Number.isFinite(retryAfter) ? retryAfter * 1000 : retryBaseMs * 2 ** attempt);
+      continue;
+    }
     throw new Error(`Teable API ${res.status}: ${text}`);
   }
-  return res.json();
 }
 
 export async function getTeableSpaces(conn) {
@@ -54,11 +99,11 @@ export async function getTeableRecords(conn, tableId, options = {}) {
   if (options.fieldKeyType) params.set('fieldKeyType', options.fieldKeyType || 'name');
   if (options.filter) params.set('filter', JSON.stringify(options.filter));
   if (options.sort) params.set('sort', JSON.stringify(options.sort));
-  // Support both naming conventions: take/skip (legacy) and pageSize/page (Teable standard)
-  if (options.pageSize != null) params.set('pageSize', options.pageSize);
-  else if (options.take != null) params.set('pageSize', options.take);
-  if (options.page != null) params.set('page', options.page);
-  else if (options.skip != null) params.set('page', Math.floor(options.skip / (options.pageSize || 100)) + 1);
+  // Teable record list pagination uses take/skip.
+  if (options.take != null) params.set('take', options.take);
+  else if (options.pageSize != null) params.set('take', options.pageSize);
+  if (options.skip != null) params.set('skip', options.skip);
+  else if (options.page != null) params.set('skip', (Math.max(1, Number(options.page)) - 1) * Number(options.pageSize || options.take || 100));
 
   const qs = params.toString();
   const path = `/api/table/${tableId}/record${qs ? '?' + qs : ''}`;
@@ -76,6 +121,16 @@ export async function updateTeableRecords(conn, tableId, records) {
   return teableRequest(conn, `/api/table/${tableId}/record`, {
     method: 'PATCH',
     body: JSON.stringify({ fieldKeyType: 'name', records }),
+  });
+}
+
+export async function deleteTeableRecords(conn, tableId, recordIds) {
+  const ids = Array.isArray(recordIds) ? recordIds : [recordIds];
+  if (ids.length === 0) return null;
+  const params = new URLSearchParams();
+  for (const id of ids) params.append('recordIds[]', id);
+  return teableRequest(conn, `/api/table/${tableId}/record?${params.toString()}`, {
+    method: 'DELETE',
   });
 }
 

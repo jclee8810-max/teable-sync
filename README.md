@@ -9,12 +9,15 @@ SQL Server / MySQL / PostgreSQL → Teable 数据同步工具，带 Web GUI。
 | 多数据库支持（SQL Server / MySQL / PostgreSQL） | ✅ |
 | 全量同步 + 增量同步（基于时间戳） | ✅ |
 | Upsert 冲突策略（按主键更新/跳过） | ✅ |
+| 分页读取 + 批量写入 + 失败重试/限流 | ✅ |
+| 删除同步（忽略 / 软删除 / 物理删除） | ✅ |
 | 自动建字段（检测源表新增列 → 自动在 Teable 创建） | ✅ |
 | 字段类型映射（SQL → Teable 类型自动转换） | ✅ |
 | 可视化 Web 管理界面（暗色主题） | ✅ |
 | 实时同步日志（WebSocket） | ✅ |
 | 定时调度（手动 / 定时） | ✅ |
 | 连接测试（保存前验证连通性） | ✅ |
+| 配置密钥加密存储 | ✅ |
 | Teable OAuth 2.0 授权连接 | ✅ |
 | OAuth 单点登录（用 Teable 账号登录） | ✅ |
 | 用户认证（JWT + 密码加密） | ✅ |
@@ -77,7 +80,7 @@ cd client && npm install && cd ..
 1. 选择源连接 → 选择源表
 2. 选择目标连接 → 选择目标表
 3. 配置字段映射（自动检测主键和时间戳列）
-4. 选择同步模式（手动 / 定时）和冲突策略（Upsert / Skip）
+4. 选择同步模式（手动 / 定时）、冲突策略（Upsert / Skip）和可靠性参数
 5. 保存并手动触发一次同步
 
 ### 5. 启动服务
@@ -163,6 +166,20 @@ docker run -d -p 3101:3101 --name teable-sync teable-sync
 - **Upsert**：主键冲突时更新现有记录，不重复插入
 - **Skip**：主键冲突时跳过该记录
 
+### 可靠性参数
+- **源分页大小**：每次从源数据库读取的行数，默认 1000，最大 5000
+- **写入批量**：每次写入 Teable 的记录数，默认 500，最大 1000
+- **失败重试次数**：源读取、Teable 读取和批量写入失败时的重试次数，默认 3
+- Teable API 请求内置退避重试，默认对 408 / 409 / 425 / 429 / 5xx 和网络错误重试
+- `TEABLE_RATE_LIMIT_MS` 可控制 Teable 请求间隔，默认 120ms
+
+### 删除同步
+- **不处理删除**：默认策略，只同步新增和更新
+- **软删除标记**：源端记录消失时，将 Teable 目标记录的软删除字段标记为 `true`
+- **从 Teable 删除**：源端记录消失时，直接删除 Teable 目标记录
+- 删除检测只在 **全量扫描** 策略下执行。时间戳、rowversion、自增主键等增量策略无法可靠判断源端删除，因此会自动跳过删除检测。
+- 使用软删除前，请确认目标表存在对应字段，默认字段名为 `deleted`。
+
 ### 自动建字段
 - 同步时检测源表新增列
 - 自动在 Teable 目标表创建对应字段
@@ -199,10 +216,29 @@ docker run -d -p 3101:3101 --name teable-sync teable-sync
 |------|--------|------|
 | TEABLE_OAUTH_HOST | http://localhost:3000 | Teable 实例地址 |
 | SERVER_PUBLIC_URL | http://localhost:3101 | 服务器公网地址（OAuth 回调用）|
-FRONTEND_BASE_URL=http://localhost:3101
+| FRONTEND_BASE_URL | http://localhost:3101 | 前端访问地址 |
 | TEABLE_OAUTH_CLIENT_ID | - | OAuth App Client ID |
 | TEABLE_OAUTH_CLIENT_SECRET | - | OAuth App Client Secret |
 | PORT | 3100 | 后端端口 |
+
+### 配置和密钥存储
+
+连接配置仍保存在 `server/data/config.json`，但敏感字段会在保存时加密：
+
+- 数据库密码：`password`
+- Teable Token：`token`
+- OAuth Client Secret：`oauthClientSecret`
+- Teable OAuth Token：`teableOAuthToken`
+
+生产环境建议显式设置：
+
+```bash
+CONFIG_ENCRYPTION_KEY=请生成32字节以上随机字符串
+JWT_SECRET=请生成32字节以上随机字符串
+TEABLE_RATE_LIMIT_MS=120
+```
+
+如果未设置 `CONFIG_ENCRYPTION_KEY`，系统会使用 `JWT_SECRET` 派生加密密钥；如果两者都未设置，则为兼容旧部署继续明文保存。加密密钥必须长期备份，密钥丢失或更换后，已加密的连接密码和 Token 将无法解密。
 
 ## 客户部署指南
 
@@ -219,6 +255,8 @@ SERVER_PUBLIC_URL=http://192.168.10.2:3101  # 服务器在局域网的地址
 FRONTEND_BASE_URL=http://localhost:3101
 TEABLE_OAUTH_HOST=http://your-teable:3000    # Teable 实例地址
 JWT_SECRET=请生成32字节随机字符串
+CONFIG_ENCRYPTION_KEY=请生成32字节以上随机字符串
+TEABLE_RATE_LIMIT_MS=120
 ```
 
 **2. 启动服务**
@@ -243,12 +281,14 @@ cd server && npm start
 docker build -t teable-sync .
 
 # 运行容器
-docker run -d -p 3101:3101 -p 3101:3101 \
-  -e PORT=3100 \
+docker run -d -p 3101:3101 \
+  -e PORT=3101 \
   -e SERVER_PUBLIC_URL=http://your-server:3101 \
-FRONTEND_BASE_URL=http://localhost:3101
+  -e FRONTEND_BASE_URL=http://localhost:3101 \
   -e TEABLE_OAUTH_HOST=http://your-teable:3000 \
   -e JWT_SECRET=your-random-secret \
+  -e CONFIG_ENCRYPTION_KEY=your-random-config-key \
+  -e TEABLE_RATE_LIMIT_MS=120 \
   -v /path/to/data:/app/server/data \
   --name teable-sync \
   teable-sync
@@ -291,6 +331,7 @@ server {
 ```bash
 SERVER_PUBLIC_URL=https://sync.yourcompany.com
 FRONTEND_BASE_URL=http://localhost:3101
+CONFIG_ENCRYPTION_KEY=your-random-config-key
 ```
 
 ## API 接口

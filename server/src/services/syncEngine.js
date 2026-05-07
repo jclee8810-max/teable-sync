@@ -10,9 +10,9 @@
 //   2. Auto-detect: rowversion (MSSQL) → timestamp → auto_pk → full_scan
 
 import { query, getTableSchema } from './dbService.js';
-import { getTeableFields, getTeableRecords, createTeableRecords, updateTeableRecords, ensureTeableFields } from './teableService.js';
+import { getTeableFields, getTeableRecords, createTeableRecords, updateTeableRecords, deleteTeableRecords, createTeableField, ensureTeableFields } from './teableService.js';
 import { createSyncHistory, updateSyncHistory } from './syncHistory.js';
-import { convertValue, normalizeSqlType } from './typeConverter.js';
+import { convertValue } from './typeConverter.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -37,6 +37,65 @@ function quoteIdentifier(type, name) {
 
 function placeholder(type, index) {
   return type === 'pg' ? `$${index + 1}` : '?';
+}
+
+function toPositiveInt(value, fallback, max = 5000) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), max);
+}
+
+function buildPagedSql(type, baseSql, orderBy, limit, offset, paramStart) {
+  if (type === 'mssql') {
+    return {
+      sql: baseSql + ' ORDER BY ' + orderBy + ' OFFSET ' + placeholder(type, paramStart) + ' ROWS FETCH NEXT ' + placeholder(type, paramStart + 1) + ' ROWS ONLY',
+      params: [offset, limit],
+    };
+  }
+  return {
+    sql: baseSql + ' ORDER BY ' + orderBy + ' LIMIT ' + placeholder(type, paramStart) + ' OFFSET ' + placeholder(type, paramStart + 1),
+    params: [limit, offset],
+  };
+}
+
+async function withRetry(fn, attempts, log, label) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= attempts) break;
+      const waitMs = 500 * 2 ** (attempt - 1);
+      log('warn', '  重试 ' + label + ' (' + attempt + '/' + attempts + '): ' + err.message);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  throw lastErr;
+}
+
+function createRecordFields(row, mapping, srcTypeMap, tgtTypeMap, log) {
+  const recordFields = {};
+  for (const [srcCol, tgtField] of Object.entries(mapping)) {
+    let val = row[srcCol];
+    if (val === undefined || val === null) {
+      recordFields[tgtField] = null;
+      continue;
+    }
+    const sqlType = srcTypeMap[srcCol];
+    const teableType = tgtTypeMap[tgtField];
+    if (sqlType && teableType) {
+      val = convertValue(val, sqlType, teableType);
+    } else {
+      if (val instanceof Date) val = val.toISOString();
+      if (Buffer.isBuffer(val)) {
+        log('warn', '  字段 ' + srcCol + ' 含二进制数据,已跳过');
+        val = null;
+      }
+    }
+    recordFields[tgtField] = val;
+  }
+  return recordFields;
 }
 
 function getSyncState(taskId) {
@@ -188,317 +247,266 @@ function resolveWatermark(task, pkCol, candidates) {
   return { type, col, description: descriptions[type] };
 }
 
+
 export async function runSync(task, srcConn, tgtConn, broadcastLog) {
   const taskId = task.id;
   const startTime = Date.now();
-  const db = task.sourceDatabase || null; // database override
+  const db = task.sourceDatabase || null;
+  const pageSize = toPositiveInt(task.pageSize, 1000, 5000);
+  const batchSize = toPositiveInt(task.batchSize, 500, 1000);
+  const retryCount = toPositiveInt(task.retryCount, 3, 8);
+  const deletionMode = task.deletionMode || 'ignore';
+  const softDeleteField = task.softDeleteField || 'deleted';
 
   const log = (level, msg) => {
     const entry = { taskId, level, message: msg, ts: new Date().toISOString() };
     broadcastLog(entry);
   };
 
-  // P1-1: Prevent concurrent runs of the same task
   if (syncLocks.has(taskId)) {
-    log('warn', '⏳ 任务正在执行中，忽略本次请求');
+    log('warn', '任务正在执行中，忽略本次请求');
     return;
   }
   syncLocks.add(taskId);
+  log('info', '开始同步任务: ' + task.name);
 
-  // Create history record
-  log('info', `🔄 开始同步任务: ${task.name}`);
-
+  let historyRec = null;
   try {
-    let historyRec = null;
-
-    // 1. Detect PK + watermark candidates
     const { pkCol: autoPkCol, candidates } = await detectWatermarkCandidates(srcConn, task.sourceTable, db);
-    let pkCol = task.sourcePrimaryKey || autoPkCol;
+    const pkCol = task.sourcePrimaryKey || autoPkCol;
+    if (!pkCol) throw new Error('无法检测到主键列,请手动配置 sourcePrimaryKey');
 
-    if (!pkCol) {
-      log('error', '❌ 无法检测到主键列,请手动配置 sourcePrimaryKey');
-      return;
-    }
+    const safeId = (name) => /^[a-zA-Z0-9_]+$/.test(name);
+    if (!safeId(pkCol)) throw new Error('非法列名: pkCol=' + pkCol);
 
-    // Resolve watermark strategy
     const watermark = resolveWatermark(task, pkCol, candidates);
-    log('info', `📌 主键列: ${pkCol} | 增量策略: ${watermark.description}`);
-
-    // 2. Load sync state for incremental
     const state = getSyncState(taskId);
-
-    // 3. Fetch source data (strategy-aware)
     const table = quoteIdentifier(srcConn.type, task.sourceTable);
-    let fetchSql = `SELECT * FROM ${table}`;
-    let fetchParams = [];
+    const pkIdentifier = quoteIdentifier(srcConn.type, pkCol);
+    const orderIdentifier = watermark.type === 'rowversion' && watermark.col
+      ? quoteIdentifier(srcConn.type, watermark.col)
+      : pkIdentifier;
+
+    let baseSql = 'SELECT * FROM ' + table;
+    const baseParams = [];
     let isIncremental = false;
 
-    // 列名安全校验
-    const safeId = (name) => /^[a-zA-Z0-9_]+$/.test(name);
-    if (pkCol && !safeId(pkCol)) {
-      throw new Error(`非法列名: pkCol=${pkCol}`);
-    }
-
     if (watermark.type === 'timestamp') {
-      // --- timestamp strategy ---
       const tsCol = watermark.col;
-      if (!safeId(tsCol)) throw new Error(`非法列名: tsCol=${tsCol}`);
-      const tsIdentifier = quoteIdentifier(srcConn.type, tsCol);
+      if (!safeId(tsCol)) throw new Error('非法列名: tsCol=' + tsCol);
       if (state.lastSyncAt) {
-        fetchSql += ` WHERE ${tsIdentifier} > ${placeholder(srcConn.type, fetchParams.length)}`;
-        fetchParams.push(state.lastSyncAt);
+        baseSql += ' WHERE ' + quoteIdentifier(srcConn.type, tsCol) + ' > ' + placeholder(srcConn.type, baseParams.length);
+        baseParams.push(state.lastSyncAt);
         isIncremental = true;
       }
     } else if (watermark.type === 'rowversion') {
-      // --- rowversion strategy ---
-      // MSSQL rowversion is a binary(8) that auto-increments on any UPDATE.
-      // We store the max rowversion value as hex string in state.watermarkValue
       const rvCol = watermark.col;
-      if (!safeId(rvCol)) throw new Error(`非法列名: rvCol=${rvCol}`);
-      const rvIdentifier = quoteIdentifier(srcConn.type, rvCol);
+      if (!safeId(rvCol)) throw new Error('非法列名: rvCol=' + rvCol);
+      if (srcConn.type !== 'mssql') throw new Error('rowversion 策略仅支持 MSSQL');
       if (state.watermarkValue) {
-        // Convert stored hex to varbinary for comparison
-        fetchSql += ` WHERE ${rvIdentifier} > CONVERT(varbinary(8), ${placeholder(srcConn.type, fetchParams.length)}, 1)`;
-        fetchParams.push(state.watermarkValue);
+        baseSql += ' WHERE ' + quoteIdentifier(srcConn.type, rvCol) + ' > CONVERT(varbinary(8), ' + placeholder(srcConn.type, baseParams.length) + ', 1)';
+        baseParams.push(state.watermarkValue);
         isIncremental = true;
       }
     } else if (watermark.type === 'auto_pk') {
-      // --- auto_pk strategy ---
-      // Use MAX(pk) from Teable target as watermark → only catches new inserts
-      const pkIdentifier = quoteIdentifier(srcConn.type, pkCol);
       if (state.watermarkPkValue !== undefined && state.watermarkPkValue !== null) {
-        fetchSql += ` WHERE ${pkIdentifier} > ${placeholder(srcConn.type, fetchParams.length)}`;
-        fetchParams.push(state.watermarkPkValue);
+        baseSql += ' WHERE ' + pkIdentifier + ' > ' + placeholder(srcConn.type, baseParams.length);
+        baseParams.push(state.watermarkPkValue);
         isIncremental = true;
       }
     }
-    // full_scan: no WHERE clause, always pull everything
 
-    const sourceRows = await query(srcConn, fetchSql, fetchParams, db);
     const mode = isIncremental ? 'incremental' : 'full';
     historyRec = createSyncHistory(taskId, task.name, task.sourceTable, task.targetTableId);
     historyRec.mode = mode;
+    log('info', '主键列: ' + pkCol + ' | 增量策略: ' + watermark.description + ' | 分页: ' + pageSize + '/页 | 写入批量: ' + batchSize);
 
-    log('info', `📥 ${mode === 'incremental' ? '增量' : '全量'}拉取 ${sourceRows.length} 条记录`);
-
-    if (sourceRows.length === 0) {
-      log('info', '✅ 没有需要同步的记录');
-      return;
-    }
-
-    // 4. Auto-create missing target fields + build column mapping
     const fields = await getTeableFields(tgtConn, task.targetTableId);
     const columnMapping = task.columnMapping || {};
     const sourceSchema = await getTableSchema(srcConn, task.sourceTable, db);
-    const { mapping: autoMapping, createdFields, skippedAttachmentCols } = await ensureTeableFields(
-      tgtConn, task.targetTableId, sourceSchema, columnMapping, fields, log
-    );
-    // User mapping takes priority over auto-created mapping
+    const { mapping: autoMapping, createdFields } = await ensureTeableFields(tgtConn, task.targetTableId, sourceSchema, columnMapping, fields, log);
     const mapping = { ...autoMapping, ...columnMapping };
 
-    // Build type maps for value conversion
-    // srcTypeMap: sourceColumnName → normalized SQL type
-    // tgtTypeMap: targetFieldName → Teable field type
     const srcTypeMap = {};
-    for (const col of sourceSchema) {
-      srcTypeMap[col.name] = col.type;
-    }
+    for (const col of sourceSchema) srcTypeMap[col.name] = col.type;
     const tgtTypeMap = {};
-    for (const f of fields) {
-      tgtTypeMap[f.name] = f.type;
-    }
-    // Also include auto-created fields
-    for (const cf of createdFields) {
-      tgtTypeMap[cf.fieldName] = cf.type;
-    }
+    for (const f of fields) tgtTypeMap[f.name] = f.type;
+    for (const cf of createdFields) tgtTypeMap[cf.fieldName] = cf.type;
 
-    // P1-2: Validate user-specified column mappings point to existing target fields
     for (const [srcCol, tgtField] of Object.entries(columnMapping)) {
-      if (!fields.find(f => f.name === tgtField)) {
-        log('warn', `⚠️ 用户映射 ${srcCol}→${tgtField}，但目标字段不存在，已忽略此映射`);
+      const created = createdFields.find(f => f.col === srcCol);
+      if (created) {
+        mapping[srcCol] = created.fieldName;
+      } else if (!fields.find(f => f.name === tgtField)) {
+        log('warn', '用户映射 ' + srcCol + '->' + tgtField + '，但目标字段不存在，已忽略此映射');
         delete mapping[srcCol];
       }
     }
-    if (createdFields.length > 0) {
-      log('info', `🔗 字段映射: ${Object.keys(mapping).map(k => `${k}→${mapping[k]}`).join(', ')}`);
-    } else {
-      log('info', `🔗 字段映射: ${Object.entries(mapping).map(([k,v]) => `${k}→${v}`).join(', ')}`);
-    }
-
-    // 5. Get existing records from Teable for conflict detection (分页获取)
-    let existingRecords = [];
-    try {
-      let offset = 0;
-      const pageSize = 1000;
-      while (true) {
-        const result = await getTeableRecords(tgtConn, task.targetTableId, { skip: offset, take: pageSize });
-        let page;
-        if (Array.isArray(result)) page = result;
-        else if (result.records) page = result.records;
-        else if (result.data) page = result.data.records || result.data;
-        else page = [];
-        existingRecords.push(...page);
-        if (page.length < pageSize) break;
-        offset += pageSize;
+    if (deletionMode === 'soft_delete' && !fields.find(f => f.name === softDeleteField) && !createdFields.find(f => f.fieldName === softDeleteField)) {
+      try {
+        const created = await createTeableField(tgtConn, task.targetTableId, softDeleteField, 'boolean');
+        tgtTypeMap[created.name] = created.type || 'checkbox';
+        log('info', '  自动创建软删除字段: ' + created.name);
+      } catch (err) {
+        throw new Error('软删除字段不存在且自动创建失败: ' + err.message);
       }
-      if (existingRecords.length > 0) {
-        log('info', `📊 目标表已有 ${existingRecords.length} 条记录(分页获取完成)`);
-      }
-    } catch (e) {
-      log('error', `❌ 获取现有记录失败，同步终止: ${e.message}`);
-      return;
     }
-
-    // Build index by PK
     const pkFieldName = mapping[pkCol] || pkCol;
+    log('info', '字段映射: ' + Object.entries(mapping).map(([k, v]) => k + '->' + v).join(', '));
+
+    const existingRecords = [];
+    let targetOffset = 0;
+    const targetPageSize = 1000;
+    while (true) {
+      const result = await withRetry(() => getTeableRecords(tgtConn, task.targetTableId, { skip: targetOffset, take: targetPageSize }), retryCount, log, '读取 Teable 记录');
+      let page;
+      if (Array.isArray(result)) page = result;
+      else if (result?.records) page = result.records;
+      else if (result?.data) page = result.data.records || result.data;
+      else page = [];
+      existingRecords.push(...page);
+      if (page.length < targetPageSize) break;
+      targetOffset += targetPageSize;
+    }
+    log('info', '目标表已有 ' + existingRecords.length + ' 条记录');
+
     const existingMap = new Map();
     for (const rec of existingRecords) {
       const recFields = rec.fields || rec;
       const pkVal = recFields[pkFieldName];
-      if (pkVal !== undefined && pkVal !== null) {
-        existingMap.set(String(pkVal), rec.id || rec.recordId);
+      if (pkVal !== undefined && pkVal !== null) existingMap.set(String(pkVal), { id: rec.id || rec.recordId, fields: recFields });
+    }
+
+    let sourceRowsCount = 0, insertCount = 0, updateCount = 0, skipCount = 0, deleteCount = 0, softDeleteCount = 0, errorCount = 0;
+    const seenSourcePks = new Set();
+    const rowversionValues = [];
+    const pkValues = [];
+
+    async function flushWrites(toInsert, toUpdate) {
+      for (let i = 0; i < toInsert.length; i += batchSize) {
+        const batch = toInsert.slice(i, i + batchSize);
+        try {
+          await withRetry(() => createTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '批量插入');
+          insertCount += batch.length;
+        } catch (err) {
+          errorCount += batch.length;
+          log('warn', '批量插入失败: ' + err.message);
+        }
+      }
+      for (let i = 0; i < toUpdate.length; i += batchSize) {
+        const batch = toUpdate.slice(i, i + batchSize);
+        try {
+          await withRetry(() => updateTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '批量更新');
+          updateCount += batch.length;
+        } catch (err) {
+          errorCount += batch.length;
+          log('warn', '批量更新失败: ' + err.message);
+        }
       }
     }
 
-    // 6. Process rows
-    let insertCount = 0, updateCount = 0, skipCount = 0, errorCount = 0;
-    const toInsert = [];
-    const toUpdate = [];
+    let sourceOffset = 0;
+    while (true) {
+      const { sql: pageSql, params: pageParams } = buildPagedSql(srcConn.type, baseSql, orderIdentifier + ' ASC', pageSize, sourceOffset, baseParams.length);
+      const sourceRows = await query(srcConn, pageSql, [...baseParams, ...pageParams], db);
+      if (sourceRows.length === 0) break;
 
-    for (const row of sourceRows) {
-      try {
-        const pkVal = String(row[pkCol]);
-        const existingId = existingMap.get(pkVal);
-        const recordFields = {};
-
-        for (const [srcCol, tgtField] of Object.entries(mapping)) {
-          let val = row[srcCol];
-          if (val === undefined || val === null) {
-            recordFields[tgtField] = null;
-            continue;
-          }
-          // Use type converter for safe SQL → Teable value transformation
-          const sqlType = srcTypeMap[srcCol];
-          const teableType = tgtTypeMap[tgtField];
-          if (sqlType && teableType) {
-            val = convertValue(val, sqlType, teableType);
-          } else {
-            // Fallback: basic type handling
-            if (val instanceof Date) val = val.toISOString();
-            if (Buffer.isBuffer(val)) {
-              log('warn', `⚠️ 字段 ${srcCol} 含二进制数据,已跳过`);
-              val = null;
+      sourceRowsCount += sourceRows.length;
+      const toInsert = [];
+      const toUpdate = [];
+      for (const row of sourceRows) {
+        try {
+          const pkValRaw = row[pkCol];
+          const pkVal = String(pkValRaw);
+          seenSourcePks.add(pkVal);
+          pkValues.push(pkValRaw);
+          if (watermark.type === 'rowversion' && watermark.col && row[watermark.col]) rowversionValues.push(row[watermark.col]);
+          const existing = existingMap.get(pkVal);
+          const recordFields = createRecordFields(row, mapping, srcTypeMap, tgtTypeMap, log);
+          if (deletionMode === 'soft_delete' && softDeleteField) recordFields[softDeleteField] = false;
+          if (existing?.id) {
+            if (task.conflictStrategy === 'skip' || task.conflictStrategy === 'insert_only') {
+              skipCount++;
+              continue;
             }
+            toUpdate.push({ id: existing.id, fields: recordFields });
+          } else {
+            toInsert.push({ fields: recordFields });
           }
-          recordFields[tgtField] = val;
+        } catch (err) {
+          errorCount++;
+          log('warn', '行处理失败 (PK=' + row[pkCol] + '): ' + err.message);
         }
+      }
+      await flushWrites(toInsert, toUpdate);
+      log('info', '已处理源数据 ' + sourceRowsCount + ' 行');
+      if (sourceRows.length < pageSize) break;
+      sourceOffset += pageSize;
+    }
 
-        if (existingId) {
-          if (task.conflictStrategy === 'skip') {
-            skipCount++;
-            continue;
+    if (sourceRowsCount === 0) log('info', '没有需要同步的记录');
+
+    if (deletionMode !== 'ignore' && watermark.type === 'full_scan' && errorCount === 0) {
+      const missing = [];
+      for (const [pkVal, existing] of existingMap.entries()) {
+        if (!seenSourcePks.has(pkVal) && existing.id) missing.push(existing);
+      }
+      if (missing.length > 0) log('info', '检测到目标表 ' + missing.length + ' 条记录源端已不存在，删除策略: ' + deletionMode);
+      if (deletionMode === 'soft_delete') {
+        for (let i = 0; i < missing.length; i += batchSize) {
+          const batch = missing.slice(i, i + batchSize).map((rec) => ({ id: rec.id, fields: { [softDeleteField]: true } }));
+          try {
+            await withRetry(() => updateTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '软删除标记');
+            softDeleteCount += batch.length;
+          } catch (err) {
+            errorCount += batch.length;
+            log('warn', '软删除标记失败: ' + err.message);
           }
-          toUpdate.push({ id: existingId, fields: recordFields });
-        } else {
-          toInsert.push({ fields: recordFields });
         }
-      } catch (err) {
-        errorCount++;
-        log('warn', `⚠️ 行处理失败 (PK=${row[pkCol]}): ${err.message}`);
+      } else if (deletionMode === 'hard_delete') {
+        for (let i = 0; i < missing.length; i += batchSize) {
+          const ids = missing.slice(i, i + batchSize).map((rec) => rec.id);
+          try {
+            await withRetry(() => deleteTeableRecords(tgtConn, task.targetTableId, ids), retryCount, log, '物理删除');
+            deleteCount += ids.length;
+          } catch (err) {
+            errorCount += ids.length;
+            log('warn', '物理删除失败: ' + err.message);
+          }
+        }
       }
+    } else if (deletionMode !== 'ignore' && watermark.type !== 'full_scan') {
+      log('warn', '删除同步仅在全量扫描策略下执行，当前增量策略已跳过删除检测');
     }
 
-    // 7. Batch write to Teable
-    // P2-2: Increase batch size — Teable supports up to 1000 records per request
-    const BATCH_SIZE = 500;
+    if (errorCount > 0) throw new Error('同步存在 ' + errorCount + ' 条失败记录，未推进增量水位');
 
-    for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
-      const batch = toInsert.slice(i, i + BATCH_SIZE);
-      try {
-        await createTeableRecords(tgtConn, task.targetTableId, batch);
-        insertCount += batch.length;
-      } catch (err) {
-        errorCount += batch.length;
-        log('warn', `⚠️ 批量插入失败: ${err.message}`);
-      }
-    }
-
-    for (let i = 0; i < toUpdate.length; i += BATCH_SIZE) {
-      const batch = toUpdate.slice(i, i + BATCH_SIZE);
-      try {
-        await updateTeableRecords(tgtConn, task.targetTableId, batch);
-        updateCount += batch.length;
-      } catch (err) {
-        errorCount += batch.length;
-        log('warn', `⚠️ 批量更新失败: ${err.message}`);
-      }
-    }
-
-    // 8. Update sync state (strategy-aware)
-    if (errorCount > 0) {
-      throw new Error(`同步存在 ${errorCount} 条失败记录，未推进增量水位`);
-    }
     const newState = { ...state, lastSyncAt: new Date().toISOString() };
-
-    if (watermark.type === 'rowversion' && sourceRows.length > 0) {
-      // Store max rowversion as hex string for next incremental
-      const rvCol = watermark.col;
-      const maxRv = sourceRows.reduce((max, row) => {
-        const rv = row[rvCol];
-        if (!rv) return max;
-        // Buffer → hex string
+    if (watermark.type === 'rowversion' && rowversionValues.length > 0) {
+      const maxRv = rowversionValues.reduce((max, rv) => {
         const rawHex = Buffer.isBuffer(rv) ? rv.toString('hex') : String(rv).replace(/^0x/i, '');
-        const hex = `0x${rawHex}`;
+        const hex = '0x' + rawHex;
         return hex > max ? hex : max;
       }, state.watermarkValue || '0x0');
       newState.watermarkValue = maxRv;
-    } else if (watermark.type === 'auto_pk' && sourceRows.length > 0) {
-      // Store max PK value for next incremental
-      const pkVals = sourceRows.map(r => r[pkCol]).filter(v => v !== null && v !== undefined);
-      if (pkVals.length > 0) {
-        // Use the max value (works for both numeric and string PKs)
-        const maxPk = pkVals.reduce((a, b) => (a > b ? a : b));
-        // Only advance if we got a higher value
-        if (newState.watermarkPkValue === undefined || newState.watermarkPkValue === null || maxPk > newState.watermarkPkValue) {
-          newState.watermarkPkValue = maxPk;
-        }
-      }
+    } else if (watermark.type === 'auto_pk' && pkValues.length > 0) {
+      const maxPk = pkValues.reduce((a, b) => (a > b ? a : b));
+      if (newState.watermarkPkValue === undefined || newState.watermarkPkValue === null || maxPk > newState.watermarkPkValue) newState.watermarkPkValue = maxPk;
     }
-
     saveSyncState(taskId, newState);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    log('info', `✅ 同步完成: 新增 ${insertCount}, 更新 ${updateCount}, 跳过 ${skipCount}, 失败 ${errorCount} | 耗时 ${elapsed}s`);
-
-    // Update history record
-    const durationMs = Date.now() - startTime;
+    log('info', '同步完成: 源 ' + sourceRowsCount + ', 新增 ' + insertCount + ', 更新 ' + updateCount + ', 跳过 ' + skipCount + ', 软删 ' + softDeleteCount + ', 删除 ' + deleteCount + ', 失败 ' + errorCount + ' | 耗时 ' + elapsed + 's');
     updateSyncHistory(historyRec.id, {
-      status: 'success',
-      mode,
-      sourceRows: sourceRows.length,
-      inserted: insertCount,
-      updated: updateCount,
-      skipped: skipCount,
-      failed: errorCount,
-      durationMs
+      status: 'success', mode, sourceRows: sourceRowsCount, inserted: insertCount, updated: updateCount,
+      skipped: skipCount, deleted: deleteCount, softDeleted: softDeleteCount, failed: errorCount, durationMs: Date.now() - startTime,
     });
-
   } catch (err) {
-    log('error', `❌ 同步失败: ${err.message}`);
+    log('error', '同步失败: ' + err.message);
     console.error(err);
-
-    // Update history record with error
-    if (historyRec) {
-      updateSyncHistory(historyRec.id, {
-        status: 'failed',
-        errorMessage: err.message,
-        durationMs: Date.now() - startTime
-      });
-    }
-
+    if (historyRec) updateSyncHistory(historyRec.id, { status: 'failed', errorMessage: err.message, durationMs: Date.now() - startTime });
     throw err;
   } finally {
-    // P1-1: Always release the lock
     syncLocks.delete(taskId);
   }
 }

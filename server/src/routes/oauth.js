@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { authMiddleware } from '../middleware/auth.js';
 import { canReadConnection, canWriteConnection } from '../services/accessControl.js';
+import { decryptConfigSecrets, encryptConfigSecrets } from '../services/secretStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -17,12 +18,12 @@ const oauthState = new Map();
 const router = express.Router();
 
 function loadConfig() {
-  return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+  return decryptConfigSecrets(JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')));
 }
 
 function saveConfig(config) {
   const tmpFile = `${CONFIG_FILE}.tmp`;
-  writeFileSync(tmpFile, JSON.stringify(config, null, 2), 'utf-8');
+  writeFileSync(tmpFile, JSON.stringify(encryptConfigSecrets(config), null, 2), 'utf-8');
   renameSync(tmpFile, CONFIG_FILE);
 }
 
