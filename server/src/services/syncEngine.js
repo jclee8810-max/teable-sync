@@ -12,6 +12,7 @@
 import { query, getTableSchema } from './dbService.js';
 import { getTeableFields, getTeableRecords, createTeableRecords, updateTeableRecords, deleteTeableRecords, createTeableField, ensureTeableFields } from './teableService.js';
 import { createSyncHistory, updateSyncHistory } from './syncHistory.js';
+import { addSyncFailure, clearSyncFailures } from './syncFailures.js';
 import { convertValue } from './typeConverter.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
@@ -113,6 +114,10 @@ function createRecordFields(row, mapping, srcTypeMap, tgtTypeMap, log) {
     recordFields[tgtField] = val;
   }
   return recordFields;
+}
+
+function extractBatchPrimaryKeys(records, pkFieldName) {
+  return records.map((rec) => rec.fields?.[pkFieldName]).filter((v) => v !== undefined && v !== null).map(String);
 }
 
 function getSyncState(taskId) {
@@ -437,6 +442,14 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
           insertCount += batch.length;
         } catch (err) {
           errorCount += batch.length;
+          addSyncFailure({
+            task,
+            operation: 'insert',
+            tableId: task.targetTableId,
+            records: batch,
+            primaryKeys: extractBatchPrimaryKeys(batch, pkFieldName),
+            error: err,
+          });
           log('warn', '批量插入失败: ' + err.message);
         }
       }
@@ -447,6 +460,14 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
           updateCount += batch.length;
         } catch (err) {
           errorCount += batch.length;
+          addSyncFailure({
+            task,
+            operation: 'update',
+            tableId: task.targetTableId,
+            records: batch,
+            primaryKeys: extractBatchPrimaryKeys(batch, pkFieldName),
+            error: err,
+          });
           log('warn', '批量更新失败: ' + err.message);
         }
       }
@@ -528,6 +549,13 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
             report({ phase: 'applying_deletes', processedRows: sourceRowsCount, softDeleted: softDeleteCount, deleted: deleteCount, failed: errorCount });
           } catch (err) {
             errorCount += batch.length;
+            addSyncFailure({
+              task,
+              operation: 'soft_delete',
+              tableId: task.targetTableId,
+              records: batch,
+              error: err,
+            });
             log('warn', '软删除标记失败: ' + err.message);
           }
         }
@@ -541,6 +569,13 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
             report({ phase: 'applying_deletes', processedRows: sourceRowsCount, softDeleted: softDeleteCount, deleted: deleteCount, failed: errorCount });
           } catch (err) {
             errorCount += ids.length;
+            addSyncFailure({
+              task,
+              operation: 'hard_delete',
+              tableId: task.targetTableId,
+              recordIds: ids,
+              error: err,
+            });
             log('warn', '物理删除失败: ' + err.message);
           }
         }
@@ -582,6 +617,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       status: 'success', mode, sourceRows: sourceRowsCount, inserted: insertCount, updated: updateCount,
       skipped: skipCount, deleted: deleteCount, softDeleted: softDeleteCount, failed: errorCount, durationMs: Date.now() - startTime,
     });
+    clearSyncFailures(taskId);
     return {
       status: 'success',
       mode,

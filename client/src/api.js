@@ -71,6 +71,10 @@ export const startTask = (id) => api.post(`/tasks/${id}/start`).then(r => r.data
 export const stopTask = (id) => api.post(`/tasks/${id}/stop`).then(r => r.data)
 export const cancelTask = (id) => api.post(`/tasks/${id}/cancel`).then(r => r.data)
 export const getTaskProgress = (id) => api.get(`/tasks/${id}/progress`).then(r => r.data)
+export const getFailureCounts = () => api.get('/sync-failures/counts').then(r => r.data)
+export const getTaskFailures = (id) => api.get(`/tasks/${id}/failures`).then(r => r.data)
+export const retryTaskFailures = (id) => api.post(`/tasks/${id}/retry-failures`).then(r => r.data)
+export const clearTaskFailures = (id) => api.delete(`/tasks/${id}/failures`).then(r => r.data)
 export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r.data)
 
 // Logs

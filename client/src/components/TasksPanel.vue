@@ -36,6 +36,9 @@
             <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
               <el-icon><View /></el-icon>预览
             </button>
+            <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)" style="padding:8px 16px;font-size:13px">
+              失败 {{ failureCounts[task.id] }}
+            </button>
             <!-- 仅定时/实时模式显示启停按钮 -->
             <button v-if="task.syncMode && (task.syncMode === 'scheduled' || task.syncMode === 'realtime')" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" style="padding:8px 16px;font-size:13px">
               {{ schedulerStatus[task.id] ? '停止' : '启动' }}
@@ -403,6 +406,30 @@
       </div>
       <div v-else style="text-align:center;padding:40px;color:var(--text-tertiary)">暂无数据</div>
     </el-dialog>
+
+    <el-dialog v-model="failuresDialogVisible" title="失败记录" width="760px" top="8vh">
+      <div v-if="failuresLoading" style="text-align:center;padding:32px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+      </div>
+      <div v-else>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span class="detail-value">共 {{ taskFailures.length }} 个失败批次</span>
+          <div style="display:flex;gap:8px">
+            <button class="fs-btn fs-btn-primary" @click="retryFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">重试失败</button>
+            <button class="fs-btn fs-btn-danger" @click="clearFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">清空记录</button>
+          </div>
+        </div>
+        <el-table :data="taskFailures" size="small" border max-height="420" style="width:100%">
+          <el-table-column prop="operation" label="操作" width="110" />
+          <el-table-column prop="count" label="数量" width="80" />
+          <el-table-column prop="retryCount" label="重试" width="80" />
+          <el-table-column prop="createdAt" label="时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+          </el-table-column>
+          <el-table-column prop="errorMessage" label="错误" min-width="220" show-overflow-tooltip />
+        </el-table>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -410,7 +437,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getSchedulerStatus, previewTaskData } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getSchedulerStatus, previewTaskData } from '../api'
 
 // 当前用户身份
 const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
@@ -446,6 +473,11 @@ const previewLimit = ref(10)
 
 const schedulerStatus = ref({})
 const taskProgress = ref({})
+const failureCounts = ref({})
+const failuresDialogVisible = ref(false)
+const failuresLoading = ref(false)
+const taskFailures = ref([])
+const selectedFailureTask = ref(null)
 let progressTimer = null
 
 // Watermark candidates (fetched from API when source table changes)
@@ -664,6 +696,7 @@ async function loadAll() {
   connections.value = await getConnections()
   tasks.value = await getTasks()
   try { schedulerStatus.value = await getSchedulerStatus() } catch {}
+  try { failureCounts.value = await getFailureCounts() } catch {}
   await refreshProgress()
 }
 
@@ -693,6 +726,7 @@ function startProgressPolling() {
       try {
         tasks.value = await getTasks()
         schedulerStatus.value = await getSchedulerStatus()
+        failureCounts.value = await getFailureCounts()
       } catch {}
     }
   }, 2000)
@@ -899,6 +933,50 @@ async function cancelRunningTask(task) {
     startProgressPolling()
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('取消失败: ' + (err.message || err))
+  }
+}
+
+async function openFailures(task) {
+  selectedFailureTask.value = task
+  failuresDialogVisible.value = true
+  failuresLoading.value = true
+  try {
+    taskFailures.value = await getTaskFailures(task.id)
+  } catch (err) {
+    ElMessage.error('获取失败记录失败: ' + err.message)
+  } finally {
+    failuresLoading.value = false
+  }
+}
+
+async function retryFailures() {
+  if (!selectedFailureTask.value) return
+  failuresLoading.value = true
+  try {
+    const result = await retryTaskFailures(selectedFailureTask.value.id)
+    ElMessage.success(`已重试 ${result.retried} 个批次${result.failed ? `，仍失败 ${result.failed} 个` : ''}`)
+    taskFailures.value = await getTaskFailures(selectedFailureTask.value.id)
+    failureCounts.value = await getFailureCounts()
+  } catch (err) {
+    ElMessage.error('重试失败: ' + err.message)
+  } finally {
+    failuresLoading.value = false
+  }
+}
+
+async function clearFailures() {
+  if (!selectedFailureTask.value) return
+  await ElMessageBox.confirm('确定清空该任务的失败记录？这不会改动 Teable 数据。', '清空失败记录', { type: 'warning' })
+  failuresLoading.value = true
+  try {
+    await clearTaskFailures(selectedFailureTask.value.id)
+    taskFailures.value = []
+    failureCounts.value = await getFailureCounts()
+    ElMessage.success('失败记录已清空')
+  } catch (err) {
+    ElMessage.error('清空失败: ' + err.message)
+  } finally {
+    failuresLoading.value = false
   }
 }
 

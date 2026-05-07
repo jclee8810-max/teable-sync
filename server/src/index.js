@@ -11,6 +11,8 @@ import oauthRouter from './routes/oauth.js';
 import { authMiddleware, verifyToken } from './middleware/auth.js';
 import { canReadConnection, validateTaskConnections } from './services/accessControl.js';
 import { decryptConfigSecrets, encryptConfigSecrets } from './services/secretStore.js';
+import { getSyncFailures, getSyncFailureCounts, clearSyncFailures, removeSyncFailures, markSyncFailureRetried } from './services/syncFailures.js';
+import { createTeableRecords, updateTeableRecords, deleteTeableRecords } from './services/teableService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -917,6 +919,77 @@ app.post('/api/tasks/:id/cancel', (req, res) => {
   syncRuns.set(req.params.id, run);
   broadcastLogUser({ taskId: req.params.id, level: 'warn', message: '已请求取消正在执行的同步', ts: new Date().toISOString() }, task.userId);
   res.json({ cancelling: true });
+});
+
+app.get('/api/tasks/:id/failures', (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  res.json(getSyncFailures(req.params.id).map((f) => ({
+    ...f,
+    records: undefined,
+    recordIds: undefined,
+    hasPayload: Boolean(f.records || f.recordIds),
+  })));
+});
+
+app.get('/api/sync-failures/counts', (req, res) => {
+  const config = loadConfig();
+  const counts = getSyncFailureCounts();
+  if (req.user.role === 'super_admin') return res.json(counts);
+  const allowedTaskIds = new Set(config.syncTasks.filter((t) => t.userId === req.user.id).map((t) => t.id));
+  const filtered = {};
+  for (const [taskId, count] of Object.entries(counts)) {
+    if (allowedTaskIds.has(taskId)) filtered[taskId] = count;
+  }
+  res.json(filtered);
+});
+
+app.delete('/api/tasks/:id/failures', (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
+  res.json({ removed: clearSyncFailures(req.params.id) });
+});
+
+app.post('/api/tasks/:id/retry-failures', async (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
+  const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+  if (!tgtConn) return res.status(400).json({ error: 'Target connection not found' });
+
+  const failures = getSyncFailures(req.params.id);
+  const retried = [];
+  const stillFailed = [];
+  for (const failure of failures) {
+    try {
+      if (failure.operation === 'insert') {
+        await createTeableRecords(tgtConn, failure.tableId || task.targetTableId, failure.records || []);
+      } else if (failure.operation === 'update' || failure.operation === 'soft_delete') {
+        await updateTeableRecords(tgtConn, failure.tableId || task.targetTableId, failure.records || []);
+      } else if (failure.operation === 'hard_delete') {
+        await deleteTeableRecords(tgtConn, failure.tableId || task.targetTableId, failure.recordIds || []);
+      } else {
+        throw new Error('Unsupported failure operation: ' + failure.operation);
+      }
+      retried.push(failure.id);
+    } catch (err) {
+      markSyncFailureRetried(failure.id, err);
+      stillFailed.push({ id: failure.id, error: err.message });
+    }
+  }
+  if (retried.length > 0) removeSyncFailures(retried);
+  res.json({ retried: retried.length, failed: stillFailed.length, errors: stillFailed });
 });
 
 // Scheduler status
