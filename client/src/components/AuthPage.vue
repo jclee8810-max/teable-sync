@@ -91,14 +91,41 @@
 
         <!-- 用户管理 (admin only) -->
         <div v-if="profileTab === 'users'" class="user-list-section">
+          <div class="user-management-head">
+            <div class="user-stat">
+              <span>用户</span>
+              <strong>{{ filteredUsers.length }}/{{ users.length }}</strong>
+            </div>
+            <div class="user-stat">
+              <span>管理员</span>
+              <strong>{{ adminCount }}</strong>
+            </div>
+          </div>
+          <div class="user-tools">
+            <el-input
+              v-model="userSearch"
+              clearable
+              size="small"
+              placeholder="搜索邮箱"
+              class="user-search"
+            />
+            <el-select v-model="roleFilter" size="small" class="role-filter">
+              <el-option label="全部角色" value="" />
+              <el-option label="管理员" value="super_admin" />
+              <el-option label="普通用户" value="user" />
+            </el-select>
+          </div>
           <div v-if="usersLoading" class="loading-text">加载中...</div>
           <div v-else class="user-list">
-            <div v-for="u in users" :key="u.id" class="user-row">
+            <div v-for="u in filteredUsers" :key="u.id" class="user-row">
               <div class="user-row-left">
                 <div class="user-row-avatar">{{ u.email?.[0]?.toUpperCase() }}</div>
                 <div>
                   <div class="user-row-email">{{ u.email }}</div>
-                  <div class="user-row-role">{{ u.role === 'super_admin' ? '管理员' : '普通用户' }}</div>
+                  <div class="user-row-role">
+                    <span>{{ u.role === 'super_admin' ? '管理员' : '普通用户' }}</span>
+                    <span v-if="u.id === user?.id">当前账号</span>
+                  </div>
                 </div>
               </div>
               <div v-if="u.id !== user?.id" class="user-actions">
@@ -116,7 +143,9 @@
                   {{ deletingId === u.id ? '删除中...' : '删除' }}
                 </button>
               </div>
+              <div v-else class="current-user-lock">当前账号</div>
             </div>
+            <el-empty v-if="filteredUsers.length === 0" description="没有匹配用户" :image-size="64" />
           </div>
         </div>
       </template>
@@ -129,7 +158,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, updateUserRole, exchangeTeableLoginCode, setToken, setStoredUser, clearToken, getToken } from '../api.js'
 
 const emit = defineEmits(['auth-changed'])
@@ -143,6 +172,8 @@ const success = ref('')
 const user = ref(null)
 const users = ref([])
 const usersLoading = ref(false)
+const userSearch = ref('')
+const roleFilter = ref('')
 
 const profileTab = ref('password')
 const form = ref({ email: '', password: '', password2: '', oldPassword: '', newPassword: '' })
@@ -151,6 +182,16 @@ const tabs = [
   { key: 'login', label: '登录' },
   { key: 'register', label: '注册' },
 ]
+
+const adminCount = computed(() => users.value.filter((u) => u.role === 'super_admin').length)
+const filteredUsers = computed(() => {
+  const keyword = userSearch.value.trim().toLowerCase()
+  return users.value.filter((u) => {
+    const roleOk = !roleFilter.value || u.role === roleFilter.value
+    const keywordOk = !keyword || (u.email || '').toLowerCase().includes(keyword)
+    return roleOk && keywordOk
+  })
+})
 
 onMounted(async () => {
   // Check URL params for OAuth callback code
@@ -319,7 +360,7 @@ function handleLogout() {
   border-radius: 18px;
   padding: 44px 40px;
   width: 100%;
-  max-width: 420px;
+  max-width: 560px;
   box-shadow: 0 8px 40px rgba(0,0,0,0.10);
 }
 .auth-brand { text-align: center; margin-bottom: 32px; }
@@ -401,24 +442,87 @@ function handleLogout() {
 
 /* User list */
 .user-list-section { margin-top: 24px; border-top: 1px solid rgba(0,0,0,0.06); padding-top: 20px; }
+.user-management-head {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.user-stat {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 8px;
+  background: #f5f6fa;
+}
+.user-stat span {
+  color: #9495a0;
+  font-size: 11px;
+}
+.user-stat strong {
+  color: #1a1a2e;
+  font-size: 16px;
+}
+.user-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.user-search,
+.role-filter {
+  width: 100%;
+}
 .section-title {
   font-size: 12px; font-weight: 600; color: #9495a0;
   text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;
 }
 .loading-text { text-align: center; color: #9495a0; font-size: 13px; padding: 12px; }
+.user-list {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 10px;
+}
 .user-row {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 0; border-bottom: 1px solid rgba(0,0,0,0.04);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
 }
 .user-row:last-child { border-bottom: none; }
-.user-row-left { display: flex; align-items: center; gap: 10px; }
+.user-row-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
 .user-row-avatar {
   width: 32px; height: 32px; background: #f5f6fa; color: #5c5d6e;
   font-size: 13px; font-weight: 600; border-radius: 50%;
+  flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
 }
-.user-row-email { font-size: 13px; font-weight: 500; color: #1a1a2e; }
-.user-row-role { font-size: 11px; color: #9495a0; }
+.user-row-email {
+  min-width: 0;
+  max-width: 270px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1a1a2e;
+}
+.user-row-role {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #9495a0;
+}
 .del-btn {
   font-size: 12px; color: #dc2626;
   background: none; border: 1px solid rgba(220,38,38,0.2);
@@ -434,6 +538,11 @@ function handleLogout() {
 }
 .role-select {
   width: 108px;
+}
+.current-user-lock {
+  color: #9495a0;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .profile-tabs {
@@ -485,4 +594,21 @@ function handleLogout() {
 }
 .oauth-btn:hover { border-color: #6366f1; background: rgba(99,102,241,0.04); }
 .oauth-icon { width: 22px; height: 22px; flex-shrink: 0; }
+
+@media (max-width: 640px) {
+  .auth-card {
+    padding: 28px 20px;
+  }
+  .user-management-head,
+  .user-tools,
+  .user-row {
+    grid-template-columns: 1fr;
+  }
+  .user-actions {
+    justify-content: flex-start;
+  }
+  .user-row-email {
+    max-width: 100%;
+  }
+}
 </style>

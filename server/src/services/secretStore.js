@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 
 const SECRET_FIELDS = ['password', 'token', 'oauthClientSecret', 'teableOAuthToken'];
+const NOTIFICATION_SECRET_FIELDS = ['webhookUrl'];
 const ENCRYPTION_PREFIX = 'enc:v1:';
 
 function getEncryptionKey() {
@@ -57,6 +58,7 @@ export function decryptConfigSecrets(config) {
   return {
     ...config,
     connections: (config.connections || []).map(decryptConnectionSecrets),
+    alertNotifications: decryptAlertNotificationSecrets(config.alertNotifications || {}),
   };
 }
 
@@ -64,5 +66,22 @@ export function encryptConfigSecrets(config) {
   return {
     ...config,
     connections: (config.connections || []).map(encryptConnectionSecrets),
+    alertNotifications: encryptAlertNotificationSecrets(config.alertNotifications || {}),
   };
+}
+
+export function encryptAlertNotificationSecrets(settings) {
+  const next = { ...(settings || {}) };
+  for (const field of NOTIFICATION_SECRET_FIELDS) {
+    if (next[field]) next[field] = encryptSecret(next[field]);
+  }
+  return next;
+}
+
+export function decryptAlertNotificationSecrets(settings) {
+  const next = { ...(settings || {}) };
+  for (const field of NOTIFICATION_SECRET_FIELDS) {
+    if (next[field]) next[field] = decryptSecret(next[field]);
+  }
+  return next;
 }

@@ -118,6 +118,9 @@ export const getLogs = (params = {}) => api.get('/logs', { params }).then(r => r
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
 export const getAuditLogs = (params = {}) => api.get('/audit-logs', { params }).then(r => r.data)
 export const getObservability = () => api.get('/observability').then(r => r.data)
+export const getAlertNotificationSettings = () => api.get('/alert-notifications').then(r => r.data)
+export const updateAlertNotificationSettings = (data) => api.put('/alert-notifications', data).then(r => r.data)
+export const testAlertNotification = () => api.post('/alert-notifications/test').then(r => r.data)
 
 // System
 export const getVersionInfo = () => api.get('/version').then(r => r.data)

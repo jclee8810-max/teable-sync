@@ -5,6 +5,18 @@ import { isTypeCompatible } from './typeConverter.js';
 
 const SAMPLE_LIMIT = 50;
 const TEABLE_MAX_BATCH_SIZE = 1000;
+const DEFAULT_INITIAL_FULL_SYNC_WARN_ROWS = parsePositiveInt(process.env.INITIAL_FULL_SYNC_WARN_ROWS, 50000);
+const DEFAULT_INITIAL_FULL_SYNC_MAX_ROWS = parsePositiveInt(process.env.INITIAL_FULL_SYNC_MAX_ROWS, 100000);
+
+function parsePositiveInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function normalizeInitialFullSyncMaxRows(value) {
+  const n = parsePositiveInt(value, DEFAULT_INITIAL_FULL_SYNC_MAX_ROWS);
+  return Math.min(10000000, Math.max(1000, n));
+}
 
 function quoteIdentifier(type, name) {
   if (!/^[a-zA-Z0-9_.]+$/.test(name)) throw new Error(`非法标识符: ${name}`);
@@ -61,6 +73,60 @@ async function sampleRows(srcConn, task, limit = SAMPLE_LIMIT) {
   return query(srcConn, sql, [limit], task.sourceDatabase || null);
 }
 
+async function estimateSourceRows(srcConn, task, stopAfterRows = DEFAULT_INITIAL_FULL_SYNC_MAX_ROWS) {
+  if (srcConn.type === 'teable') {
+    const pageSize = 1000;
+    let offset = 0;
+    let total = 0;
+    let exact = true;
+    while (true) {
+      const result = await getTeableRecords(srcConn, task.sourceTable, { skip: offset, take: pageSize });
+      const page = normalizeTeableRecordsResponse(result);
+      total += page.length;
+      if (page.length < pageSize) break;
+      offset += pageSize;
+      if (total > stopAfterRows) {
+        exact = false;
+        break;
+      }
+    }
+    return { estimated: total, exact, method: 'teable_scan' };
+  }
+  const tableName = quoteIdentifier(srcConn.type, task.sourceTable);
+  const rows = await query(srcConn, `SELECT COUNT(*) as total FROM ${tableName}`, [], task.sourceDatabase || null);
+  const raw = rows?.[0]?.total ?? rows?.[0]?.TOTAL ?? rows?.[0]?.count ?? rows?.[0]?.COUNT ?? 0;
+  return { estimated: Number(raw || 0), exact: true, method: 'count' };
+}
+
+function addInitialFullSyncEstimate({ task, srcConn, issues, rowEstimate }) {
+  const pageSize = Number(task.pageSize || 1000);
+  const batchSize = Number(task.batchSize || 500);
+  const maxRows = normalizeInitialFullSyncMaxRows(task.maxInitialRows);
+  const warnRows = Math.min(maxRows, Number(task.initialFullSyncWarnRows || DEFAULT_INITIAL_FULL_SYNC_WARN_ROWS));
+  const estimatedRows = Number(rowEstimate?.estimated || 0);
+  const estimate = {
+    sourceRows: estimatedRows,
+    exact: rowEstimate?.exact !== false,
+    method: rowEstimate?.method || 'unknown',
+    pageSize,
+    batchSize,
+    estimatedPages: Math.ceil(estimatedRows / Math.max(1, pageSize)),
+    estimatedWriteBatches: Math.ceil(estimatedRows / Math.max(1, batchSize)),
+    warnRows,
+    maxRows,
+    fullScan: true,
+    initialRun: true,
+  };
+  if (estimatedRows > maxRows) {
+    addIssue(issues, 'error', 'initialFullSync.tooLarge', `首次全量同步预计 ${estimatedRows.toLocaleString('zh-CN')} 行，超过当前保护阈值 ${maxRows.toLocaleString('zh-CN')} 行。请调高任务的初始全量上限，或先拆分/过滤源表后再运行。`, { estimate });
+  } else if (estimatedRows > warnRows) {
+    addIssue(issues, 'warn', 'initialFullSync.largeTable', `首次全量同步预计 ${estimatedRows.toLocaleString('zh-CN')} 行，约 ${estimate.estimatedPages} 页、${estimate.estimatedWriteBatches} 个 Teable 写入批次。建议在低峰期执行，并将写入批量控制在 300-500。`, { estimate });
+  } else if (estimatedRows > 0) {
+    addIssue(issues, 'info', 'initialFullSync.estimate', `首次全量同步预计 ${estimatedRows.toLocaleString('zh-CN')} 行，约 ${estimate.estimatedPages} 页、${estimate.estimatedWriteBatches} 个 Teable 写入批次。`, { estimate });
+  }
+  return estimate;
+}
+
 function addIssue(issues, level, code, message, detail = {}) {
   issues.push({ level, code, message, ...detail });
 }
@@ -92,6 +158,7 @@ function checkTaskSettings(task, srcConn, issues) {
   const pageSize = Number(task.pageSize || 1000);
   const batchSize = Number(task.batchSize || 500);
   const retryCount = Number(task.retryCount || 3);
+  const maxInitialRows = Number(task.maxInitialRows || DEFAULT_INITIAL_FULL_SYNC_MAX_ROWS);
   if (!Number.isFinite(pageSize) || pageSize < 100 || pageSize > 5000) {
     addIssue(issues, 'error', 'settings.pageSizeInvalid', '源分页大小必须在 100-5000 之间');
   } else if (pageSize > 3000) {
@@ -104,6 +171,9 @@ function checkTaskSettings(task, srcConn, issues) {
   }
   if (!Number.isFinite(retryCount) || retryCount < 1 || retryCount > 8) {
     addIssue(issues, 'error', 'settings.retryCountInvalid', '失败重试次数必须在 1-8 之间');
+  }
+  if (!Number.isFinite(maxInitialRows) || maxInitialRows < 1000 || maxInitialRows > 10000000) {
+    addIssue(issues, 'error', 'settings.maxInitialRowsInvalid', '初始全量上限必须在 1000-10000000 之间');
   }
   if (task.syncMode === 'realtime' && Number(task.syncInterval || 300) < 30) {
     addIssue(issues, 'error', 'settings.realtimeIntervalInvalid', '准实时轮询间隔不能小于 30 秒');
@@ -182,10 +252,11 @@ export async function runTaskPreflight(task, srcConn, tgtConn) {
     checkMappingCoverage({ mapping, sourceSchema, targetFields, issues });
   }
 
+  let detectedWatermark = null;
   let pkCol = task.sourcePrimaryKey;
   if (!pkCol) {
-    const detected = await detectWatermarkCandidates(srcConn, task.sourceTable, task.sourceDatabase || null);
-    pkCol = detected.pkCol;
+    detectedWatermark = await detectWatermarkCandidates(srcConn, task.sourceTable, task.sourceDatabase || null);
+    pkCol = detectedWatermark.pkCol;
   }
   if (!pkCol) addIssue(issues, 'error', 'primaryKey.missing', '未配置主键列，且无法自动检测');
   else if (!sourceMap[pkCol]) addIssue(issues, 'error', 'primaryKey.notFound', `主键列不存在: ${pkCol}`);
@@ -212,6 +283,25 @@ export async function runTaskPreflight(task, srcConn, tgtConn) {
   const emptyPk = samples.filter((row) => pkCol && (row[pkCol] === undefined || row[pkCol] === null || row[pkCol] === '')).length;
   if (emptyPk > 0) addIssue(issues, 'warn', 'primaryKey.emptySamples', `样本中有 ${emptyPk} 条主键为空，运行时会跳过`);
   sampleConversionRisks({ samples, mapping, sourceMap, targetMap, srcConn, issues });
+
+  let initialFullSync = null;
+  const candidates = detectedWatermark || await detectWatermarkCandidates(srcConn, task.sourceTable, task.sourceDatabase || null)
+    .catch(() => ({ candidates: { timestamp: [], rowversion: [], auto_pk: [] } }));
+  const hasIncrementalCandidate = ['timestamp', 'rowversion', 'auto_pk'].some((key) => (candidates.candidates?.[key] || []).length > 0);
+  const configuredFullScan = task.watermarkType === 'full_scan' || task.syncDirection === 'bidirectional' || srcConn.type === 'teable';
+  const likelyInitialFullSync = configuredFullScan || (!task.watermarkType && !hasIncrementalCandidate);
+  if (likelyInitialFullSync) {
+    try {
+      initialFullSync = addInitialFullSyncEstimate({
+        task,
+        srcConn,
+        issues,
+        rowEstimate: await estimateSourceRows(srcConn, task, normalizeInitialFullSyncMaxRows(task.maxInitialRows)),
+      });
+    } catch (err) {
+      addIssue(issues, 'warn', 'initialFullSync.estimateFailed', `无法预估源表行数: ${err.message}`);
+    }
+  }
 
   for (const [src, tgt] of Object.entries(mapping)) {
     const targetField = targetMap[tgt];
@@ -245,6 +335,7 @@ export async function runTaskPreflight(task, srcConn, tgtConn) {
     sourceFields: sourceSchema.length,
     targetFields: targetFields.length,
     sampleRows: samples.length,
+    initialFullSync,
     issues,
   };
 }

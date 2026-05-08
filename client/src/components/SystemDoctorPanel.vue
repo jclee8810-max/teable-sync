@@ -1,12 +1,6 @@
 <template>
   <div class="doctor-page">
     <div class="doctor-actions">
-      <button class="fs-btn fs-btn-ghost" @click="openImportDialog">
-        导入迁移包
-      </button>
-      <button class="fs-btn fs-btn-ghost" @click="exportConfig(false)" :disabled="exporting">
-        导出配置
-      </button>
       <button class="fs-btn fs-btn-ghost" @click="loadBackups" :disabled="backupsLoading">
         <el-icon v-if="backupsLoading" class="is-loading"><Loading /></el-icon>
         刷新备份
@@ -44,7 +38,7 @@
       <div class="section-header">
         <div>
           <div class="section-title">配置备份</div>
-          <div class="section-desc">自动保留最近的加密配置快照</div>
+          <div class="section-desc">系统写入配置前自动生成，用于排查和恢复；这里不导出迁移包。</div>
         </div>
         <span class="backup-count">{{ backups.length }} 个</span>
       </div>
@@ -63,7 +57,7 @@
       <div class="section-header">
         <div>
           <div class="section-title">环境迁移</div>
-          <div class="section-desc">导出可迁移配置，或导入其他环境的迁移包。默认不包含连接密码和 Token。</div>
+          <div class="section-desc">用于测试环境和正式环境之间迁移连接、任务、模板和告警通知配置，仅超级管理员可操作。</div>
         </div>
       </div>
       <div class="migration-actions">
@@ -72,7 +66,7 @@
         <button class="fs-btn fs-btn-ghost" @click="openImportDialog">导入迁移包</button>
       </div>
       <div class="migration-note">
-        含密钥包只适合可信内网或离线迁移。导入后自动任务默认停用，需要确认连接测试通过后再手动启动。
+        默认迁移包不含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。含密钥包只适合可信内网或离线迁移；导入后自动任务默认停用，需要确认连接测试通过后再手动启动。
       </div>
     </div>
 
@@ -222,7 +216,7 @@ function downloadJson(name, data) {
 async function exportConfig(includeSecrets) {
   if (includeSecrets) {
     try {
-      await ElMessageBox.confirm('含密钥迁移包会包含数据库密码和 Teable Token。只应在可信环境中保存和传输。确定继续吗？', '导出含密钥包', { type: 'warning' })
+      await ElMessageBox.confirm('含密钥迁移包会包含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。只应在可信环境中保存和传输。确定继续吗？', '导出含密钥包', { type: 'warning' })
     } catch {
       return
     }

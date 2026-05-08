@@ -5,9 +5,14 @@
         <span>快照时间</span>
         <strong>{{ snapshot?.generatedAt ? formatDateTime(snapshot.generatedAt) : '-' }}</strong>
       </div>
-      <button class="fs-btn fs-btn-primary" @click="loadSnapshot" :disabled="loading" style="padding:8px 16px;font-size:13px">
-        <el-icon><Refresh /></el-icon>{{ loading ? '刷新中...' : '刷新' }}
-      </button>
+      <div class="obs-actions">
+        <button v-if="isAdmin" class="fs-btn fs-btn-ghost" @click="openNotificationDialog" style="padding:8px 16px;font-size:13px">
+          <el-icon><Bell /></el-icon>通知配置
+        </button>
+        <button class="fs-btn fs-btn-primary" @click="loadSnapshot" :disabled="loading" style="padding:8px 16px;font-size:13px">
+          <el-icon><Refresh /></el-icon>{{ loading ? '刷新中...' : '刷新' }}
+        </button>
+      </div>
     </div>
 
     <div class="obs-summary">
@@ -135,19 +140,91 @@
         <el-empty v-if="recentLogs.length === 0" description="暂无警告或错误日志" :image-size="72" />
       </div>
     </section>
+
+    <el-dialog v-model="notificationDialogVisible" title="告警通知" width="560px" class="notification-dialog">
+      <el-form label-position="top" class="notification-form">
+        <el-form-item label="Webhook 通知">
+          <el-switch v-model="notificationForm.enabled" active-text="启用" inactive-text="关闭" />
+        </el-form-item>
+        <el-form-item label="Webhook URL">
+          <el-input
+            v-model="notificationForm.webhookUrl"
+            type="password"
+            show-password
+            clearable
+            placeholder="粘贴 Teable 自动化或其他系统的 Webhook URL"
+          />
+          <div v-if="notificationSettings?.hasWebhookUrl" class="field-hint">已保存：{{ notificationSettings.webhookUrl }}</div>
+        </el-form-item>
+        <label v-if="notificationSettings?.hasWebhookUrl" class="clear-webhook-option">
+          <input type="checkbox" v-model="notificationClearWebhook" />
+          <span>保存时清空已保存的 Webhook URL</span>
+        </label>
+        <div class="notification-options">
+          <el-form-item label="发送阈值">
+            <el-select v-model="notificationForm.minSeverity" style="width:100%">
+              <el-option label="仅严重" value="critical" />
+              <el-option label="严重和警告" value="warning" />
+              <el-option label="全部告警" value="info" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="同一告警冷却">
+            <el-input-number v-model="notificationForm.cooldownMinutes" :min="1" :max="1440" controls-position="right" style="width:100%">
+              <template #suffix>分钟</template>
+            </el-input-number>
+            <div class="field-hint">同一个告警在冷却时间内不会重复发送，范围 1-1440 分钟。</div>
+          </el-form-item>
+        </div>
+        <div class="notification-status">
+          <span>上次发送：{{ notificationSettings?.lastSentAt ? formatDateTime(notificationSettings.lastSentAt) : '-' }}</span>
+          <span>上次测试：{{ notificationSettings?.lastTestAt ? formatDateTime(notificationSettings.lastTestAt) : '-' }}</span>
+          <span v-if="notificationSettings?.lastError" class="status-error">最近错误：{{ notificationSettings.lastError }}</span>
+        </div>
+      </el-form>
+      <template #footer>
+        <button class="fs-btn fs-btn-ghost" @click="notificationDialogVisible = false">取消</button>
+        <button class="fs-btn fs-btn-ghost" :disabled="notificationSaving || notificationTesting" @click="sendTestNotification">
+          <el-icon><Promotion /></el-icon>测试发送
+        </button>
+        <button class="fs-btn fs-btn-primary" :disabled="notificationSaving" @click="saveNotificationSettings">
+          <el-icon><Check /></el-icon>{{ notificationSaving ? '保存中...' : '保存' }}
+        </button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getObservability } from '../api'
+import { Bell, Check, Promotion, Refresh } from '@element-plus/icons-vue'
+import {
+  getAlertNotificationSettings,
+  getObservability,
+  getStoredUser,
+  testAlertNotification,
+  updateAlertNotificationSettings,
+} from '../api'
 
 const loading = ref(false)
 const snapshot = ref(null)
 const alertFilter = ref('')
+const notificationDialogVisible = ref(false)
+const notificationLoading = ref(false)
+const notificationSaving = ref(false)
+const notificationTesting = ref(false)
+const notificationSettings = ref(null)
+const notificationClearWebhook = ref(false)
+const notificationForm = ref({
+  enabled: false,
+  webhookUrl: '',
+  minSeverity: 'critical',
+  cooldownMinutes: 30,
+})
 let refreshTimer = null
 
+const currentUser = computed(() => getStoredUser() || {})
+const isAdmin = computed(() => currentUser.value.role === 'super_admin')
 const summary = computed(() => snapshot.value?.summary || {})
 const taskRows = computed(() => snapshot.value?.tasks || [])
 const recentLogs = computed(() => snapshot.value?.recentLogs || [])
@@ -165,6 +242,64 @@ async function loadSnapshot() {
     ElMessage.error('加载观测数据失败: ' + err.message)
   } finally {
     loading.value = false
+  }
+}
+
+function applyNotificationSettings(settings) {
+  notificationSettings.value = settings
+  notificationClearWebhook.value = false
+  notificationForm.value = {
+    enabled: settings?.enabled === true,
+    webhookUrl: '',
+    minSeverity: settings?.minSeverity || 'critical',
+    cooldownMinutes: settings?.cooldownMinutes || 30,
+  }
+}
+
+async function loadNotificationSettings() {
+  if (!isAdmin.value) return
+  notificationLoading.value = true
+  try {
+    applyNotificationSettings(await getAlertNotificationSettings())
+  } catch (err) {
+    ElMessage.error('加载告警通知配置失败: ' + err.message)
+  } finally {
+    notificationLoading.value = false
+  }
+}
+
+async function openNotificationDialog() {
+  notificationDialogVisible.value = true
+  await loadNotificationSettings()
+}
+
+async function saveNotificationSettings() {
+  notificationSaving.value = true
+  try {
+    const payload = { ...notificationForm.value }
+    if (notificationClearWebhook.value) payload.webhookUrl = ''
+    else if (!payload.webhookUrl) delete payload.webhookUrl
+    applyNotificationSettings(await updateAlertNotificationSettings(payload))
+    ElMessage.success('告警通知配置已保存')
+  } catch (err) {
+    ElMessage.error('保存告警通知配置失败: ' + err.message)
+  } finally {
+    notificationSaving.value = false
+  }
+}
+
+async function sendTestNotification() {
+  try {
+    await saveNotificationSettings()
+    notificationTesting.value = true
+    const result = await testAlertNotification()
+    applyNotificationSettings(result.settings)
+    ElMessage.success('测试告警已发送')
+  } catch (err) {
+    if (err.response?.data?.settings) applyNotificationSettings(err.response.data.settings)
+    ElMessage.error('测试发送失败: ' + err.message)
+  } finally {
+    notificationTesting.value = false
   }
 }
 
@@ -239,6 +374,7 @@ function onSyncLog() {
 
 onMounted(() => {
   loadSnapshot()
+  loadNotificationSettings()
   refreshTimer = window.setInterval(loadSnapshot, 30000)
   window.addEventListener('sync-log', onSyncLog)
 })
@@ -260,6 +396,14 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.obs-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .obs-generated {
@@ -473,6 +617,48 @@ button.obs-tile:hover,
   line-height: 1.5;
 }
 
+.notification-form {
+  display: grid;
+  gap: 2px;
+}
+
+.field-hint {
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.notification-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.clear-webhook-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.notification-status {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.status-error {
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 1180px) {
   .obs-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .obs-grid { grid-template-columns: 1fr; }
@@ -481,8 +667,11 @@ button.obs-tile:hover,
 @media (max-width: 720px) {
   .obs-toolbar,
   .section-head { flex-direction: column; align-items: stretch; }
+  .obs-actions { justify-content: stretch; }
+  .obs-actions .fs-btn { justify-content: center; }
   .obs-summary,
-  .run-metrics { grid-template-columns: 1fr; }
+  .run-metrics,
+  .notification-options { grid-template-columns: 1fr; }
   .alert-row,
   .obs-log-row { grid-template-columns: 1fr; }
   .alert-meta { text-align: left; }

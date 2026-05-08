@@ -1,29 +1,23 @@
-# Teable Sync Docker deployment
-# Default stack runs only the application. Configure SQL databases and Teable connections in the UI.
+# Teable Sync image deployment.
+# This file is for users who only want to pull and run the published image.
 
 services:
   teable-sync:
-    build:
-      context: .
-      args:
-        APP_VERSION: ${APP_VERSION:-1.0.0}
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
-        BUILD_TIME: ${BUILD_TIME:-unknown}
+    image: ghcr.io/jclee8810-max/teable-sync:latest
     ports:
-      - "3101:3101"
+      - "${PORT:-3101}:3101"
     environment:
       - NODE_ENV=production
       - PORT=3101
-      - APP_VERSION=${APP_VERSION:-1.0.0}
-      - GIT_COMMIT=${GIT_COMMIT:-unknown}
-      - BUILD_TIME=${BUILD_TIME:-unknown}
       - AUTO_RESUME_TASKS=${AUTO_RESUME_TASKS:-true}
       - AUTO_RESUME_RUN_IMMEDIATELY=${AUTO_RESUME_RUN_IMMEDIATELY:-false}
       - SERVER_PUBLIC_URL=${SERVER_PUBLIC_URL:-http://localhost:3101}
       - TEABLE_OAUTH_HOST=${TEABLE_OAUTH_HOST:-http://localhost:3000}
       - FRONTEND_BASE_URL=${FRONTEND_BASE_URL:-http://localhost:3101}
-      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-change-in-production}
-      - CONFIG_ENCRYPTION_KEY=${CONFIG_ENCRYPTION_KEY:-${JWT_SECRET:-your-jwt-secret-change-in-production}}
+      - TEABLE_OAUTH_CLIENT_ID=${TEABLE_OAUTH_CLIENT_ID:-}
+      - TEABLE_OAUTH_CLIENT_SECRET=${TEABLE_OAUTH_CLIENT_SECRET:-}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - CONFIG_ENCRYPTION_KEY=${CONFIG_ENCRYPTION_KEY:?CONFIG_ENCRYPTION_KEY is required}
       - TEABLE_RATE_LIMIT_MS=${TEABLE_RATE_LIMIT_MS:-120}
       - INITIAL_FULL_SYNC_MAX_ROWS=${INITIAL_FULL_SYNC_MAX_ROWS:-100000}
       - INITIAL_FULL_SYNC_WARN_ROWS=${INITIAL_FULL_SYNC_WARN_ROWS:-50000}

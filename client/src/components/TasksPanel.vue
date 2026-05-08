@@ -286,6 +286,7 @@
               <div><span>源分页大小</span><strong>{{ detailTask.pageSize || 1000 }}</strong></div>
               <div><span>Teable 写入批量</span><strong>{{ detailTask.batchSize || 500 }}</strong></div>
               <div><span>失败重试次数</span><strong>{{ detailTask.retryCount || 3 }}</strong></div>
+              <div><span>初始全量上限</span><strong>{{ formatNumber(detailTask.maxInitialRows || 100000) }} 行</strong></div>
               <div><span>删除同步</span><strong>{{ deletionModeLabel(detailTask.deletionMode) }}</strong></div>
               <div><span>软删除字段</span><strong>{{ detailTask.softDeleteField || '-' }}</strong></div>
             </div>
@@ -571,6 +572,15 @@
           </el-col>
         </el-row>
 
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="初始全量上限">
+              <el-input-number v-model="form.maxInitialRows" :min="1000" :max="10000000" :step="10000" style="width:100%" />
+              <div class="form-help">首次全量同步预估超过该行数会被后端阻断，避免大表误启动。</div>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
         <!-- Watermark Strategy -->
         <div class="section-divider">
           <span class="section-icon">⇌</span> 增量策略
@@ -730,6 +740,12 @@
           <div><span class="detail-label">警告</span><strong>{{ preflightResult.summary.warn }}</strong></div>
           <div><span class="detail-label">提示</span><strong>{{ preflightResult.summary.info || 0 }}</strong></div>
           <div><span class="detail-label">源字段</span><strong>{{ preflightResult.sourceFields }}</strong></div>
+        </div>
+        <div v-if="preflightResult.initialFullSync" class="reconcile-summary preflight-estimate">
+          <div><span class="detail-label">源表行数</span><strong>{{ formatNumber(preflightResult.initialFullSync.sourceRows) }}{{ preflightResult.initialFullSync.exact ? '' : '+' }}</strong></div>
+          <div><span class="detail-label">预计分页</span><strong>{{ formatNumber(preflightResult.initialFullSync.estimatedPages) }}</strong></div>
+          <div><span class="detail-label">预计写入批次</span><strong>{{ formatNumber(preflightResult.initialFullSync.estimatedWriteBatches) }}</strong></div>
+          <div><span class="detail-label">保护上限</span><strong>{{ formatNumber(preflightResult.initialFullSync.maxRows) }} 行</strong></div>
         </div>
         <el-alert v-if="preflightResult.status === 'pass'" type="success" :closable="false" style="margin-bottom:12px">
           预检通过，可以运行同步。
@@ -983,7 +999,7 @@ const defaultForm = {
   syncDirection: 'one_way',
   sourcePrimaryKey: '', watermarkType: '', watermarkColumn: '',
   syncMode: 'manual', syncInterval: 300,
-  pageSize: 1000, batchSize: 500, retryCount: 3,
+  pageSize: 1000, batchSize: 500, retryCount: 3, maxInitialRows: 100000,
   deletionMode: 'ignore', softDeleteField: 'deleted',
 }
 const form = ref({ ...defaultForm })
@@ -1101,6 +1117,9 @@ function statusClass(s) {
   return map[s] || ''
 }
 function formatTime(ts) { return new Date(ts).toLocaleString('zh-CN') }
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString('zh-CN')
+}
 function formatDuration(ms) {
   const n = Number(ms || 0)
   if (!n) return '-'

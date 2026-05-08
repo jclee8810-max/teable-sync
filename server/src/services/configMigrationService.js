@@ -1,6 +1,7 @@
 const MIGRATION_FORMAT = 'teable-sync.config';
 const MIGRATION_VERSION = 1;
 const SECRET_FIELDS = ['password', 'token', 'oauthClientSecret', 'teableOAuthToken'];
+const NOTIFICATION_SECRET_FIELDS = ['webhookUrl'];
 const CONFIG_ARRAYS = ['connections', 'syncTasks', 'taskTemplates'];
 const RUNTIME_TASK_FIELDS = ['status', 'enabled', 'lastSyncAt', 'connectionStatus', '_running'];
 
@@ -20,6 +21,15 @@ function stripSecretsFromConnection(conn = {}) {
   return next;
 }
 
+function stripNotificationSecrets(settings = {}) {
+  const next = clone(settings) || {};
+  for (const field of NOTIFICATION_SECRET_FIELDS) {
+    if (next[field]) next[`has${field[0].toUpperCase()}${field.slice(1)}`] = true;
+    delete next[field];
+  }
+  return next;
+}
+
 function normalizeExportConfig(config = {}, options = {}) {
   const includeSecrets = options.includeSecrets === true;
   const includeLogs = options.includeLogs === true;
@@ -29,6 +39,9 @@ function normalizeExportConfig(config = {}, options = {}) {
     taskTemplates: clone(config.taskTemplates || []),
   };
   if (!includeSecrets) next.connections = next.connections.map(stripSecretsFromConnection);
+  if (config.alertNotifications) {
+    next.alertNotifications = includeSecrets ? clone(config.alertNotifications) : stripNotificationSecrets(config.alertNotifications);
+  }
   if (includeLogs) next.syncLogs = clone(config.syncLogs || []);
   for (const task of next.syncTasks) {
     for (const field of RUNTIME_TASK_FIELDS) delete task[field];
@@ -152,6 +165,9 @@ function prepareImportedConfig(payload, currentConfig = {}, options = {}) {
     connections: mode === 'replace' ? (data.connections || []) : mergeById(base.connections || [], data.connections || []),
     syncTasks: mode === 'replace' ? (data.syncTasks || []) : mergeById(base.syncTasks || [], data.syncTasks || []),
     taskTemplates: mode === 'replace' ? (data.taskTemplates || []) : mergeById(base.taskTemplates || [], data.taskTemplates || []),
+    alertNotifications: data.alertNotifications
+      ? { ...(mode === 'replace' ? {} : (base.alertNotifications || {})), ...data.alertNotifications }
+      : (mode === 'replace' ? {} : (base.alertNotifications || {})),
     syncLogs: includeLogs
       ? (mode === 'replace' ? (data.syncLogs || []) : [...(base.syncLogs || []), ...(data.syncLogs || [])].slice(-500))
       : (mode === 'replace' ? [] : (base.syncLogs || [])),

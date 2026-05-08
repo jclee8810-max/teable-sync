@@ -1,33 +1,393 @@
 # Teable Sync
 
-SQL Server / MySQL / PostgreSQL 到 Teable 的同步工具，提供 Web 管理界面、任务调度、失败重试、一致性校验和基础运维能力。
+Teable Sync 是一个面向局域网多人使用的同步工具，用于把 SQL Server / MySQL / PostgreSQL / Teable 的数据同步到 Teable。它提供 Web 管理界面、任务调度、失败重试、一致性校验、观测告警和配置迁移能力。
+
+## 适用场景
+
+- 团队在局域网内统一维护数据库到 Teable 的同步任务。
+- 多个用户共用部分数据源，但不能在前端看到数据库密码、Teable Token 或 OAuth 密钥。
+- 管理员需要查看任务健康、失败批次、操作审计，并把严重告警推送到 Teable 自动化或其他 Webhook 接收端。
+- 一套配置需要从测试环境迁移到正式环境。
 
 ## 主要能力
 
-- 多源数据库：SQL Server、MySQL、PostgreSQL
-- 同步模式：手动、定时、实时轮询、全量扫描、基于时间戳/rowversion/自增主键的增量同步
-- 同步可靠性：源端分页、Teable 批量写入、重试、限流、失败批次记录和重试
-- 删除策略：忽略删除、软删除标记、物理删除
-- 字段能力：字段映射、类型转换、缺失字段自动创建
-- 安全：用户登录、角色权限、共享连接脱敏、配置密钥加密存储
-- 运维：系统检查、操作审计、配置自动备份、任务健康状态、端到端 smoke 验收
+- 数据源：SQL Server、MySQL、PostgreSQL、Teable。
+- 同步方向：SQL -> Teable、Teable -> Teable、Teable <-> Teable 双向同步。
+- 同步模式：手动、定时、准实时轮询、全量扫描、增量同步。
+- 同步可靠性：源端分页、Teable 批量写入、重试、限流、失败批次记录和重试。
+- 删除策略：忽略删除、软删除标记、物理删除。
+- 字段能力：字段映射、类型转换、缺失字段自动创建、字段变更感知、字段快照刷新。
+- 任务能力：预览、预检查、任务详情、任务模板、复制任务、同步前运行门禁。
+- 校验能力：一致性校验会按业务时区处理日期字段。
+- 权限安全：账号登录、管理员/普通用户角色、连接共享、列表脱敏、配置密钥加密存储。
+- 运维能力：任务健康、观测告警、Webhook 告警通知、操作审计、运行日志、系统检查、配置导入导出、自动备份、端到端 smoke 验收。
 
-## Docker 部署
+## 一键部署：复制命令直接运行
 
-```bash
-cp .env.example .env
-# 编辑 .env，至少修改 JWT_SECRET 和 CONFIG_ENCRYPTION_KEY
+这是推荐给普通用户的部署方式，不需要下载源码，也不需要懂代码。服务器或电脑只要已经安装 Docker Desktop / Docker Engine，就可以复制下面命令到终端执行。
 
-docker compose up -d --build
+镜像地址：
+
+```text
+ghcr.io/jclee8810-max/teable-sync:latest
 ```
 
-访问：
+首次发布镜像后，下面的 `docker compose pull` 才能拉到镜像。如果刚推送代码后立刻部署，请先等 GitHub Actions 的 Docker image workflow 构建完成。
+
+### 本机部署
+
+只在当前电脑访问时，复制下面整段命令到终端：
+
+```bash
+mkdir -p ~/teable-sync && cd ~/teable-sync
+JWT_SECRET=$(openssl rand -hex 32)
+CONFIG_ENCRYPTION_KEY=$(openssl rand -hex 32)
+cat > .env <<ENV_FILE
+PORT=3101
+SERVER_PUBLIC_URL=http://localhost:3101
+FRONTEND_BASE_URL=http://localhost:3101
+TEABLE_OAUTH_HOST=http://localhost:3000
+JWT_SECRET=$JWT_SECRET
+CONFIG_ENCRYPTION_KEY=$CONFIG_ENCRYPTION_KEY
+AUTO_RESUME_TASKS=true
+AUTO_RESUME_RUN_IMMEDIATELY=false
+TEABLE_RATE_LIMIT_MS=120
+ALERT_NOTIFICATION_SCAN_INTERVAL_MS=60000
+RECONCILE_DATE_TIME_ZONE=Asia/Shanghai
+ENV_FILE
+cat > docker-compose.yml <<'COMPOSE_FILE'
+services:
+  teable-sync:
+    image: ghcr.io/jclee8810-max/teable-sync:latest
+    ports:
+      - "${PORT:-3101}:3101"
+    env_file:
+      - .env
+    volumes:
+      - teable-sync-data:/app/server/data
+    restart: unless-stopped
+
+volumes:
+  teable-sync-data:
+COMPOSE_FILE
+docker compose pull
+docker compose up -d
+```
+
+启动后访问：
 
 ```text
 http://localhost:3101
 ```
 
-默认 `docker-compose.yml` 只启动 `teable-sync` 应用和它的运行数据卷，不再附带任何测试数据库。SQL 数据源和 Teable 数据源请在 Web 界面的“数据源”里配置。
+### 局域网部署
+
+如果要让其他电脑访问，请先确认这台服务器的局域网 IP。例如服务器 IP 是 `192.168.10.2`，复制下面整段命令到终端：
+
+```bash
+mkdir -p ~/teable-sync && cd ~/teable-sync
+LAN_IP=192.168.10.2
+JWT_SECRET=$(openssl rand -hex 32)
+CONFIG_ENCRYPTION_KEY=$(openssl rand -hex 32)
+cat > .env <<ENV_FILE
+PORT=3101
+SERVER_PUBLIC_URL=http://$LAN_IP:3101
+FRONTEND_BASE_URL=http://$LAN_IP:3101
+TEABLE_OAUTH_HOST=http://$LAN_IP:3000
+JWT_SECRET=$JWT_SECRET
+CONFIG_ENCRYPTION_KEY=$CONFIG_ENCRYPTION_KEY
+AUTO_RESUME_TASKS=true
+AUTO_RESUME_RUN_IMMEDIATELY=false
+TEABLE_RATE_LIMIT_MS=120
+ALERT_NOTIFICATION_SCAN_INTERVAL_MS=60000
+RECONCILE_DATE_TIME_ZONE=Asia/Shanghai
+ENV_FILE
+cat > docker-compose.yml <<'COMPOSE_FILE'
+services:
+  teable-sync:
+    image: ghcr.io/jclee8810-max/teable-sync:latest
+    ports:
+      - "${PORT:-3101}:3101"
+    env_file:
+      - .env
+    volumes:
+      - teable-sync-data:/app/server/data
+    restart: unless-stopped
+
+volumes:
+  teable-sync-data:
+COMPOSE_FILE
+docker compose pull
+docker compose up -d
+```
+
+其他电脑访问：
+
+```text
+http://192.168.10.2:3101
+```
+
+如果你的服务器 IP 不是 `192.168.10.2`，把命令里的这一行改成真实 IP：
+
+```bash
+LAN_IP=你的服务器IP
+```
+
+### 常用运维命令
+
+进入部署目录：
+
+```bash
+cd ~/teable-sync
+```
+
+查看服务状态：
+
+```bash
+docker compose ps
+```
+
+查看日志：
+
+```bash
+docker compose logs -f teable-sync
+```
+
+升级到最新镜像：
+
+```bash
+cd ~/teable-sync
+docker compose pull
+docker compose up -d
+```
+
+停止服务：
+
+```bash
+cd ~/teable-sync
+docker compose down
+```
+
+`teable-sync-data` 数据卷会保存账号、连接、任务、日志和配置。`docker compose down` 不会删除数据；只有主动删除 volume 才会清空数据。
+
+## 从源码构建部署
+
+如果你是开发者，或想自己修改代码，可以 clone 仓库后从源码构建：
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少修改 JWT_SECRET 和 CONFIG_ENCRYPTION_KEY
+docker compose up -d --build
+```
+
+默认源码版 `docker-compose.yml` 只启动 Teable Sync 应用，不附带测试数据库。SQL 数据源和 Teable 数据源请在 Web 界面里配置。
+
+## 局域网多人使用
+
+如果需要其他电脑通过局域网访问，请把 `.env` 里的公开地址改成服务器 IP 或域名。例如服务器地址是 `192.168.10.2`：
+
+```env
+SERVER_PUBLIC_URL=http://192.168.10.2:3101
+FRONTEND_BASE_URL=http://192.168.10.2:3101
+TEABLE_OAUTH_HOST=http://192.168.10.2:3000
+VITE_WS_PORT=3101
+```
+
+如果使用推荐的镜像部署，修改 `.env` 后重新部署：
+
+```bash
+docker compose up -d
+```
+
+如果使用源码构建部署，修改 `.env` 后重新部署：
+
+```bash
+docker compose up -d --build
+```
+
+局域网用户访问：
+
+```text
+http://192.168.10.2:3101
+```
+
+多人使用建议：
+
+- 第一个注册账号会自动成为 `super_admin`。
+- 管理员可以在“个人中心 -> 用户管理”调整用户角色。
+- 普通用户只能看到自己的任务和可读连接；管理员可以看到全局数据。
+- 连接可以设置为共享。共享连接会在前端和列表 API 中隐藏密码、Token、OAuth Secret 等敏感字段。
+- 生产环境不要使用示例密钥；`CONFIG_ENCRYPTION_KEY` 设置后要稳定保存，丢失后已加密的连接密钥无法解密。
+
+## 环境变量
+
+| 变量 | 默认值 | 必填 | 什么时候修改 | 作用和注意事项 |
+| --- | --- | --- | --- | --- |
+| `PORT` | `3101` | 是 | 3101 端口被占用时 | Docker 暴露给浏览器访问的端口。改成 3200 后访问地址就是 `http://服务器IP:3200`。 |
+| `VITE_WS_PORT` | `3101` | 镜像部署通常不需要 | 只有前端和后端端口不一致时 | 浏览器连接实时日志 WebSocket 的端口。Docker 部署通常保持和 `PORT` 一致。 |
+| `SERVER_PUBLIC_URL` | `http://localhost:3101` | 是 | 局域网或域名访问时 | Teable Sync 对外可访问地址，用于 OAuth 回调和告警 payload。局域网多人使用时改成 `http://服务器IP:3101`。 |
+| `FRONTEND_BASE_URL` | `http://localhost:3101` | 是 | 局域网或域名访问时 | 用户浏览器打开的前端地址，也是 OAuth 登录后跳回的地址。通常和 `SERVER_PUBLIC_URL` 一致。 |
+| `TEABLE_OAUTH_HOST` | `http://localhost:3000` | OAuth 登录时必填 | Teable 不在本机时 | Teable 实例地址。用于“用 Teable 登录”和 OAuth 授权连接；只用手动 Token 连接时也建议填真实 Teable 地址。 |
+| `TEABLE_OAUTH_CLIENT_ID` | 空 | 否 | 启用 Teable OAuth 登录时 | Teable OAuth 应用的 Client ID。只用邮箱密码登录或手动 Token 连接时可留空。 |
+| `TEABLE_OAUTH_CLIENT_SECRET` | 空 | 否 | 启用 Teable OAuth 登录时 | Teable OAuth 应用的 Client Secret。属于密钥，不要公开。 |
+| `JWT_SECRET` | 示例值 | 是 | 首次部署必须修改 | 用户登录 JWT 签名密钥。请使用长随机字符串；泄露后应更换并让用户重新登录。 |
+| `CONFIG_ENCRYPTION_KEY` | 示例值 | 是 | 首次部署必须修改，之后不要随意改 | 用于加密保存数据库密码、Teable Token、OAuth Secret、告警 Webhook URL。丢失或更换后，旧密钥加密的数据无法解密。 |
+| `AUTO_RESUME_TASKS` | `true` | 否 | 不希望重启后自动恢复任务时 | `true` 表示容器重启后恢复已启用的定时/准实时任务；`false` 表示重启后需要手动启动任务。 |
+| `AUTO_RESUME_RUN_IMMEDIATELY` | `false` | 否 | 希望服务启动后立刻补跑一次时 | `false` 只恢复定时器；`true` 会在恢复后马上执行一次同步。数据量大时建议保持 `false`。 |
+| `TEABLE_RATE_LIMIT_MS` | `120` | 否 | Teable 出现限流或网络抖动时 | Teable API 写入请求之间的等待时间，单位毫秒。值越大越稳但越慢。 |
+| `INITIAL_FULL_SYNC_MAX_ROWS` | `100000` | 否 | 首次全量同步源表很大时 | 同步前预检的默认保护阈值。任务未单独配置时，首次全量预估超过该行数会阻断启动或立即同步。 |
+| `INITIAL_FULL_SYNC_WARN_ROWS` | `50000` | 否 | 想更早提示大表风险时 | 同步前预检的默认提醒阈值。超过该行数但未超过上限时会提示预计分页和写入批次。 |
+| `ALERT_NOTIFICATION_SCAN_INTERVAL_MS` | `60000` | 否 | 想更快或更慢发送告警时 | 后端扫描活跃告警并发送 Webhook 的间隔，单位毫秒。服务端最小限制为 15000。 |
+| `RECONCILE_DATE_TIME_ZONE` | `Asia/Shanghai` | 否 | 业务日期不是中国时区时 | 一致性校验比较日期型字段时使用的业务时区，用于避免日期因 UTC 转换误报。 |
+
+敏感配置保存在 `server/data/config.json`。已支持加密字段：`password`、`token`、`oauthClientSecret`、`teableOAuthToken`、`alertNotifications.webhookUrl`。
+
+## 使用流程
+
+### 1. 创建账号和用户
+
+1. 打开 Web 界面。
+2. 注册第一个账号，它会自动成为管理员。
+3. 进入“个人中心 -> 用户管理”，按需保留普通用户或提升管理员。
+
+### 2. 创建数据源
+
+在“数据源”页面创建连接：
+
+- SQL Server / MySQL / PostgreSQL：填写主机、端口、库名、用户名、密码。
+- Teable：填写 Teable 地址和 Token，或使用 OAuth 授权连接。
+
+保存后先点击“测试”。测试通过后再用于同步任务。需要多人共用时，可以由管理员或连接 owner 设置共享。
+
+### 3. 创建同步任务
+
+在“同步任务”页面：
+
+1. 选择源连接和源表。
+2. 选择目标 Teable 连接和目标表。
+3. 配置主键/唯一键、字段映射、写入批量、分页大小、重试次数。
+4. 配置“初始全量上限”。首次全量同步预估超过该行数时，后端会阻断启动，避免大表误跑。
+5. 选择同步模式：手动、定时、准实时轮询或增量。
+6. 选择冲突策略、删除策略和软删除字段。
+7. 先执行“预检查”和“预览”，确认无阻断问题后保存。
+
+Teable 单次写入最大 1000 条，任务里的写入批量会被限制在 50-1000 之间。建议从 500 开始，根据 Teable 响应和网络情况调整。
+
+### 4. 运行、校验和修复
+
+- 手动任务：点击“运行”。
+- 定时/准实时任务：点击“启动”，调度器会按配置间隔执行。
+- 任务详情页可查看配置摘要、字段映射、连接状态、最近运行和失败批次。
+- 一致性校验用于只读对比源端和目标端，日期型字段会按业务日期归一化后比较。
+- 如果出现失败批次，可以在任务里重试或清理。
+
+### 5. 观测告警和告警推送
+
+“观测告警”页面汇总：
+
+- 开放告警数量和严重级别。
+- 任务健康、调度状态、最近运行结果。
+- 24 小时运行次数、成功率、错误日志和警告日志。
+- 最近警告/错误日志。
+
+管理员可以点击“通知配置”启用 Webhook 告警通知：
+
+1. 填写 Teable 自动化 Webhook URL 或其他系统的 Webhook URL。
+2. 选择发送阈值：仅严重、严重和警告、全部告警。
+3. 设置同一告警冷却时间，单位是分钟。
+4. 点击“测试发送”确认接收端可用。
+
+Webhook payload 包含通用字段，也包含 Teable 友好字段：
+
+```json
+{
+  "source": "teable-sync",
+  "event": "alert.open",
+  "severity": "critical",
+  "title": "任务最近运行失败",
+  "message": "错误详情",
+  "taskId": "...",
+  "taskName": "...",
+  "teable": {
+    "title": "[Teable Sync] 任务最近运行失败",
+    "content": "错误详情",
+    "severity": "critical"
+  }
+}
+```
+
+Teable 收到 Webhook 后，可以用自动化把告警写入表格、发送通知或继续流转。
+
+### 6. 配置迁移
+
+配置迁移入口在“系统检查 -> 环境迁移”，仅 `super_admin` 可以导出、预检和导入迁移包。
+
+这里和“配置备份”是两类功能：
+
+- 配置备份：系统写入配置前自动生成的加密快照，用于排查和恢复，不用于跨环境迁移。
+- 普通迁移包：用于跨环境迁移连接、任务、模板和告警通知配置，默认移除数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。
+- 含密钥迁移包：会包含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL，只适合可信内网或离线迁移，导出前会二次确认。
+- 导入迁移包：支持合并或替换当前配置；系统会先自动备份当前配置，导入后调度器会重置，自动任务默认停用。
+
+导入后建议重新测试连接，并先手动运行关键任务，确认无误后再启动定时或准实时同步。
+
+## 同步策略说明
+
+### 可靠性参数
+
+- 源分页大小：默认 `1000`，最大 `5000`。
+- 写入批量：默认 `500`，最大 `1000`。
+- 失败重试次数：默认 `3`。
+- 初始全量上限：默认 `100000` 行，单个任务可在同步任务配置里调整。
+- Teable 请求限流：`TEABLE_RATE_LIMIT_MS` 控制，默认 `120ms`。
+
+源端读取优先使用主键游标分页，避免大表 `OFFSET` 翻页变慢。Teable API 对 408、409、425、429、5xx 和网络错误做退避重试。
+
+首次全量同步前，预检会估算源表行数、源端分页数和 Teable 写入批次数。超过“初始全量上限”会阻断立即同步和自动调度启动；未超过上限但超过提醒阈值时会给出风险提示，建议在低峰期执行。
+
+### 删除同步
+
+删除检测只在全量扫描策略下执行：
+
+- 忽略删除：只同步新增和更新。
+- 软删除标记：源端记录消失时，把目标记录的软删除字段设为 `true`。
+- 物理删除：源端记录消失时，从 Teable 删除目标记录。
+
+物理删除不可逆，正式启用前建议先使用软删除策略验证。
+
+### 双向同步
+
+双向同步用于 Teable <-> Teable。常用冲突策略包括源端优先、目标端优先、最近更新时间优先和跳过冲突。
+
+建议为参与双向同步的表配置稳定主键，并准备更新时间字段。双向同步暂不执行删除同步，删除策略建议保持忽略。
+
+## 运维和故障排查
+
+- “日志”页面分为运行日志和操作审计。运行日志用于排查同步过程，操作审计用于查看用户、连接、任务和系统操作。
+- “系统检查”会检查配置加密、数据目录写入、配置解密、备份、连接/任务引用完整性和待处理失败批次。
+- 容器重启后，如果 `AUTO_RESUME_TASKS=true`，已启用的定时/准实时任务会自动恢复。
+- `server/data/` 是运行数据目录，不应提交到 Git。
+- `docker compose logs -f teable-sync` 可查看容器日志。
+- `docker compose down` 会停止服务，但不会删除数据卷；删除数据卷会清空运行数据。
+
+## 端到端 Smoke 验收
+
+部署后可以运行 API 级端到端验收：
+
+```bash
+npm run e2e:smoke
+```
+
+脚本会使用当前系统里已有的数据源和 Teable 连接，创建 `codex-e2e-*` 临时任务和连接来验证主要流程。它不会要求默认 compose 启动测试数据库。
+
+可选环境变量：
+
+```bash
+E2E_API_BASE=http://127.0.0.1:3101/api \
+E2E_TEABLE_BASE_HINT=SyncPilot \
+E2E_RUN_TIMEOUT_MS=30000 \
+npm run e2e:smoke
+```
 
 ## 本地开发
 
@@ -51,91 +411,7 @@ npm run build
 npm start
 ```
 
-## 关键环境变量
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PORT` | `3101` | Web/API 监听端口 |
-| `SERVER_PUBLIC_URL` | `http://localhost:3101` | OAuth 回调使用的服务公开地址 |
-| `FRONTEND_BASE_URL` | `http://localhost:3101` | OAuth 登录后跳回的前端地址 |
-| `TEABLE_OAUTH_HOST` | `http://localhost:3000` | Teable 实例地址 |
-| `JWT_SECRET` | 示例值 | JWT 签名密钥，生产必须修改 |
-| `CONFIG_ENCRYPTION_KEY` | 示例值 | 配置密钥加密密钥，设置后请稳定保存 |
-| `TEABLE_RATE_LIMIT_MS` | `120` | Teable API 请求间隔 |
-| `AUTO_RESUME_TASKS` | `true` | 容器重启后恢复已启用任务定时器 |
-| `AUTO_RESUME_RUN_IMMEDIATELY` | `false` | 自动恢复后是否立刻跑一次同步 |
-| `RECONCILE_DATE_TIME_ZONE` | `Asia/Shanghai` | 一致性校验日期字段的业务时区 |
-
-敏感配置会保存在 `server/data/config.json`。已支持加密字段：`password`、`token`、`oauthClientSecret`、`teableOAuthToken`。
-
-如果没有设置 `CONFIG_ENCRYPTION_KEY`，系统会用 `JWT_SECRET` 派生加密密钥。密钥丢失或更换后，已加密的连接密码和 Token 将无法解密。
-
-## 基本使用流程
-
-1. 注册第一个账号。第一个账号会自动成为 `super_admin`。
-2. 在“数据源”里创建 SQL 数据源和 Teable 数据源。
-3. 可以把连接设为共享；共享连接在列表接口里会自动脱敏。
-4. 在“同步任务”里选择源表、目标表、主键列和字段映射。
-5. 先用“预览”确认源数据，再手动运行一次同步。
-6. 运行后查看任务健康、失败批次、操作审计和一致性校验结果。
-
-## 同步策略说明
-
-### 可靠性参数
-
-- 源分页大小：默认 `1000`，最大 `5000`
-- 写入批量：默认 `500`，最大 `1000`
-- 失败重试次数：默认 `3`
-- Teable 请求限流：`TEABLE_RATE_LIMIT_MS` 控制，默认 `120ms`
-
-源端读取优先使用主键游标分页，避免大表 `OFFSET` 翻页变慢。Teable API 对 408、409、425、429、5xx 和网络错误做退避重试。
-
-### 删除同步
-
-删除检测只在全量扫描策略下执行：
-
-- 忽略删除：只同步新增和更新
-- 软删除标记：源端记录消失时，把目标记录的软删除字段设为 `true`
-- 物理删除：源端记录消失时，从 Teable 删除目标记录
-
-软删除字段默认是 `deleted`，可在任务里配置。
-
-### 一致性校验
-
-一致性校验是只读操作，会比较源表和目标表：
-
-- 目标缺失
-- 目标多余
-- 字段不一致
-
-日期字段会按业务时区归一化比较，避免 `2026-04-15` 和 `2026-04-14T16:00:00.000Z` 这类等价日期误报。
-
-## 运维能力
-
-管理员可以在“系统检查”里查看配置加密、数据目录写入、配置解密、备份、连接/任务引用完整性和待处理失败批次。
-
-“日志”页面包含运行日志和操作审计。运行日志用于排查同步过程，操作审计用于查看用户、连接、任务和系统操作记录。
-
-## 端到端 Smoke 验收
-
-部署后可以运行 API 级端到端验收：
-
-```bash
-npm run e2e:smoke
-```
-
-脚本会使用当前系统里已有的数据源和 Teable 连接，创建 `codex-e2e-*` 临时任务和连接来验证主要流程。它不会要求默认 compose 启动测试数据库。
-
-可选环境变量：
-
-```bash
-E2E_API_BASE=http://127.0.0.1:3101/api \
-E2E_TEABLE_BASE_HINT=SyncPilot \
-E2E_RUN_TIMEOUT_MS=30000 \
-npm run e2e:smoke
-```
-
-## 常用命令
+常用命令：
 
 ```bash
 npm run dev
@@ -145,10 +421,3 @@ npm run docker:up
 npm run docker:down
 npm run e2e:smoke
 ```
-
-## 注意事项
-
-- 生产环境必须修改 `JWT_SECRET` 和 `CONFIG_ENCRYPTION_KEY`。
-- 如果修改了加密密钥，旧的加密连接密码和 Token 可能无法解密。
-- 物理删除同步不可逆，启用前建议先使用软删除策略验证。
-- `server/data/` 是运行数据目录，不应提交到 Git。

@@ -21,6 +21,13 @@ import { createConfigBackup, getConfigBackups } from './services/configBackup.js
 import { getCurrentTaskSchema, detectTaskSchemaDrift } from './services/schemaDriftService.js';
 import { buildObservabilitySnapshot } from './services/observabilityService.js';
 import { buildConfigExport, previewConfigImport, applyConfigImport } from './services/configMigrationService.js';
+import {
+  cleanAlertNotificationInput,
+  normalizeAlertNotificationSettings,
+  sanitizeAlertNotificationSettings,
+  sendAlertNotifications,
+  sendTestAlertNotification,
+} from './services/alertNotificationService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -33,6 +40,7 @@ const PORT = process.env.PORT || 3101;
 const APP_VERSION = process.env.APP_VERSION || '1.0.0';
 const GIT_COMMIT = process.env.GIT_COMMIT || 'unknown';
 const BUILD_TIME = process.env.BUILD_TIME || 'unknown';
+const ALERT_NOTIFICATION_SCAN_INTERVAL_MS = Math.max(15000, Number(process.env.ALERT_NOTIFICATION_SCAN_INTERVAL_MS || 60000));
 
 // --- Scheduler state (in-memory) ---
 const syncScheduler = new Map(); // taskId -> { intervalId, syncMode, intervalSec }
@@ -49,9 +57,10 @@ function loadConfig() {
   if (existsSync(CONFIG_FILE)) {
     const config = decryptConfigSecrets(JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')));
     if (!Array.isArray(config.taskTemplates)) config.taskTemplates = [];
+    if (!config.alertNotifications || typeof config.alertNotifications !== 'object') config.alertNotifications = {};
     return config;
   }
-  const defaults = { connections: [], syncTasks: [], syncLogs: [], taskTemplates: [] };
+  const defaults = { connections: [], syncTasks: [], syncLogs: [], taskTemplates: [], alertNotifications: {} };
   saveConfig(defaults);
   return defaults;
 }
@@ -134,6 +143,7 @@ function cleanTaskInput(body = {}) {
   cleaned.pageSize = clampInt(cleaned.pageSize, 1000, 100, 5000);
   cleaned.batchSize = clampInt(cleaned.batchSize, 500, 10, 1000);
   cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
+  cleaned.maxInitialRows = clampInt(cleaned.maxInitialRows, 100000, 1000, 10000000);
   if ('syncMode' in cleaned && !['manual', 'scheduled', 'realtime', 'incremental'].includes(cleaned.syncMode)) cleaned.syncMode = 'manual';
   if ('syncDirection' in cleaned && !['one_way', 'bidirectional'].includes(cleaned.syncDirection)) cleaned.syncDirection = 'one_way';
   if ('conflictStrategy' in cleaned && !['upsert', 'skip', 'insert_only', 'source_wins', 'target_wins', 'latest_wins', 'skip_conflict'].includes(cleaned.conflictStrategy)) cleaned.conflictStrategy = 'upsert';
@@ -336,6 +346,42 @@ function getRunState(taskId) {
   return syncRuns.get(taskId)?.state || { taskId, status: 'idle', phase: 'idle', cancellable: false };
 }
 
+function buildVersionInfo() {
+  return {
+    version: APP_VERSION,
+    commit: GIT_COMMIT,
+    buildTime: BUILD_TIME,
+    nodeEnv: process.env.NODE_ENV || 'development',
+  };
+}
+
+function buildObservabilityForUser(config, user) {
+  const tasks = config.syncTasks
+    .filter((task) => !task.deletedAt && (user.role === 'super_admin' || task.userId === user.id))
+    .map((task) => taskDto(config, user, task));
+  const visibleTaskIds = new Set(tasks.map((task) => task.id));
+  const schedulerStatus = {};
+  const runStates = {};
+  for (const [taskId, info] of syncScheduler) {
+    if (visibleTaskIds.has(taskId)) schedulerStatus[taskId] = { syncMode: info.syncMode, intervalSec: info.intervalSec };
+  }
+  for (const task of tasks) {
+    runStates[task.id] = getRunState(task.id);
+  }
+  return buildObservabilitySnapshot({
+    config,
+    user,
+    tasks,
+    schedulerStatus,
+    runStates,
+    version: buildVersionInfo(),
+  });
+}
+
+function getAppUrl() {
+  return process.env.SERVER_PUBLIC_URL || `http://localhost:${PORT}`;
+}
+
 // --- Auth routes (public) ---
 app.use('/api/auth', authRouter);
 // --- OAuth routes ---
@@ -358,6 +404,7 @@ app.use('/api', authMiddleware);
 const server = app.listen(PORT, () => {
   console.log(`🚀 TeableSync Server running on http://localhost:${PORT}`);
   resumeEnabledTasks().catch((err) => console.warn(`↻ 自动恢复检查失败: ${err.message}`));
+  startAlertNotificationScanner();
 });
 
 const wss = new WebSocketServer({ server });
@@ -615,6 +662,49 @@ async function resumeEnabledTasks() {
   console.log(`↻ 自动恢复完成: ${restored}/${resumable.length} 个任务`);
 }
 
+let alertNotificationScanRunning = false;
+
+async function scanAndSendAlertNotifications() {
+  if (alertNotificationScanRunning) return;
+  alertNotificationScanRunning = true;
+  try {
+    const config = loadConfig();
+    const settings = normalizeAlertNotificationSettings(config.alertNotifications || {});
+    if (!settings.enabled || !settings.webhookUrl) return;
+    const systemUser = { id: 'system', email: 'system@local', role: 'super_admin' };
+    const snapshot = buildObservabilityForUser(config, systemUser);
+    const result = await sendAlertNotifications({ settings, snapshot, appUrl: getAppUrl() });
+    if (!result.skipped) {
+      const latest = loadConfig();
+      latest.alertNotifications = result.settings;
+      await saveConfig(latest, { backup: false });
+    }
+    if (result.sent > 0) {
+      await persistSyncLog({
+        level: 'info',
+        message: `告警通知已发送 ${result.sent} 条`,
+        ts: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    const latest = loadConfig();
+    latest.alertNotifications = {
+      ...normalizeAlertNotificationSettings(latest.alertNotifications || {}),
+      lastError: err.message,
+    };
+    await saveConfig(latest, { backup: false });
+    console.warn(`⚠️ 告警通知发送失败: ${err.message}`);
+  } finally {
+    alertNotificationScanRunning = false;
+  }
+}
+
+function startAlertNotificationScanner() {
+  setInterval(() => {
+    scanAndSendAlertNotifications().catch((err) => console.warn(`⚠️ 告警通知扫描失败: ${err.message}`));
+  }, ALERT_NOTIFICATION_SCAN_INTERVAL_MS);
+}
+
 // --- Routes ---
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
@@ -695,32 +785,58 @@ app.post('/api/system/config-import', async (req, res) => {
 });
 
 app.get('/api/observability', (req, res) => {
+  res.json(buildObservabilityForUser(loadConfig(), req.user));
+});
+
+app.get('/api/alert-notifications', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可配置告警通知' });
   const config = loadConfig();
-  const tasks = config.syncTasks
-    .filter((task) => !task.deletedAt && (req.user.role === 'super_admin' || task.userId === req.user.id))
-    .map((task) => taskDto(config, req.user, task));
-  const visibleTaskIds = new Set(tasks.map((task) => task.id));
-  const schedulerStatus = {};
-  const runStates = {};
-  for (const [taskId, info] of syncScheduler) {
-    if (visibleTaskIds.has(taskId)) schedulerStatus[taskId] = { syncMode: info.syncMode, intervalSec: info.intervalSec };
+  res.json(sanitizeAlertNotificationSettings(config.alertNotifications || {}));
+});
+
+app.put('/api/alert-notifications', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可配置告警通知' });
+  try {
+    const config = loadConfig();
+    config.alertNotifications = cleanAlertNotificationInput(req.body, config.alertNotifications || {});
+    await saveConfig(config, { backup: false });
+    appendAuditLog(req.user, 'alert_notification.update', {
+      resourceType: 'system',
+      message: `更新告警通知配置${config.alertNotifications.enabled ? '（已启用）' : '（已关闭）'}`,
+      metadata: {
+        enabled: config.alertNotifications.enabled,
+        minSeverity: config.alertNotifications.minSeverity,
+        cooldownMinutes: config.alertNotifications.cooldownMinutes,
+        hasWebhookUrl: Boolean(config.alertNotifications.webhookUrl),
+      },
+    });
+    res.json(sanitizeAlertNotificationSettings(config.alertNotifications));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
-  for (const task of tasks) {
-    runStates[task.id] = getRunState(task.id);
+});
+
+app.post('/api/alert-notifications/test', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可测试告警通知' });
+  const config = loadConfig();
+  try {
+    const result = await sendTestAlertNotification({ settings: config.alertNotifications || {}, appUrl: getAppUrl() });
+    config.alertNotifications = result.settings;
+    await saveConfig(config, { backup: false });
+    appendAuditLog(req.user, 'alert_notification.test', {
+      resourceType: 'system',
+      message: '发送测试告警通知',
+      metadata: { status: result.result?.status || null },
+    });
+    res.json({ success: true, settings: sanitizeAlertNotificationSettings(config.alertNotifications) });
+  } catch (err) {
+    config.alertNotifications = {
+      ...normalizeAlertNotificationSettings(config.alertNotifications || {}),
+      lastError: err.message,
+    };
+    await saveConfig(config, { backup: false });
+    res.status(400).json({ error: err.message, settings: sanitizeAlertNotificationSettings(config.alertNotifications) });
   }
-  res.json(buildObservabilitySnapshot({
-    config,
-    user: req.user,
-    tasks,
-    schedulerStatus,
-    runStates,
-    version: {
-      version: APP_VERSION,
-      commit: GIT_COMMIT,
-      buildTime: BUILD_TIME,
-      nodeEnv: process.env.NODE_ENV || 'development',
-    },
-  }));
 });
 
 app.get('/api/audit-logs', (req, res) => {
