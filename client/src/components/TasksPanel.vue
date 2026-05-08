@@ -609,6 +609,7 @@ const taskLogsDialogVisible = ref(false)
 const taskLogsLoading = ref(false)
 const taskLogs = ref([])
 const selectedLogTask = ref(null)
+const hydratingTaskForm = ref(false)
 let progressTimer = null
 
 // Watermark candidates (fetched from API when source table changes)
@@ -968,18 +969,26 @@ function startProgressPolling() {
 }
 
 watch(() => form.value.sourceDatabase, () => {
+  if (hydratingTaskForm.value) return
   if (form.value.sourceConnectionId) onSourceChange()
 })
 
-async function onSourceChange() {
+async function onSourceChange(options = {}) {
+  const { preserveSelection = false } = options
+  const currentTable = form.value.sourceTable
   sourceTables.value = []
   sourceColumns.value = []
-  form.value.sourceTable = ''
+  if (!preserveSelection) form.value.sourceTable = ''
   if (!form.value.sourceConnectionId) return
   sourceLoading.value = true
   try {
     const db = form.value.sourceDatabase || undefined
     sourceTables.value = await getTables(form.value.sourceConnectionId, db)
+    if (preserveSelection && currentTable) {
+      form.value.sourceTable = currentTable
+      const found = sourceTables.value.find(t => t.name === currentTable)
+      if (found) sourceColumns.value = found.columns || []
+    }
   } catch (err) {
     ElMessage.error('获取表列表失败: ' + err.message)
   } finally {
@@ -990,7 +999,8 @@ async function onSourceChange() {
 async function onSourceTableChange() {
   if (!form.value.sourceConnectionId || !form.value.sourceTable) return
   try {
-    const tables = await getTables(form.value.sourceConnectionId)
+    const db = form.value.sourceDatabase || undefined
+    const tables = await getTables(form.value.sourceConnectionId, db)
     const found = tables.find(t => t.name === form.value.sourceTable)
     if (found) sourceColumns.value = found.columns || []
     if (targetFields.value.length > 0) smartMap()
@@ -1007,16 +1017,26 @@ async function onSourceTableChange() {
   }
 }
 
-async function onTeableConnChange() {
+async function onTeableConnChange(options = {}) {
+  const { preserveSelection = false } = options
+  const currentBaseId = form.value._baseId
+  const currentTableId = form.value.targetTableId
   teableBases.value = []
   teableTables.value = []
   targetFields.value = []
-  form.value._baseId = ''
-  form.value.targetTableId = ''
+  if (!preserveSelection) {
+    form.value._baseId = ''
+    form.value.targetTableId = ''
+  }
   if (!form.value.targetConnectionId) return
   basesLoading.value = true
   try {
     teableBases.value = await getTeableBases(form.value.targetConnectionId)
+    if (preserveSelection) {
+      form.value._baseId = currentBaseId || await resolveBaseIdForTable(currentTableId)
+      form.value.targetTableId = currentTableId || ''
+      if (form.value._baseId) await onBaseChange({ preserveSelection: true })
+    }
   } catch (err) {
     ElMessage.error('获取 Base 列表失败: ' + err.message)
   } finally {
@@ -1024,14 +1044,43 @@ async function onTeableConnChange() {
   }
 }
 
-async function onBaseChange() {
+function inferBaseIdForTask(tableId) {
+  if (!tableId) return ''
+  for (const base of teableBases.value) {
+    const tables = base.tables || base.tableList || []
+    if (tables.some(table => table.id === tableId)) return base.id
+  }
+  return ''
+}
+
+async function resolveBaseIdForTable(tableId) {
+  const fromLoadedBase = inferBaseIdForTask(tableId)
+  if (fromLoadedBase || !tableId) return fromLoadedBase
+  for (const base of teableBases.value) {
+    try {
+      const tables = await getTeableTables(base.id, form.value.targetConnectionId)
+      if (tables.some(table => table.id === tableId)) return base.id
+    } catch {
+      // Ignore unreadable bases while looking for the saved target table.
+    }
+  }
+  return ''
+}
+
+async function onBaseChange(options = {}) {
+  const { preserveSelection = false } = options
+  const currentTableId = form.value.targetTableId
   teableTables.value = []
   targetFields.value = []
-  form.value.targetTableId = ''
+  if (!preserveSelection) form.value.targetTableId = ''
   if (!form.value._baseId) return
   tablesLoading.value = true
   try {
     teableTables.value = await getTeableTables(form.value._baseId, form.value.targetConnectionId)
+    if (preserveSelection && currentTableId) {
+      form.value.targetTableId = currentTableId
+      targetFields.value = await getTeableFields(currentTableId, form.value.targetConnectionId)
+    }
   } catch (err) {
     ElMessage.error('获取表列表失败: ' + err.message)
   } finally {
@@ -1049,42 +1098,41 @@ async function onTargetTableChange() {
   }
 }
 
-function openDialog(task = null) {
+async function openDialog(task = null) {
   if (task) {
-    editingId.value = task.id
-    // 兼容新旧两套字段名
-    const srcConnId = task.sourceConnectionId || task.sourceId
-    const tgtConnId = task.targetConnectionId || task.targetId
-    form.value = {
-      ...defaultForm,
-      ...task,
-      sourceConnectionId: srcConnId,
-      targetConnectionId: tgtConnId,
-      _baseId: task.targetBaseId || ''
-    }
-    const mapping = task.columnMapping || task.fieldMapping
-    if (Array.isArray(mapping)) {
-      mappingRows.value = mapping.map(m => ({ source: m.source, target: m.target }))
-    } else {
-      mappingRows.value = Object.entries(mapping || {}).map(([s, t]) => ({ source: s, target: t }))
-    }
-    // Migrate sourceTimestampColumn → watermarkType/watermarkColumn
-    if (task.watermarkType === undefined && task.sourceTimestampColumn) {
-      form.value.watermarkType = 'timestamp'
-      form.value.watermarkColumn = task.sourceTimestampColumn
-    }
-    if (srcConnId) onSourceChange()
-    if (tgtConnId) {
-      onTeableConnChange().then(() => {
-        for (const b of teableBases.value) {
-          const found = (b.tables || []).find(t => t.id === task.targetTableId)
-          if (found) {
-            form.value._baseId = b.id
-            onBaseChange()
-            break
-          }
-        }
-      })
+    hydratingTaskForm.value = true
+    try {
+      editingId.value = task.id
+      // 兼容新旧两套字段名
+      const srcConnId = task.sourceConnectionId || task.sourceId
+      const tgtConnId = task.targetConnectionId || task.targetId
+      form.value = {
+        ...defaultForm,
+        ...task,
+        sourceConnectionId: srcConnId,
+        targetConnectionId: tgtConnId,
+        _baseId: task.targetBaseId || ''
+      }
+      const mapping = task.columnMapping || task.fieldMapping
+      if (Array.isArray(mapping)) {
+        mappingRows.value = mapping.map(m => ({ source: m.source, target: m.target }))
+      } else {
+        mappingRows.value = Object.entries(mapping || {}).map(([s, t]) => ({ source: s, target: t }))
+      }
+      // Migrate sourceTimestampColumn → watermarkType/watermarkColumn
+      if (task.watermarkType === undefined && task.sourceTimestampColumn) {
+        form.value.watermarkType = 'timestamp'
+        form.value.watermarkColumn = task.sourceTimestampColumn
+      }
+      if (srcConnId) {
+        await onSourceChange({ preserveSelection: true })
+        if (form.value.sourceTable) await onSourceTableChange()
+      }
+      if (tgtConnId) {
+        await onTeableConnChange({ preserveSelection: true })
+      }
+    } finally {
+      hydratingTaskForm.value = false
     }
   } else {
     editingId.value = null
