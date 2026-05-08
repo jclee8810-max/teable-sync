@@ -57,7 +57,7 @@
         <div v-for="(log, idx) in filteredLogs" :key="idx" class="log-row" :class="'log-' + log.level">
           <span class="log-time">{{ formatTime(log.ts) }}</span>
           <span class="log-level" :class="log.level">{{ levelLabel(log.level) }}</span>
-          <span class="log-task" :title="log.taskId">{{ shortTaskId(log.taskId) }}</span>
+          <span class="log-task" :title="log.taskId">{{ logTaskLabel(log.taskId) }}</span>
           <span class="log-msg">{{ log.message }}</span>
         </div>
         <el-empty v-if="filteredLogs.length === 0" description="暂无匹配日志" :image-size="72" />
@@ -96,7 +96,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { getLogs, clearLogs, getAuditLogs } from '../api'
+import { getLogs, clearLogs, getAuditLogs, getTasks } from '../api'
 import { ElMessage } from 'element-plus'
 
 const logs = ref([])
@@ -106,6 +106,7 @@ const levelFilter = ref('')
 const auditLogs = ref([])
 const auditLoading = ref(false)
 const auditResourceType = ref('')
+const taskMap = ref({})
 const viewOptions = [
   { label: '实时日志', value: 'sync', description: '任务执行过程与错误' },
   { label: '操作审计', value: 'audit', description: '用户操作与权限记录' },
@@ -152,6 +153,15 @@ async function loadLogs() {
   scrollToBottom()
 }
 
+async function loadTaskMap() {
+  try {
+    const tasks = await getTasks()
+    taskMap.value = Object.fromEntries(tasks.map(task => [task.id, task.name || task.id]))
+  } catch {
+    taskMap.value = {}
+  }
+}
+
 async function loadAuditLogs() {
   auditLoading.value = true
   try {
@@ -188,6 +198,13 @@ function shortTaskId(taskId) {
   return taskId ? `任务 ${String(taskId).slice(0, 8)}` : '系统'
 }
 
+function logTaskLabel(taskId) {
+  if (!taskId) return '系统'
+  const name = taskMap.value[taskId]
+  if (!name) return shortTaskId(taskId)
+  return name.length > 18 ? name.slice(0, 18) + '...' : name
+}
+
 function actionLabel(action) {
   return ({
     'connection.create': '创建连接',
@@ -221,6 +238,7 @@ function actionTagType(action) {
 }
 
 onMounted(() => {
+  loadTaskMap()
   loadLogs()
   loadAuditLogs()
   window.addEventListener('sync-log', onSyncLog)

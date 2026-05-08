@@ -100,7 +100,7 @@ export const reconcileTask = (id, options = {}) => api.post(`/tasks/${id}/reconc
 export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r.data)
 
 // Logs
-export const getLogs = () => api.get('/logs').then(r => r.data)
+export const getLogs = (params = {}) => api.get('/logs', { params }).then(r => r.data)
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
 export const getAuditLogs = (params = {}) => api.get('/audit-logs', { params }).then(r => r.data)
 

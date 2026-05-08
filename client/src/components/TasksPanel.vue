@@ -69,6 +69,9 @@
             <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)" style="padding:8px 16px;font-size:13px">
               失败 {{ failureCounts[task.id] }}
             </button>
+            <button class="fs-btn fs-btn-ghost" @click="openTaskLogs(task)" style="padding:8px 16px;font-size:13px">
+              日志
+            </button>
             <!-- 仅定时/实时模式显示启停按钮 -->
             <button v-if="task.syncMode && (task.syncMode === 'scheduled' || task.syncMode === 'realtime')" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" style="padding:8px 16px;font-size:13px">
               {{ schedulerStatus[task.id] ? '停止' : '启动' }}
@@ -118,6 +121,20 @@
             <span>平均耗时 {{ formatDuration(taskHealth[task.id].averageDurationMs) }}</span>
             <span>最近 {{ latestStatusLabel(taskHealth[task.id].latestStatus) }}</span>
             <span v-if="taskHealth[task.id].latestError" class="health-error" :title="taskHealth[task.id].latestError">错误：{{ taskHealth[task.id].latestError }}</span>
+          </div>
+          <div class="state-strip">
+            <div class="state-item" :class="runStateClass(task)">
+              <span class="state-label">当前运行</span>
+              <strong>{{ runStateLabel(task) }}</strong>
+            </div>
+            <div class="state-item" :class="scheduleStateClass(task)">
+              <span class="state-label">调度</span>
+              <strong>{{ scheduleStateLabel(task) }}</strong>
+            </div>
+            <div class="state-item" :class="latestStateClass(task)">
+              <span class="state-label">最近结果</span>
+              <strong>{{ latestRunLabel(task) }}</strong>
+            </div>
           </div>
           <div v-if="task.connectionStatus?.issues?.length" class="connection-issues">
             <span v-for="issue in task.connectionStatus.issues" :key="issue.field + issue.message" :class="['connection-issue', issue.level]">
@@ -516,6 +533,24 @@
         </el-tabs>
       </div>
     </el-dialog>
+
+    <el-dialog v-model="taskLogsDialogVisible" :title="selectedLogTask ? `运行日志 · ${selectedLogTask.name}` : '运行日志'" width="820px" top="7vh">
+      <div v-if="taskLogsLoading" style="text-align:center;padding:32px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+      </div>
+      <div v-else class="task-log-list">
+        <div v-for="(log, idx) in taskLogs" :key="idx" class="task-log-row" :class="'log-' + log.level">
+          <span class="task-log-time">{{ formatTime(log.ts) }}</span>
+          <span class="task-log-level" :class="log.level">{{ logLevelLabel(log.level) }}</span>
+          <span class="task-log-message">{{ log.message }}</span>
+        </div>
+        <el-empty v-if="taskLogs.length === 0" description="暂无该任务日志" :image-size="72" />
+      </div>
+      <template #footer>
+        <button class="fs-btn fs-btn-ghost" @click="taskLogsDialogVisible = false">关闭</button>
+        <button class="fs-btn fs-btn-primary" @click="refreshTaskLogs" :disabled="!selectedLogTask || taskLogsLoading">刷新</button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -523,7 +558,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, getSchedulerStatus, previewTaskData, getStoredUser } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, getSchedulerStatus, previewTaskData, getStoredUser, getLogs } from '../api'
 
 // 当前用户身份
 const currentUser = getStoredUser()
@@ -570,6 +605,10 @@ const selectedFailureTask = ref(null)
 const reconcileDialogVisible = ref(false)
 const reconcileLoading = ref(false)
 const reconcileResult = ref(null)
+const taskLogsDialogVisible = ref(false)
+const taskLogsLoading = ref(false)
+const taskLogs = ref([])
+const selectedLogTask = ref(null)
 let progressTimer = null
 
 // Watermark candidates (fetched from API when source table changes)
@@ -699,9 +738,58 @@ function latestStatusLabel(status) {
 function healthRate(health) {
   return health.successRate === null || health.successRate === undefined ? '-' : `${health.successRate}%`
 }
+function isAutoSyncMode(mode) {
+  return ['scheduled', 'realtime', 'incremental'].includes(mode || 'manual')
+}
 function isTaskRunning(task) {
   const p = taskProgress.value[task.id]
   return task.status === 'running' || task._running || p?.status === 'running' || p?.status === 'cancelling'
+}
+function runStateLabel(task) {
+  const progress = taskProgress.value[task.id]
+  if (progress?.status === 'cancelling') return '取消中'
+  if (isTaskRunning(task)) return progressPhaseLabel(progress?.phase || 'starting')
+  return '空闲'
+}
+function runStateClass(task) {
+  const progress = taskProgress.value[task.id]
+  if (progress?.status === 'cancelling') return 'state-warn'
+  if (isTaskRunning(task)) return 'state-active'
+  return 'state-muted'
+}
+function scheduleStateLabel(task) {
+  if (!isAutoSyncMode(task.syncMode)) return '手动'
+  if (schedulerStatus.value[task.id] || task.status === 'scheduled') return `${syncModeLabel(task.syncMode)} · ${intervalLabel(task.syncInterval || 300)}`
+  return '未启动'
+}
+function scheduleStateClass(task) {
+  if (!isAutoSyncMode(task.syncMode)) return 'state-muted'
+  return (schedulerStatus.value[task.id] || task.status === 'scheduled') ? 'state-good' : 'state-warn'
+}
+function latestRunLabel(task) {
+  const health = taskHealth.value[task.id]
+  if (!health || health.latestStatus === 'never_run') return '未运行'
+  const when = health.latestRunAt ? formatRelativeTime(health.latestRunAt) : ''
+  return `${latestStatusLabel(health.latestStatus)}${when ? ' · ' + when : ''}`
+}
+function latestStateClass(task) {
+  const status = taskHealth.value[task.id]?.latestStatus
+  if (status === 'success') return 'state-good'
+  if (status === 'failed') return 'state-bad'
+  if (status === 'cancelled') return 'state-warn'
+  return 'state-muted'
+}
+function formatRelativeTime(ts) {
+  if (!ts) return ''
+  const diff = Date.now() - new Date(ts).getTime()
+  if (!Number.isFinite(diff)) return ''
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}分钟前`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}小时前`
+  return `${Math.floor(diff / 86400000)}天前`
+}
+function logLevelLabel(level) {
+  return ({ info: '信息', warn: '警告', error: '错误' }[level] || level || '-')
 }
 function taskNeedsAttention(task) {
   const health = taskHealth.value[task.id]
@@ -1144,6 +1232,26 @@ async function clearFailures() {
   }
 }
 
+async function refreshTaskLogs() {
+  if (!selectedLogTask.value) return
+  taskLogsLoading.value = true
+  try {
+    taskLogs.value = await getLogs({ taskId: selectedLogTask.value.id })
+  } catch (err) {
+    ElMessage.error('获取任务日志失败: ' + err.message)
+    taskLogs.value = []
+  } finally {
+    taskLogsLoading.value = false
+  }
+}
+
+async function openTaskLogs(task) {
+  selectedLogTask.value = task
+  taskLogs.value = []
+  taskLogsDialogVisible.value = true
+  await refreshTaskLogs()
+}
+
 async function toggleSync(task) {
   if (task.status === 'scheduled' || schedulerStatus.value[task.id]) {
     // Stop auto-sync
@@ -1411,6 +1519,88 @@ onUnmounted(() => {
   color: var(--red);
 }
 
+.state-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.state-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.state-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.state-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.state-active { border-color: rgba(99,102,241,0.35); background: rgba(99,102,241,0.08); }
+.state-good { border-color: rgba(5,150,105,0.28); background: rgba(5,150,105,0.08); }
+.state-warn { border-color: rgba(245,158,11,0.32); background: rgba(245,158,11,0.09); }
+.state-bad { border-color: rgba(220,38,38,0.30); background: rgba(220,38,38,0.08); }
+.state-muted { color: var(--text-tertiary); }
+
+.task-log-list {
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.task-log-row {
+  display: grid;
+  grid-template-columns: 160px 58px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px;
+}
+
+.task-log-row:last-child { border-bottom: 0; }
+.task-log-row.log-error { background: rgba(220,38,38,0.04); }
+.task-log-row.log-warn { background: rgba(217,119,6,0.04); }
+
+.task-log-time {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.task-log-level {
+  justify-self: start;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 700;
+}
+.task-log-level.info { background: rgba(37,99,235,0.10); color: #2563eb; }
+.task-log-level.warn { background: rgba(217,119,6,0.12); color: var(--amber); }
+.task-log-level.error { background: rgba(220,38,38,0.12); color: var(--red); }
+
+.task-log-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .connection-issues {
   display: flex;
   flex-wrap: wrap;
@@ -1545,6 +1735,7 @@ onUnmounted(() => {
 @media (max-width: 1100px) {
   .task-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .state-strip { grid-template-columns: 1fr; }
   .task-card-top {
     flex-direction: column;
     align-items: stretch;

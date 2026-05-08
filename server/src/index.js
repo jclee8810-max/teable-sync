@@ -1380,11 +1380,13 @@ app.get('/api/logs', (req, res) => {
   const config = loadConfig();
   const { role, id: userId } = req.user;
   const level = req.query.level;
+  const taskId = req.query.taskId;
   // Super admin sees all logs; regular users only see their own task logs
   const filtered = role === 'super_admin'
     ? config.syncLogs
     : config.syncLogs.filter((l) => !l.userId || l.userId === userId);
-  const logs = level ? filtered.filter((l) => l.level === level) : filtered;
+  let logs = level ? filtered.filter((l) => l.level === level) : filtered;
+  if (taskId) logs = logs.filter((l) => l.taskId === taskId);
   res.json(logs.slice(-100));
 });
 
