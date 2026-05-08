@@ -160,7 +160,7 @@ function buildTaskConnectionStatus(config, user, task) {
   for (const [field, conn] of [['sourceConnectionId', srcConnRaw], ['targetConnectionId', tgtConnRaw]]) {
     if (!conn || conn.deletedAt) continue;
     if (conn.lastTest?.success === false) {
-      issues.push({ field, level: 'warn', message: `${connectionLabel(conn)} 最近测试失败: ${conn.lastTest.error || '未知错误'}` });
+      issues.push({ field, level: 'error', message: `${connectionLabel(conn)} 最近测试失败: ${conn.lastTest.error || '未知错误'}` });
     }
   }
 
@@ -182,6 +182,25 @@ function buildTaskConnectionStatus(config, user, task) {
     } : null,
     issues,
   };
+}
+
+function validateTaskRunnable(config, user, task, options = {}) {
+  const { requireTarget = true } = options;
+  const validation = validateTaskConnections(config, user, task);
+  if (validation.error) return { error: validation.error };
+
+  const checks = [
+    ['源连接', validation.srcConn],
+    ...(requireTarget ? [['目标连接', validation.tgtConn]] : []),
+  ];
+  for (const [label, conn] of checks) {
+    if (!conn) return { error: `${label}不存在或无权访问` };
+    if (conn.lastTest?.success === false) {
+      return { error: `${label}「${connectionLabel(conn)}」最近测试失败: ${conn.lastTest.error || '未知错误'}。请先重新测试连接，通过后再运行任务。` };
+    }
+  }
+
+  return validation;
 }
 
 function taskDto(config, user, task) {
@@ -372,8 +391,12 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
 
   const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
   const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
-  const validation = validateTaskConnections(config, { id: task.userId, role: 'user' }, task);
-  if (validation.error || !srcConn || !tgtConn) return { status: 'invalid', error: validation.error || 'Connection not found' };
+  const validation = validateTaskRunnable(config, { id: task.userId, role: 'user' }, task);
+  if (validation.error || !srcConn || !tgtConn) {
+    const error = validation.error || 'Connection not found';
+    persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 未启动: ${error}`, ts: new Date().toISOString() }, task.userId);
+    return { status: 'invalid', error };
+  }
 
   const c1 = loadConfig();
   const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
@@ -438,7 +461,7 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
   if (missingFields.length > 0) {
     throw Object.assign(new Error(`缺少必要字段: ${missingFields.join(', ')}`), { status: 400 });
   }
-  const validation = validateTaskConnections(config, actorUser, task);
+  const validation = validateTaskRunnable(config, actorUser, task);
   if (validation.error) throw Object.assign(new Error(validation.error), { status: 400 });
 
   if (syncScheduler.has(task.id)) {
@@ -1002,7 +1025,7 @@ app.get('/api/tasks/:id/preview', async (req, res) => {
     // Find source connection
     const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
     if (!srcConn) return res.status(400).json({ error: '源连接不存在' });
-    const validation = validateTaskConnections(config, req.user, task);
+    const validation = validateTaskRunnable(config, req.user, task, { requireTarget: false });
     if (validation.error) return res.status(400).json({ error: validation.error });
     
     // Normalize db name
@@ -1251,7 +1274,7 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
   if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
-  const validation = validateTaskConnections(config, req.user, task);
+  const validation = validateTaskRunnable(config, req.user, task);
   if (validation.error) return res.status(400).json({ error: validation.error });
   const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
   const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
@@ -1303,7 +1326,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
   const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
   const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
-  const validation = validateTaskConnections(config, req.user, task);
+  const validation = validateTaskRunnable(config, req.user, task);
   if (validation.error) return res.status(400).json({ error: validation.error });
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
 
