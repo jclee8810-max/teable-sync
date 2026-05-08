@@ -1,8 +1,7 @@
-# TeableSync Docker 部署
-# 包含：TeableSync + SQL Server（测试用）+ Teable 自部署
+# Teable Sync Docker deployment
+# Default stack runs only the application. Configure SQL databases and Teable connections in the UI.
 
 services:
-  # TeableSync 主服务
   teable-sync:
     build:
       context: .
@@ -11,7 +10,7 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     ports:
-      - "3101:3101"   # 后端 API + 前端静态 + WebSocket
+      - "3101:3101"
     environment:
       - NODE_ENV=production
       - PORT=3101
@@ -25,77 +24,11 @@ services:
       - FRONTEND_BASE_URL=${FRONTEND_BASE_URL:-http://localhost:3101}
       - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-change-in-production}
       - CONFIG_ENCRYPTION_KEY=${CONFIG_ENCRYPTION_KEY:-${JWT_SECRET:-your-jwt-secret-change-in-production}}
+      - TEABLE_RATE_LIMIT_MS=${TEABLE_RATE_LIMIT_MS:-120}
+      - RECONCILE_DATE_TIME_ZONE=${RECONCILE_DATE_TIME_ZONE:-Asia/Shanghai}
     volumes:
       - teable-sync-data:/app/server/data
-    depends_on:
-      - sqlserver
     restart: unless-stopped
-
-  # SQL Server（测试用）
-  sqlserver:
-    image: mcr.microsoft.com/azure-sql-edge:latest
-    environment:
-      - ACCEPT_EULA=Y
-      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD:-ChangeMe123!}
-      - TZ=Asia/Shanghai
-    ports:
-      - "1434:1433"
-    volumes:
-      - sqlserver-data:/var/opt/mssql
-    restart: unless-stopped
-
-  # MySQL 8.0（测试用）
-  mysql:
-    image: mysql:8.0
-    environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-ChangeMe123!}
-      - MYSQL_DATABASE=sync_test
-      - TZ=Asia/Shanghai
-    ports:
-      - "1435:3306"
-    volumes:
-      - mysql-data:/var/lib/mysql
-    restart: unless-stopped
-
-  # PostgreSQL 15（测试用）
-  postgres:
-    image: postgres:15
-    environment:
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ChangeMe123!}
-      - POSTGRES_DB=sync_test
-      - TZ=Asia/Shanghai
-    ports:
-      - "1436:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-  # Teable 自部署版（可选，需要 PostgreSQL）
-  # teable:
-  #   image: registry.cn-shenzhen.aliyuncs.com/teable/teable:release.2026-04-24T10-11-41Z.1555
-  #   environment:
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #     - DB_NAME=teable
-  #     - DB_USER=postgres
-  #     - DB_PASSWORD=${TEABLE_DB_PASSWORD:-ChangeMe123!}
-  #   ports:
-  #     - "3000:3000"
-  #   depends_on:
-  #     - postgres
-  #   restart: unless-stopped
-  #
-  # postgres:
-  #   image: postgres:15
-  #   environment:
-  #     - POSTGRES_PASSWORD=${TEABLE_DB_PASSWORD:-ChangeMe123!}
-  #     - POSTGRES_DB=teable
-  #   volumes:
-  #     - postgres-data:/var/lib/postgresql/data
-  #   restart: unless-stopped
 
 volumes:
   teable-sync-data:
-  sqlserver-data:
-  mysql-data:
-  postgres-data:
