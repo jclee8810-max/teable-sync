@@ -1,15 +1,40 @@
 <template>
   <div class="tasks-page">
-    <!-- Header -->
-    <div class="page-actions">
+    <div class="task-overview">
+      <button class="summary-tile" :class="{ active: taskFilter === 'all' }" type="button" @click="taskFilter = 'all'">
+        <span>全部任务</span>
+        <strong>{{ taskSummary.total }}</strong>
+      </button>
+      <button class="summary-tile" :class="{ active: taskFilter === 'attention' }" type="button" @click="taskFilter = 'attention'">
+        <span>需要处理</span>
+        <strong>{{ taskSummary.attention }}</strong>
+      </button>
+      <button class="summary-tile" :class="{ active: taskFilter === 'running' }" type="button" @click="taskFilter = 'running'">
+        <span>运行中</span>
+        <strong>{{ taskSummary.running }}</strong>
+      </button>
+      <button class="summary-tile" :class="{ active: taskFilter === 'scheduled' }" type="button" @click="taskFilter = 'scheduled'">
+        <span>已调度</span>
+        <strong>{{ taskSummary.scheduled }}</strong>
+      </button>
+    </div>
+
+    <div class="task-toolbar">
+      <el-input
+        v-model="taskSearch"
+        class="task-search"
+        clearable
+        placeholder="搜索任务、连接或表名"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
       <button class="fs-btn fs-btn-primary" @click="openDialog()">
         <el-icon><Plus /></el-icon>新建任务
       </button>
     </div>
 
-    <!-- Task List -->
-    <div class="task-list" v-if="tasks.length > 0">
-      <div v-for="task in tasks" :key="task.id" class="fs-card task-card">
+    <div class="task-list" v-if="filteredTasks.length > 0">
+      <div v-for="task in filteredTasks" :key="task.id" class="fs-card task-card" :class="{ attention: taskNeedsAttention(task), running: isTaskRunning(task) }">
         <div class="task-card-top">
           <div class="task-info">
             <div class="task-name">{{ task.name }}</div>
@@ -57,7 +82,7 @@
         </div>
 
         <div class="task-card-detail">
-          <div class="detail-grid" style="grid-template-columns: repeat(5, 1fr)">
+          <div class="detail-grid">
             <div class="detail-item">
               <span class="detail-label">源表</span>
               <span class="detail-value mono">{{ task.sourceTable }}</span>
@@ -110,6 +135,7 @@
     </div>
 
     <el-empty v-if="tasks.length === 0" description="暂无同步任务" />
+    <el-empty v-else-if="filteredTasks.length === 0" description="没有匹配的任务" />
 
     <!-- Task Dialog -->
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑任务' : '新建同步任务'" width="720px" destroy-on-close>
@@ -503,6 +529,8 @@ function isOwner(task) {
 
 const connections = ref([])
 const tasks = ref([])
+const taskFilter = ref('all')
+const taskSearch = ref('')
 const dialogVisible = ref(false)
 const editingId = ref(null)
 const saving = ref(false)
@@ -554,11 +582,31 @@ const form = ref({ ...defaultForm })
 
 const sqlConnections = computed(() => connections.value.filter(c => c.type !== 'teable'))
 const teableConnections = computed(() => connections.value.filter(c => c.type === 'teable'))
-const datetimeColumns = computed(() =>
-  sourceColumns.value
-    .filter(c => /datetime|timestamp|date/i.test(c.type))
-    .map(c => c.name)
-)
+
+const taskSummary = computed(() => ({
+  total: tasks.value.length,
+  attention: tasks.value.filter(taskNeedsAttention).length,
+  running: tasks.value.filter(isTaskRunning).length,
+  scheduled: tasks.value.filter(task => schedulerStatus.value[task.id] || task.status === 'scheduled').length,
+}))
+
+const filteredTasks = computed(() => {
+  const q = taskSearch.value.trim().toLowerCase()
+  return tasks.value.filter((task) => {
+    if (taskFilter.value === 'attention' && !taskNeedsAttention(task)) return false
+    if (taskFilter.value === 'running' && !isTaskRunning(task)) return false
+    if (taskFilter.value === 'scheduled' && !(schedulerStatus.value[task.id] || task.status === 'scheduled')) return false
+    if (!q) return true
+    return [
+      task.name,
+      task.sourceTable,
+      connName(task.sourceConnectionId || task.sourceId),
+      connName(task.targetConnectionId || task.targetId),
+      task.watermarkType,
+      task.syncMode,
+    ].filter(Boolean).some(value => String(value).toLowerCase().includes(q))
+  })
+})
 
 // Available watermark types based on detected candidates
 const availableWatermarkTypes = computed(() => {
@@ -647,6 +695,12 @@ function healthRate(health) {
 function isTaskRunning(task) {
   const p = taskProgress.value[task.id]
   return task.status === 'running' || task._running || p?.status === 'running' || p?.status === 'cancelling'
+}
+function taskNeedsAttention(task) {
+  const health = taskHealth.value[task.id]
+  return Boolean(failureCounts.value[task.id])
+    || task.status === 'error'
+    || ['has_failures', 'recent_failed'].includes(health?.status)
 }
 function progressPhaseLabel(phase) {
   const map = {
@@ -1122,12 +1176,52 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.tasks-page {}
+.tasks-page {
+  display: grid;
+  gap: 18px;
+}
 
-.page-actions {
+.task-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-tile {
+  display: grid;
+  gap: 8px;
+  text-align: left;
+  padding: 14px 16px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.summary-tile:hover,
+.summary-tile.active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+.summary-tile span {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.summary-tile strong {
+  font-size: 24px;
+  line-height: 1;
+  color: var(--text-primary);
+}
+
+.task-toolbar {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-search {
+  max-width: 360px;
 }
 
 .task-list {
@@ -1136,12 +1230,18 @@ onUnmounted(() => {
   gap: 16px;
 }
 
-.task-card { padding: 20px 24px; }
+.task-card {
+  padding: 18px 20px;
+  border-left: 3px solid transparent;
+}
+.task-card.attention { border-left-color: var(--red); }
+.task-card.running { border-left-color: var(--accent); }
 
 .task-card-top {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 16px;
   margin-bottom: 16px;
 }
 
@@ -1168,6 +1268,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .icon-btn-danger:hover { color: var(--red) !important; background: rgba(239,68,68,0.1) !important; }
@@ -1179,7 +1281,7 @@ onUnmounted(() => {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -1199,6 +1301,8 @@ onUnmounted(() => {
 .detail-value {
   font-size: 13px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .detail-value.mono { font-family: var(--font-mono); }
 .detail-value.empty { color: var(--text-tertiary); font-style: italic; }
@@ -1395,4 +1499,24 @@ onUnmounted(() => {
 .compat-safe { background: rgba(16,185,129,0.12); color: var(--green); }
 .compat-warn { background: rgba(245,158,11,0.12); color: var(--amber); cursor: help; }
 .compat-unknown { color: var(--text-tertiary); }
+
+@media (max-width: 1100px) {
+  .task-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .task-card-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .task-actions { justify-content: flex-start; }
+}
+
+@media (max-width: 720px) {
+  .task-overview { grid-template-columns: 1fr; }
+  .task-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .task-search { max-width: none; }
+  .detail-grid { grid-template-columns: 1fr; }
+}
 </style>

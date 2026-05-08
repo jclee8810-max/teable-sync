@@ -28,18 +28,16 @@
         </button>
       </nav>
 
-      <div class="sidebar-features">
-        <div class="feature-item">
-          <span class="feature-num">3</span>
-          <span class="feature-label">种数据库</span>
+      <div class="sidebar-context">
+        <div>
+          <span class="context-label">当前身份</span>
+          <strong>{{ currentUser?.role === 'super_admin' ? '管理员' : '普通用户' }}</strong>
         </div>
-        <div class="feature-item">
-          <span class="feature-num">3</span>
-          <span class="feature-label">种同步策略</span>
-        </div>
-        <div class="feature-item">
-          <span class="feature-num">∞</span>
-          <span class="feature-label">字段映射</span>
+        <div>
+          <span class="context-label">运行版本</span>
+          <button class="context-link" type="button" @click="versionDialogVisible = true">
+            {{ versionInfo.shortCommit || 'unknown' }}
+          </button>
         </div>
       </div>
 
@@ -165,18 +163,15 @@ function connectWS() {
     return
   }
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsPort = import.meta.env.VITE_WS_PORT || location.port || '3100'
+  const wsPort = import.meta.env.VITE_WS_PORT || location.port || '3101'
   const token = getToken()
   const wsUrl = `${protocol}//${location.hostname}:${wsPort}`
-  console.log('[WS] Connecting to:', wsUrl)
   ws = new WebSocket(wsUrl)
   ws.onopen = () => {
-    console.log('[WS] onopen triggered, readyState:', ws.readyState, '(OPEN=1)')
     // 延迟 50ms 确保 readyState 已更新
     setTimeout(() => {
       if (token && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'auth', token }))
-        console.log('[WS] Auth message sent')
       } else {
         console.warn('[WS] Cannot send: token=', !!token, 'readyState=', ws.readyState)
       }
@@ -245,7 +240,6 @@ function goProfile() {
 }
 
 function handleLogout() {
-  console.log('[App] handleLogout called')
   clearToken()
   onAuthChanged(null)
 }
@@ -307,7 +301,7 @@ const vClickOutside = {
   --shadow-md: 0 4px 16px rgba(0,0,0,0.08);
   --shadow-lg: 0 8px 32px rgba(0,0,0,0.10);
 
-  --sidebar-w: 240px;
+  --sidebar-w: 232px;
 
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif;
   --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
@@ -342,11 +336,10 @@ body {
   flex-shrink: 0;
   position: relative;
   z-index: 10;
-  box-shadow: 2px 0 8px rgba(0,0,0,0.04);
 }
 
 .sidebar-brand {
-  padding: 28px 24px 24px;
+  padding: 24px 20px 20px;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -364,22 +357,21 @@ body {
 
 .brand-text { display: flex; flex-direction: column; }
 .brand-name {
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 700;
-  letter-spacing: -0.5px;
   color: var(--text-primary);
 }
 .brand-tag {
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 1.5px;
+  letter-spacing: 0;
   color: var(--text-tertiary);
   font-weight: 500;
 }
 
 .sidebar-nav {
   flex: 1;
-  padding: 16px 12px;
+  padding: 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -389,7 +381,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 11px 14px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -504,7 +496,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px 36px;
+  padding: 18px 32px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   flex-shrink: 0;
@@ -513,9 +505,8 @@ body {
 .top-bar-left {}
 
 .page-title {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 700;
-  letter-spacing: -0.5px;
   color: var(--text-primary);
 }
 .page-desc {
@@ -596,21 +587,18 @@ body {
 .content-area {
   flex: 1;
   overflow-y: auto;
-  padding: 28px 36px;
+  padding: 24px 32px;
 }
 
 /* ========== GLOBAL CARD STYLE ========== */
 .fs-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-sm);
   padding: 24px;
   transition: all 0.2s ease;
 }
-.fs-card:hover {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-sm);
-}
+.fs-card:hover { border-color: var(--border-strong); }
 
 /* ========== BUTTONS ========== */
 .fs-btn {
@@ -619,7 +607,7 @@ body {
   gap: 8px;
   padding: 10px 20px;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   font-size: 14px;
   font-weight: 600;
   font-family: var(--font-sans);
@@ -656,39 +644,71 @@ body {
 .el-overlay { background-color: rgba(0,0,0,0.4) !important; }
 .el-scrollbar__bar { opacity: 0.3; }
 
-/* ========== SIDEBAR FEATURES ========== */
-.sidebar-features {
-  display: flex;
-  gap: 4px;
-  padding: 14px 12px;
-  margin: 0 12px;
+.sidebar-context {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 0 12px 12px;
   background: var(--bg-elevated);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
 }
-.feature-item {
-  flex: 1;
+.sidebar-context div {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 8px;
 }
-.feature-num {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--accent);
-  line-height: 1;
-}
-.feature-label {
-  font-size: 10px;
+.context-label {
+  font-size: 11px;
   color: var(--text-tertiary);
-  font-weight: 500;
-  white-space: nowrap;
 }
+.sidebar-context strong,
+.context-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.context-link {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.context-link:hover { color: var(--accent); }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.20); }
+
+@media (max-width: 900px) {
+  .app-root { flex-direction: column; }
+  .sidebar {
+    width: 100%;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-default);
+  }
+  .sidebar-brand { padding: 14px 18px; }
+  .sidebar-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 10px 12px;
+  }
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+  .sidebar-context,
+  .sidebar-footer { display: none; }
+  .top-bar {
+    padding: 14px 18px;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .user-name { display: none; }
+  .content-area { padding: 18px; }
+}
 </style>
