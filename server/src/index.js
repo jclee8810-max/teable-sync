@@ -348,21 +348,21 @@ function broadcastLogUser(log, userId) {
   });
 }
 
-function persistSyncLog(entry) {
+async function persistSyncLog(entry) {
   broadcastLog(entry);
   const cfg = loadConfig();
   cfg.syncLogs.push(entry);
   if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
-  saveConfig(cfg, { backup: false });
+  await saveConfig(cfg, { backup: false });
 }
 
-function persistUserSyncLog(entry, userId) {
+async function persistUserSyncLog(entry, userId) {
   const enhanced = { ...entry, userId };
   broadcastLogUser(enhanced, userId);
   const cfg = loadConfig();
   cfg.syncLogs.push(enhanced);
   if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
-  saveConfig(cfg, { backup: false });
+  await saveConfig(cfg, { backup: false });
 }
 
 function getTaskStartMissingFields(task) {
@@ -394,7 +394,7 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
   const validation = validateTaskRunnable(config, { id: task.userId, role: 'user' }, task);
   if (validation.error || !srcConn || !tgtConn) {
     const error = validation.error || 'Connection not found';
-    persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 未启动: ${error}`, ts: new Date().toISOString() }, task.userId);
+    await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 未启动: ${error}`, ts: new Date().toISOString() }, task.userId);
     return { status: 'invalid', error };
   }
 
@@ -402,12 +402,12 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
   const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
   if (idx1 === -1) return { status: 'missing' };
   c1.syncTasks[idx1].status = 'running';
-  saveConfig(c1);
+  await saveConfig(c1);
 
   const { runSyncWithControl } = await import('./services/syncEngine.js');
   const runControl = startTrackedRun(task, trigger);
   if (!runControl.owned) {
-    persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
+    await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
     return { status: 'skipped' };
   }
 
@@ -426,12 +426,12 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     if (idxDone !== -1) {
       done.syncTasks[idxDone].status = 'scheduled';
       if (result?.status !== 'skipped') done.syncTasks[idxDone].lastSyncAt = new Date().toISOString();
-      saveConfig(done);
+      await saveConfig(done);
     }
     if (result?.status === 'skipped') {
-      persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
+      await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
     } else {
-      persistUserSyncLog({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() }, task.userId);
+      await persistUserSyncLog({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() }, task.userId);
     }
     return result || { status: 'success' };
   } catch (err) {
@@ -440,9 +440,9 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     const idxFailed = failed.syncTasks.findIndex((x) => x.id === task.id);
     if (idxFailed !== -1) {
       failed.syncTasks[idxFailed].status = 'scheduled';
-      saveConfig(failed);
+      await saveConfig(failed);
     }
-    persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
+    await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
     return { status: 'failed', error: err.message };
   }
 }
@@ -480,11 +480,11 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
   if (idx === -1) throw Object.assign(new Error('Not found'), { status: 404 });
   cfg.syncTasks[idx].status = 'scheduled';
   cfg.syncTasks[idx].enabled = true;
-  saveConfig(cfg);
+  await saveConfig(cfg);
 
   const intervalId = setInterval(() => {
     runScheduledTask(task.id, mode, mode, intervalSec).catch((err) => {
-      persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 调度失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
+      persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 调度失败: ${err.message}`, ts: new Date().toISOString() }, task.userId).catch(() => {});
     });
   }, intervalSec * 1000);
   syncScheduler.set(task.id, { intervalId, syncMode: mode, intervalSec });
@@ -499,7 +499,7 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
     });
   }
 
-  persistUserSyncLog({ taskId: task.id, level: 'info', message: `已${resume ? '恢复' : '启动'}${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
+  await persistUserSyncLog({ taskId: task.id, level: 'info', message: `已${resume ? '恢复' : '启动'}${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
 
   if (runImmediately) {
     await runScheduledTask(task.id, resume ? 'resume' : 'initial', mode, intervalSec);
@@ -1093,7 +1093,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
 });
 
 // Stop auto-sync for a task
-app.post('/api/tasks/:id/stop', (req, res) => {
+app.post('/api/tasks/:id/stop', async (req, res) => {
   const config = loadConfig();
   const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
@@ -1115,7 +1115,7 @@ app.post('/api/tasks/:id/stop', (req, res) => {
 
   config.syncTasks[taskIdx].status = 'idle';
   config.syncTasks[taskIdx].enabled = false;
-  saveConfig(config);
+  await saveConfig(config);
 
   broadcastLogUser({ taskId: req.params.id, level: 'info', message: '已停止自动同步', ts: new Date().toISOString() }, task.userId);
   appendAuditLog(req.user, 'task.stop', {
@@ -1338,7 +1338,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   const idx0 = cfg0.syncTasks.findIndex((x) => x.id === task.id);
   if (idx0 !== -1) {
     cfg0.syncTasks[idx0].status = 'running';
-    saveConfig(cfg0);
+    await saveConfig(cfg0);
   }
 
   res.json({ started: true });
@@ -1358,7 +1358,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
       const cfg = loadConfig();
       cfg.syncLogs.push(enhanced);
       if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
-      saveConfig(cfg, { backup: false });
+      return saveConfig(cfg, { backup: false });
     };
 
     let result;
@@ -1373,7 +1373,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
       const cfgSkip = loadConfig();
       const idxSkip = cfgSkip.syncTasks.findIndex((x) => x.id === task.id);
       if (idxSkip !== -1) cfgSkip.syncTasks[idxSkip].status = syncScheduler.has(task.id) ? 'scheduled' : 'idle';
-      saveConfig(cfgSkip);
+      await saveConfig(cfgSkip);
       return;
     }
 
@@ -1383,7 +1383,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     if (idx1 !== -1) {
       cfg1.syncTasks[idx1].status = syncScheduler.has(task.id) ? 'scheduled' : 'idle';
       cfg1.syncTasks[idx1].lastSyncAt = new Date().toISOString();
-      saveConfig(cfg1);
+      await saveConfig(cfg1);
     }
   } catch (err) {
     const cancelled = err.code === 'SYNC_CANCELLED';
@@ -1393,7 +1393,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     cfg.syncLogs.push(entry);
     const idx = cfg.syncTasks.findIndex((x) => x.id === task.id);
     if (idx !== -1) cfg.syncTasks[idx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled ? 'idle' : 'error');
-    saveConfig(cfg, { backup: false });
+    await saveConfig(cfg, { backup: false });
   }
 });
 
