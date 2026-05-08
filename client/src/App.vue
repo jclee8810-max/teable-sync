@@ -82,6 +82,7 @@
       <div class="content-area">
         <ConnectionsPanel v-if="activeTab === 'connections'" />
         <TasksPanel v-if="activeTab === 'tasks'" />
+        <ObservabilityPanel v-if="activeTab === 'observability'" />
         <LogsPanel v-if="activeTab === 'logs'" />
         <SystemDoctorPanel v-if="activeTab === 'doctor'" />
         <AuthPage v-if="showProfile" @auth-changed="onAuthChanged" />
@@ -115,6 +116,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import ConnectionsPanel from './components/ConnectionsPanel.vue'
 import TasksPanel from './components/TasksPanel.vue'
+import ObservabilityPanel from './components/ObservabilityPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
 import SystemDoctorPanel from './components/SystemDoctorPanel.vue'
 import AuthPage from './components/AuthPage.vue'
@@ -132,6 +134,7 @@ const navItems = computed(() => {
   const items = [
     { key: 'connections', icon: 'Link', label: '数据源', badge: null },
     { key: 'tasks', icon: 'RefreshRight', label: '同步任务', badge: null },
+    { key: 'observability', icon: 'DataAnalysis', label: '观测告警', badge: null },
     { key: 'logs', icon: 'Document', label: '日志', badge: null },
   ]
   if (currentUser.value?.role === 'super_admin') {
@@ -141,13 +144,14 @@ const navItems = computed(() => {
 })
 
 const currentPageTitle = computed(() => {
-  const m = { connections: '数据源管理', tasks: '同步任务', logs: '运行日志', doctor: '系统检查' }
+  const m = { connections: '数据源管理', tasks: '同步任务', observability: '观测告警', logs: '运行日志', doctor: '系统检查' }
   return m[activeTab.value] || '个人中心'
 })
 const currentPageDesc = computed(() => {
   const m = {
     connections: '配置数据库与 Teable 实例连接',
     tasks: '管理 SQL → Teable 数据同步管线',
+    observability: '集中查看任务健康、调度状态和开放告警',
     logs: '实时查看同步执行记录',
     doctor: '检查配置、密钥、任务引用和运行数据目录',
   }

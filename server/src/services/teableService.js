@@ -94,9 +94,26 @@ export async function getTeableFields(conn, tableId) {
   return teableRequest(conn, `/api/table/${tableId}/field`);
 }
 
+export function normalizeTeableRecordsResponse(result) {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.records)) return result.records;
+  if (Array.isArray(result?.data?.records)) return result.data.records;
+  if (Array.isArray(result?.data)) return result.data;
+  return [];
+}
+
+export function teableFieldToSourceColumn(field) {
+  return {
+    name: field.name,
+    type: field.type,
+    id: field.id,
+    options: field.options || {},
+  };
+}
+
 export async function getTeableRecords(conn, tableId, options = {}) {
   const params = new URLSearchParams();
-  if (options.fieldKeyType) params.set('fieldKeyType', options.fieldKeyType || 'name');
+  params.set('fieldKeyType', options.fieldKeyType || 'name');
   if (options.filter) params.set('filter', JSON.stringify(options.filter));
   if (options.sort) params.set('sort', JSON.stringify(options.sort));
   // Teable record list pagination uses take/skip.
@@ -140,6 +157,25 @@ export async function deleteTeableRecords(conn, tableId, recordIds) {
 /**
  * Convert SQL column type to Teable field type + default options
  */
+export function sourceTypeToTeable(sourceType) {
+  const t = String(sourceType || '').toLowerCase();
+  const directTypes = {
+    singlelinetext: 'singleLineText',
+    longtext: 'longText',
+    number: 'number',
+    date: 'date',
+    checkbox: 'checkbox',
+    attachment: 'attachment',
+    singleselect: 'singleSelect',
+    multipleselect: 'multipleSelect',
+  };
+  if (directTypes[t]) return { type: directTypes[t], options: {} };
+  if (['user', 'createdtime', 'lastmodifiedtime', 'createdby', 'lastmodifiedby', 'autonumber', 'formula', 'rollup', 'link'].includes(t)) {
+    return { type: 'singleLineText', options: {} };
+  }
+  return sqlTypeToTeable(sourceType);
+}
+
 export function sqlTypeToTeable(sqlType) {
   const t = (sqlType || '').toLowerCase();
   if (t.includes('int') || t.includes('bigint') || t.includes('smallint') || t.includes('tinyint') || t.includes('serial'))
@@ -197,7 +233,7 @@ export async function ensureTeableFields(conn, tableId, sourceSchema, columnMapp
     }
 
     // Field doesn't exist → try to create it
-    const info = sqlTypeToTeable(col.type);
+    const info = sourceTypeToTeable(col.type);
     if (info.type === 'attachment') {
       skippedAttachmentCols.push(col.name);
       continue;

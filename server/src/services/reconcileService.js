@@ -1,5 +1,5 @@
 import { query, getTableSchema } from './dbService.js';
-import { getTeableFields, getTeableRecords } from './teableService.js';
+import { getTeableFields, getTeableRecords, normalizeTeableRecordsResponse, teableFieldToSourceColumn } from './teableService.js';
 import { convertValue } from './typeConverter.js';
 import { detectWatermarkCandidates } from './syncEngine.js';
 
@@ -97,8 +97,39 @@ function normalizeSourceRow(row, mapping, srcTypeMap, tgtTypeMap) {
   return fields;
 }
 
+function isTeableSource(conn) {
+  return conn?.type === 'teable';
+}
+
+function normalizeSourceType(type, sourceKind) {
+  return sourceKind === 'teable' ? 'teable:' + type : type;
+}
+
 async function loadSourceRows(task, srcConn, srcTypeMap, tgtTypeMap, mapping, pkCol, limit) {
   const rows = [];
+  if (isTeableSource(srcConn)) {
+    let skip = 0;
+    while (rows.length < limit) {
+      const take = Math.min(PAGE_SIZE, limit - rows.length);
+      const result = await getTeableRecords(srcConn, task.sourceTable, { skip, take });
+      const page = normalizeTeableRecordsResponse(result);
+      if (page.length === 0) break;
+      for (const rec of page) {
+        const source = rec.fields || rec;
+        const pk = source[pkCol];
+        if (pk !== undefined && pk !== null) {
+          rows.push({
+            pk: String(pk),
+            fields: normalizeSourceRow(source, mapping, srcTypeMap, tgtTypeMap),
+          });
+        }
+      }
+      if (page.length < take) break;
+      skip += take;
+    }
+    return rows;
+  }
+
   const db = task.sourceDatabase || null;
   const table = quoteIdentifier(srcConn.type, task.sourceTable);
   const pkIdentifier = quoteIdentifier(srcConn.type, pkCol);
@@ -157,7 +188,10 @@ async function loadTargetRows(tgtConn, tableId, pkFieldName, limit) {
 export async function reconcileTask(task, srcConn, tgtConn, options = {}) {
   const limit = Math.min(Number(options.limit || DEFAULT_LIMIT), 50000);
   const sampleLimit = Math.min(Number(options.sampleLimit || DEFAULT_SAMPLE_LIMIT), 500);
-  const sourceSchema = await getTableSchema(srcConn, task.sourceTable, task.sourceDatabase || null);
+  const sourceKind = isTeableSource(srcConn) ? 'teable' : 'sql';
+  const sourceSchema = sourceKind === 'teable'
+    ? (await getTeableFields(srcConn, task.sourceTable)).map(teableFieldToSourceColumn)
+    : await getTableSchema(srcConn, task.sourceTable, task.sourceDatabase || null);
   const targetFields = await getTeableFields(tgtConn, task.targetTableId);
   const mapping = task.columnMapping || {};
   const { pkCol: detectedPkCol } = await detectWatermarkCandidates(srcConn, task.sourceTable, task.sourceDatabase || null);
@@ -167,7 +201,7 @@ export async function reconcileTask(task, srcConn, tgtConn, options = {}) {
     ? mapping
     : Object.fromEntries(sourceSchema.map((col) => [col.name, col.name]));
   const pkFieldName = effectiveMapping[pkCol] || pkCol;
-  const srcTypeMap = Object.fromEntries(sourceSchema.map((col) => [col.name, col.type]));
+  const srcTypeMap = Object.fromEntries(sourceSchema.map((col) => [col.name, normalizeSourceType(col.type, sourceKind)]));
   const tgtTypeMap = Object.fromEntries(targetFields.map((field) => [field.name, field.type]));
   const targetFieldMap = Object.fromEntries(targetFields.map((field) => [field.name, field]));
   const sourceFieldByTarget = Object.fromEntries(Object.entries(effectiveMapping).map(([src, tgt]) => [tgt, src]));

@@ -18,6 +18,9 @@ import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
 import { reconcileTask } from './services/reconcileService.js';
 import { appendAuditLog, getAuditLogs } from './services/auditLog.js';
 import { createConfigBackup, getConfigBackups } from './services/configBackup.js';
+import { getCurrentTaskSchema, detectTaskSchemaDrift } from './services/schemaDriftService.js';
+import { buildObservabilitySnapshot } from './services/observabilityService.js';
+import { buildConfigExport, previewConfigImport, applyConfigImport } from './services/configMigrationService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -44,9 +47,11 @@ let _writeLock = Promise.resolve();
 
 function loadConfig() {
   if (existsSync(CONFIG_FILE)) {
-    return decryptConfigSecrets(JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')));
+    const config = decryptConfigSecrets(JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')));
+    if (!Array.isArray(config.taskTemplates)) config.taskTemplates = [];
+    return config;
   }
-  const defaults = { connections: [], syncTasks: [], syncLogs: [] };
+  const defaults = { connections: [], syncTasks: [], syncLogs: [], taskTemplates: [] };
   saveConfig(defaults);
   return defaults;
 }
@@ -125,14 +130,58 @@ function clampInt(value, fallback, min, max) {
 }
 
 function cleanTaskInput(body = {}) {
-  const { id, userId, createdAt, deletedAt, status, enabled, lastSyncAt, connectionStatus, ...cleaned } = body;
+  const { id, userId, createdAt, deletedAt, status, enabled, lastSyncAt, connectionStatus, sourceConnection, targetConnection, ...cleaned } = body;
   cleaned.pageSize = clampInt(cleaned.pageSize, 1000, 100, 5000);
   cleaned.batchSize = clampInt(cleaned.batchSize, 500, 10, 1000);
   cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
   if ('syncMode' in cleaned && !['manual', 'scheduled', 'realtime', 'incremental'].includes(cleaned.syncMode)) cleaned.syncMode = 'manual';
+  if ('syncDirection' in cleaned && !['one_way', 'bidirectional'].includes(cleaned.syncDirection)) cleaned.syncDirection = 'one_way';
+  if ('conflictStrategy' in cleaned && !['upsert', 'skip', 'insert_only', 'source_wins', 'target_wins', 'latest_wins', 'skip_conflict'].includes(cleaned.conflictStrategy)) cleaned.conflictStrategy = 'upsert';
   if (!['ignore', 'soft_delete', 'hard_delete'].includes(cleaned.deletionMode)) cleaned.deletionMode = 'ignore';
   if (!/^[a-zA-Z0-9_]+$/.test(cleaned.softDeleteField || 'deleted')) cleaned.softDeleteField = 'deleted';
+  if (cleaned.sourceTable && typeof cleaned.sourceTable === 'string') cleaned.sourceTable = cleaned.sourceTable.trim();
+  if (cleaned.targetTableId && typeof cleaned.targetTableId === 'string') cleaned.targetTableId = cleaned.targetTableId.trim();
   return cleaned;
+}
+
+const TASK_RUNTIME_FIELDS = ['id', 'userId', 'ownerId', 'createdAt', 'updatedAt', 'deletedAt', 'status', 'enabled', 'lastSyncAt', 'connectionStatus', 'sourceConnection', 'targetConnection'];
+
+function taskConfigSnapshot(task = {}) {
+  const snapshot = { ...task };
+  for (const field of TASK_RUNTIME_FIELDS) delete snapshot[field];
+  delete snapshot._running;
+  return cleanTaskInput(snapshot);
+}
+
+function buildCopiedTask(sourceTask, overrides = {}) {
+  const body = cleanTaskInput({ ...taskConfigSnapshot(sourceTask), ...overrides });
+  return {
+    ...body,
+    id: crypto.randomUUID(),
+    name: body.name || `${sourceTask.name || '同步任务'} 副本`,
+    syncMode: body.syncMode || 'manual',
+    syncDirection: body.syncDirection || 'one_way',
+    conflictStrategy: body.conflictStrategy || 'upsert',
+    enabled: false,
+    createdAt: new Date().toISOString(),
+    lastSyncAt: null,
+    status: 'idle',
+    userId: sourceTask.userId,
+  };
+}
+
+function canUseTemplate(user, template) {
+  return template && !template.deletedAt && (user.role === 'super_admin' || template.userId === user.id || template.shared === true);
+}
+
+async function attachSchemaSnapshot(task, srcConn, tgtConn) {
+  if (!task || !srcConn || !tgtConn) return task;
+  try {
+    task.schemaSnapshot = await getCurrentTaskSchema(task, srcConn, tgtConn);
+  } catch (err) {
+    task.schemaSnapshotError = err.message;
+  }
+  return task;
 }
 
 function connectionLabel(conn, fallbackId) {
@@ -147,14 +196,18 @@ function buildTaskConnectionStatus(config, user, task) {
   const validation = validateTaskConnections(config, user, task);
   const issues = [];
 
-  if (!sourceId) issues.push({ field: 'sourceConnectionId', level: 'error', message: '未配置源数据库连接' });
+  if (!sourceId) issues.push({ field: 'sourceConnectionId', level: 'error', message: '未配置源连接' });
   if (!targetId) issues.push({ field: 'targetConnectionId', level: 'error', message: '未配置 Teable 目标连接' });
   if (sourceId && !srcConnRaw) issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接不存在: ${sourceId}` });
   else if (srcConnRaw?.deletedAt) issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接已删除: ${connectionLabel(srcConnRaw, sourceId)}` });
   if (targetId && !tgtConnRaw) issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接不存在: ${targetId}` });
   else if (tgtConnRaw?.deletedAt) issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接已删除: ${connectionLabel(tgtConnRaw, targetId)}` });
-  if (srcConnRaw && srcConnRaw.type === 'teable') issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接类型错误: ${connectionLabel(srcConnRaw, sourceId)} 是 Teable，源端必须是 SQL 数据库` });
+  if (srcConnRaw && !['mssql', 'mysql', 'pg', 'teable'].includes(srcConnRaw.type)) issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接类型错误: ${connectionLabel(srcConnRaw, sourceId)} 不是 SQL 或 Teable` });
   if (tgtConnRaw && tgtConnRaw.type !== 'teable') issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接类型错误: ${connectionLabel(tgtConnRaw, targetId)} 不是 Teable` });
+  if (task.syncDirection === 'bidirectional') {
+    if (srcConnRaw && srcConnRaw.type !== 'teable') issues.push({ field: 'syncDirection', level: 'error', message: '双向同步仅支持 Teable ↔ Teable' });
+    if (task.deletionMode && task.deletionMode !== 'ignore') issues.push({ field: 'deletionMode', level: 'warn', message: '双向同步暂不执行删除同步，请使用单向任务处理删除策略' });
+  }
   if (validation.error && issues.length === 0) issues.push({ field: 'connections', level: 'error', message: validation.error });
 
   for (const [field, conn] of [['sourceConnectionId', srcConnRaw], ['targetConnectionId', tgtConnRaw]]) {
@@ -378,6 +431,21 @@ function isAutoSyncMode(mode) {
   return ['scheduled', 'realtime', 'incremental'].includes(mode || 'manual');
 }
 
+async function runTaskPreflightCheck(task, srcConn, tgtConn) {
+  const { runTaskPreflight } = await import('./services/preflightService.js');
+  return runTaskPreflight(task, srcConn, tgtConn);
+}
+
+function preflightError(result) {
+  if (!result || result.ok) return null;
+  const firstError = (result.issues || []).find((issue) => issue.level === 'error');
+  const message = firstError?.message || `同步前预检未通过：${result.summary?.error || 0} 个错误`;
+  const err = new Error(message);
+  err.status = 400;
+  err.preflight = result;
+  return err;
+}
+
 async function runScheduledTask(taskId, trigger, mode, intervalSec) {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === taskId);
@@ -396,6 +464,21 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     const error = validation.error || 'Connection not found';
     await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 未启动: ${error}`, ts: new Date().toISOString() }, task.userId);
     return { status: 'invalid', error };
+  }
+
+  try {
+    const preflight = await runTaskPreflightCheck(task, validation.srcConn || srcConn, validation.tgtConn || tgtConn);
+    const gateError = preflightError(preflight);
+    if (gateError) {
+      await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 预检未通过: ${gateError.message}`, ts: new Date().toISOString() }, task.userId);
+      return { status: 'preflight_failed', error: gateError.message, preflight };
+    }
+    if (preflight.status === 'warn') {
+      await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 预检有 ${preflight.summary.warn} 个警告，继续执行`, ts: new Date().toISOString() }, task.userId);
+    }
+  } catch (err) {
+    await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 预检失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
+    return { status: 'preflight_failed', error: err.message };
   }
 
   const c1 = loadConfig();
@@ -463,6 +546,9 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
   }
   const validation = validateTaskRunnable(config, actorUser, task);
   if (validation.error) throw Object.assign(new Error(validation.error), { status: 400 });
+  const preflight = await runTaskPreflightCheck(task, validation.srcConn, validation.tgtConn);
+  const gateError = preflightError(preflight);
+  if (gateError) throw gateError;
 
   if (syncScheduler.has(task.id)) {
     clearInterval(syncScheduler.get(task.id).intervalId);
@@ -499,7 +585,7 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
     });
   }
 
-  await persistUserSyncLog({ taskId: task.id, level: 'info', message: `已${resume ? '恢复' : '启动'}${mode === 'realtime' ? '实时' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
+  await persistUserSyncLog({ taskId: task.id, level: 'info', message: `已${resume ? '恢复' : '启动'}${mode === 'realtime' ? '准实时（高频轮询）' : '定时'}同步，间隔 ${intervalSec}s`, ts: new Date().toISOString() }, task.userId);
 
   if (runImmediately) {
     await runScheduledTask(task.id, resume ? 'resume' : 'initial', mode, intervalSec);
@@ -554,6 +640,87 @@ app.get('/api/system/doctor', (req, res) => {
 app.get('/api/system/config-backups', (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可查看配置备份' });
   res.json(getConfigBackups(CONFIG_FILE, req.query.limit));
+});
+
+app.get('/api/system/config-export', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可导出配置' });
+  const includeSecrets = req.query.includeSecrets === 'true';
+  const includeLogs = req.query.includeLogs === 'true';
+  const payload = buildConfigExport(loadConfig(), {
+    includeSecrets,
+    includeLogs,
+    exportedBy: req.user.email || req.user.id,
+  });
+  appendAuditLog(req.user, 'system.config_export', {
+    resourceType: 'system',
+    message: `导出配置迁移包${includeSecrets ? '（含密钥）' : ''}`,
+    metadata: { includeSecrets, includeLogs },
+  });
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="teable-sync-config-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.json(payload);
+});
+
+app.post('/api/system/config-import/preview', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可导入配置' });
+  try {
+    res.json(previewConfigImport(req.body, loadConfig()));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/system/config-import', async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可导入配置' });
+  try {
+    const mode = req.query.mode === 'replace' ? 'replace' : 'merge';
+    const includeLogs = req.query.includeLogs === 'true';
+    const disableImportedTasks = req.query.disableImportedTasks !== 'false';
+    const before = loadConfig();
+    const { preview, config: nextConfig } = applyConfigImport(req.body, before, { mode, includeLogs, disableImportedTasks });
+    createConfigBackup(CONFIG_FILE, `before-import-${mode}`);
+    syncScheduler.forEach((info) => clearInterval(info.intervalId));
+    syncScheduler.clear();
+    syncRuns.clear();
+    await saveConfig(nextConfig, { backup: true, backupReason: `import-${mode}` });
+    appendAuditLog(req.user, 'system.config_import', {
+      resourceType: 'system',
+      message: `${mode === 'replace' ? '替换' : '合并'}导入配置迁移包`,
+      metadata: { mode, includeLogs, disableImportedTasks, summary: preview.summary },
+    });
+    res.json({ success: true, mode, preview });
+  } catch (err) {
+    res.status(400).json({ error: err.message, preview: err.preview || null });
+  }
+});
+
+app.get('/api/observability', (req, res) => {
+  const config = loadConfig();
+  const tasks = config.syncTasks
+    .filter((task) => !task.deletedAt && (req.user.role === 'super_admin' || task.userId === req.user.id))
+    .map((task) => taskDto(config, req.user, task));
+  const visibleTaskIds = new Set(tasks.map((task) => task.id));
+  const schedulerStatus = {};
+  const runStates = {};
+  for (const [taskId, info] of syncScheduler) {
+    if (visibleTaskIds.has(taskId)) schedulerStatus[taskId] = { syncMode: info.syncMode, intervalSec: info.intervalSec };
+  }
+  for (const task of tasks) {
+    runStates[task.id] = getRunState(task.id);
+  }
+  res.json(buildObservabilitySnapshot({
+    config,
+    user: req.user,
+    tasks,
+    schedulerStatus,
+    runStates,
+    version: {
+      version: APP_VERSION,
+      commit: GIT_COMMIT,
+      buildTime: BUILD_TIME,
+      nodeEnv: process.env.NODE_ENV || 'development',
+    },
+  }));
 });
 
 app.get('/api/audit-logs', (req, res) => {
@@ -713,7 +880,7 @@ app.post('/api/connections/:id/test', async (req, res) => {
   }
 });
 
-// Fetch tables from a SQL connection (with watermark candidates)
+// Fetch tables from a SQL or Teable connection (with source columns)
 app.get('/api/connections/:id/tables', async (req, res) => {
   const config = loadConfig();
   const conn = config.connections.find((c) => c.id === req.params.id);
@@ -721,6 +888,37 @@ app.get('/api/connections/:id/tables', async (req, res) => {
   if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
 
   try {
+    if (conn.type === 'teable') {
+      const { getTeableBases, getTeableTables, getTeableFields, teableFieldToSourceColumn } = await import('./services/teableService.js');
+      const bases = await getTeableBases(conn);
+      const tablesWithSchema = [];
+      for (const base of bases) {
+        let tables = [];
+        try {
+          tables = await getTeableTables(conn, base.id);
+        } catch {
+          tables = [];
+        }
+        for (const table of tables) {
+          try {
+            const fields = await getTeableFields(conn, table.id);
+            tablesWithSchema.push({
+              ...table,
+              name: table.id,
+              displayName: table.name,
+              baseId: base.id,
+              baseName: base.name,
+              type: 'TEABLE_TABLE',
+              columns: fields.map(teableFieldToSourceColumn),
+            });
+          } catch {
+            tablesWithSchema.push({ ...table, name: table.id, displayName: table.name, baseId: base.id, baseName: base.name, type: 'TEABLE_TABLE', columns: [] });
+          }
+        }
+      }
+      return res.json(tablesWithSchema);
+    }
+
     const { getTables, getTableSchema } = await import('./services/dbService.js');
     const database = req.query.database || null;
     const tables = await getTables(conn, database);
@@ -757,10 +955,12 @@ app.get('/api/mapping-suggestions', async (req, res) => {
 
   try {
     const { getTableSchema } = await import('./services/dbService.js');
-    const { getTeableFields } = await import('./services/teableService.js');
+    const { getTeableFields, teableFieldToSourceColumn } = await import('./services/teableService.js');
     const { suggestMappings } = await import('./services/mappingSuggester.js');
 
-    const sourceColumns = await getTableSchema(srcConn, sourceTable, sourceDatabase || null);
+    const sourceColumns = srcConn.type === 'teable'
+      ? (await getTeableFields(srcConn, sourceTable)).map((field) => ({ ...teableFieldToSourceColumn(field), type: 'teable:' + field.type }))
+      : await getTableSchema(srcConn, sourceTable, sourceDatabase || null);
     const targetFields = await getTeableFields(tgtConn2, targetTableId);
 
     // Normalize Teable field types for compatibility checking
@@ -904,7 +1104,7 @@ app.get('/api/tasks', (req, res) => {
   res.json(visible.map((task) => taskDto(config, req.user, task)));
 });
 
-app.post('/api/tasks', (req, res) => {
+app.post('/api/tasks', async (req, res) => {
   const config = loadConfig();
   const validation = validateTaskConnections(config, req.user, req.body);
   if (validation.error) return res.status(400).json({ error: validation.error });
@@ -913,12 +1113,15 @@ app.post('/api/tasks', (req, res) => {
     ...body,
     id: crypto.randomUUID(),
     syncMode: body.syncMode || 'manual',
+    syncDirection: body.syncDirection || 'one_way',
+    conflictStrategy: body.conflictStrategy || 'upsert',
     enabled: false,
     createdAt: new Date().toISOString(),
     lastSyncAt: null,
     status: 'idle',
     userId: req.user.id, // 任务归属当前用户
   };
+  await attachSchemaSnapshot(task, validation.srcConn, validation.tgtConn);
   config.syncTasks.push(task);
   saveConfig(config);
   appendAuditLog(req.user, 'task.create', {
@@ -931,7 +1134,121 @@ app.post('/api/tasks', (req, res) => {
   res.json(task);
 });
 
-app.put('/api/tasks/:id', (req, res) => {
+app.post('/api/tasks/:id/copy', async (req, res) => {
+  const config = loadConfig();
+  const source = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!source || source.deletedAt) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && source.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权复制此任务' });
+  }
+  const overrides = cleanTaskInput(req.body || {});
+  const task = buildCopiedTask(source, {
+    ...overrides,
+    name: overrides.name || `${source.name || '同步任务'} 副本`,
+  });
+  task.userId = req.user.id;
+  const validation = validateTaskConnections(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  await attachSchemaSnapshot(task, validation.srcConn, validation.tgtConn);
+  config.syncTasks.push(task);
+  saveConfig(config);
+  appendAuditLog(req.user, 'task.copy', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `复制任务 ${source.name || source.id} → ${task.name}`,
+    metadata: { sourceTaskId: source.id },
+  });
+  res.json(task);
+});
+
+app.get('/api/task-templates', (req, res) => {
+  const config = loadConfig();
+  const templates = (config.taskTemplates || []).filter((template) => canUseTemplate(req.user, template));
+  res.json(templates);
+});
+
+app.post('/api/task-templates', (req, res) => {
+  const config = loadConfig();
+  const sourceTaskId = req.body?.sourceTaskId;
+  const source = sourceTaskId ? config.syncTasks.find((t) => t.id === sourceTaskId) : null;
+  if (sourceTaskId) {
+    if (!source || source.deletedAt) return res.status(404).json({ error: '源任务不存在' });
+    if (req.user.role !== 'super_admin' && source.userId !== req.user.id) return res.status(403).json({ error: '无权保存此任务为模板' });
+  }
+  const rawConfig = source ? taskConfigSnapshot(source) : cleanTaskInput(req.body?.config || req.body || {});
+  const template = {
+    id: crypto.randomUUID(),
+    name: (req.body?.name || rawConfig.name || '同步任务模板').trim(),
+    description: (req.body?.description || '').trim(),
+    shared: req.user.role === 'super_admin' && req.body?.shared === true,
+    config: {
+      ...rawConfig,
+      name: rawConfig.name || req.body?.name || '同步任务',
+      syncMode: rawConfig.syncMode || 'manual',
+      syncDirection: rawConfig.syncDirection || 'one_way',
+      conflictStrategy: rawConfig.conflictStrategy || 'upsert',
+    },
+    userId: req.user.id,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  config.taskTemplates = config.taskTemplates || [];
+  config.taskTemplates.push(template);
+  saveConfig(config);
+  appendAuditLog(req.user, 'task_template.create', {
+    resourceType: 'task_template',
+    resourceId: template.id,
+    resourceName: template.name,
+    message: `创建任务模板 ${template.name}`,
+    metadata: { sourceTaskId: sourceTaskId || null },
+  });
+  res.json(template);
+});
+
+app.post('/api/task-templates/:id/create-task', async (req, res) => {
+  const config = loadConfig();
+  const template = (config.taskTemplates || []).find((item) => item.id === req.params.id);
+  if (!canUseTemplate(req.user, template)) return res.status(404).json({ error: '模板不存在或无权使用' });
+  const overrides = cleanTaskInput(req.body || {});
+  const task = buildCopiedTask({ ...template.config, userId: req.user.id }, {
+    ...overrides,
+    name: overrides.name || `${template.config?.name || template.name} 副本`,
+  });
+  task.userId = req.user.id;
+  const validation = validateTaskConnections(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  await attachSchemaSnapshot(task, validation.srcConn, validation.tgtConn);
+  config.syncTasks.push(task);
+  saveConfig(config);
+  appendAuditLog(req.user, 'task_template.create_task', {
+    resourceType: 'task',
+    resourceId: task.id,
+    resourceName: task.name,
+    message: `从模板 ${template.name} 创建任务 ${task.name}`,
+    metadata: { templateId: template.id },
+  });
+  res.json(task);
+});
+
+app.delete('/api/task-templates/:id', (req, res) => {
+  const config = loadConfig();
+  const template = (config.taskTemplates || []).find((item) => item.id === req.params.id);
+  if (!template || template.deletedAt) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && template.userId !== req.user.id) return res.status(403).json({ error: '无权删除此模板' });
+  template.deletedAt = new Date().toISOString();
+  template.updatedAt = template.deletedAt;
+  saveConfig(config);
+  appendAuditLog(req.user, 'task_template.delete', {
+    resourceType: 'task_template',
+    resourceId: template.id,
+    resourceName: template.name,
+    message: `删除任务模板 ${template.name}`,
+  });
+  res.json({ success: true });
+});
+
+app.put('/api/tasks/:id', async (req, res) => {
   const config = loadConfig();
   const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
@@ -944,6 +1261,8 @@ app.put('/api/tasks/:id', (req, res) => {
   const nextTask = { ...task, ...updates, id: task.id, userId: task.userId, createdAt: task.createdAt };
   const validation = validateTaskConnections(config, req.user, nextTask);
   if (validation.error) return res.status(400).json({ error: validation.error });
+  const configChanged = ['sourceConnectionId', 'sourceId', 'sourceTable', 'sourceDatabase', 'targetConnectionId', 'targetId', 'targetTableId', 'columnMapping'].some((field) => Object.prototype.hasOwnProperty.call(updates, field));
+  if (configChanged || !nextTask.schemaSnapshot) await attachSchemaSnapshot(nextTask, validation.srcConn, validation.tgtConn);
   if (!isAutoSyncMode(nextTask.syncMode)) {
     if (syncScheduler.has(task.id)) {
       clearInterval(syncScheduler.get(task.id).intervalId);
@@ -1021,6 +1340,7 @@ app.get('/api/tasks/:id/preview', async (req, res) => {
   
   try {
     const { getTableSchema, query } = await import('./services/dbService.js');
+    const { getTeableFields, getTeableRecords, normalizeTeableRecordsResponse, teableFieldToSourceColumn } = await import('./services/teableService.js');
     
     // Find source connection
     const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
@@ -1028,6 +1348,18 @@ app.get('/api/tasks/:id/preview', async (req, res) => {
     const validation = validateTaskRunnable(config, req.user, task, { requireTarget: false });
     if (validation.error) return res.status(400).json({ error: validation.error });
     
+    if (srcConn.type === 'teable') {
+      const columns = (await getTeableFields(srcConn, task.sourceTable)).map(teableFieldToSourceColumn);
+      const result = await getTeableRecords(srcConn, task.sourceTable, { skip: 0, take: limit });
+      const rows = normalizeTeableRecordsResponse(result).map((rec) => rec.fields || rec);
+      return res.json({
+        columns: columns.map(c => ({ name: c.name, type: c.type })),
+        rows,
+        totalPreviewed: rows.length,
+        limit,
+      });
+    }
+
     // Normalize db name
     const db = task.sourceDatabase || null;
     
@@ -1306,6 +1638,77 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
   }
 });
 
+
+app.post('/api/tasks/:id/preflight', async (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  const validation = validateTaskRunnable(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
+  const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+  if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
+  try {
+    const result = await runTaskPreflightCheck(task, srcConn, tgtConn);
+    appendAuditLog(req.user, 'task.preflight', {
+      resourceType: 'task',
+      resourceId: task.id,
+      resourceName: task.name,
+      message: `预检任务 ${task.name || task.id}`,
+      metadata: { status: result.status, errors: result.summary.error, warnings: result.summary.warn },
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/tasks/:id/schema-drift', async (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  if (!task || task.deletedAt) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权访问此任务' });
+  }
+  const validation = validateTaskRunnable(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  try {
+    const result = await detectTaskSchemaDrift(task, validation.srcConn, validation.tgtConn);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/tasks/:id/schema-snapshot', async (req, res) => {
+  const config = loadConfig();
+  const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
+  if (idx === -1 || config.syncTasks[idx].deletedAt) return res.status(404).json({ error: 'Not found' });
+  const task = config.syncTasks[idx];
+  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此任务' });
+  }
+  const validation = validateTaskRunnable(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+  try {
+    config.syncTasks[idx].schemaSnapshot = await getCurrentTaskSchema(task, validation.srcConn, validation.tgtConn);
+    delete config.syncTasks[idx].schemaSnapshotError;
+    await saveConfig(config);
+    appendAuditLog(req.user, 'task.schema_snapshot', {
+      resourceType: 'task',
+      resourceId: task.id,
+      resourceName: task.name,
+      message: `刷新字段快照 ${task.name || task.id}`,
+    });
+    res.json({ success: true, schemaSnapshot: config.syncTasks[idx].schemaSnapshot });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Scheduler status
 app.get('/api/scheduler/status', (req, res) => {
   const config = loadConfig();
@@ -1336,6 +1739,17 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   const validation = validateTaskRunnable(config, req.user, task);
   if (validation.error) return res.status(400).json({ error: validation.error });
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
+
+  try {
+    const preflight = await runTaskPreflightCheck(task, validation.srcConn || srcConn, validation.tgtConn || tgtConn);
+    const gateError = preflightError(preflight);
+    if (gateError) return res.status(gateError.status || 400).json({ error: gateError.message, preflight });
+    if (preflight.status === 'warn') {
+      await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `手动同步预检有 ${preflight.summary.warn} 个警告，继续执行`, ts: new Date().toISOString() }, task.userId);
+    }
+  } catch (err) {
+    return res.status(400).json({ error: `同步前预检失败: ${err.message}` });
+  }
 
   const { runSyncWithControl } = await import('./services/syncEngine.js');
   const runControl = startTrackedRun(task, 'manual');

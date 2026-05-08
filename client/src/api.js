@@ -32,6 +32,9 @@ api.interceptors.response.use(
     if (err.response?.data?.error) {
       err.message = err.response.data.error
     }
+    if (err.response?.data?.preflight) {
+      err.preflight = err.response.data.preflight
+    }
     return Promise.reject(err)
   }
 )
@@ -88,6 +91,11 @@ export const previewTaskData = (id, limit = 10) => api.get(`/tasks/${id}/preview
 export const createTask = (data) => api.post('/tasks', data).then(r => r.data)
 export const updateTask = (id, data) => api.put(`/tasks/${id}`, data).then(r => r.data)
 export const deleteTask = (id) => api.delete(`/tasks/${id}`).then(r => r.data)
+export const copyTask = (id, data = {}) => api.post(`/tasks/${id}/copy`, data).then(r => r.data)
+export const getTaskTemplates = () => api.get('/task-templates').then(r => r.data)
+export const createTaskTemplate = (data) => api.post('/task-templates', data).then(r => r.data)
+export const createTaskFromTemplate = (id, data = {}) => api.post(`/task-templates/${id}/create-task`, data).then(r => r.data)
+export const deleteTaskTemplate = (id) => api.delete(`/task-templates/${id}`).then(r => r.data)
 export const runTask = (id) => api.post(`/tasks/${id}/run`).then(r => r.data)
 export const startTask = (id) => api.post(`/tasks/${id}/start`).then(r => r.data)
 export const stopTask = (id) => api.post(`/tasks/${id}/stop`).then(r => r.data)
@@ -100,16 +108,23 @@ export const clearTaskFailures = (id) => api.delete(`/tasks/${id}/failures`).the
 export const getTasksHealth = () => api.get('/tasks-health').then(r => r.data)
 export const getTaskHealth = (id) => api.get(`/tasks/${id}/health`).then(r => r.data)
 export const reconcileTask = (id, options = {}) => api.post(`/tasks/${id}/reconcile`, options).then(r => r.data)
+export const preflightTask = (id) => api.post(`/tasks/${id}/preflight`).then(r => r.data)
+export const getTaskSchemaDrift = (id) => api.get(`/tasks/${id}/schema-drift`).then(r => r.data)
+export const refreshTaskSchemaSnapshot = (id) => api.post(`/tasks/${id}/schema-snapshot`).then(r => r.data)
 export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r.data)
 
 // Logs
 export const getLogs = (params = {}) => api.get('/logs', { params }).then(r => r.data)
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
 export const getAuditLogs = (params = {}) => api.get('/audit-logs', { params }).then(r => r.data)
+export const getObservability = () => api.get('/observability').then(r => r.data)
 
 // System
 export const getVersionInfo = () => api.get('/version').then(r => r.data)
 export const getSystemDoctor = () => api.get('/system/doctor').then(r => r.data)
 export const getConfigBackups = (params = {}) => api.get('/system/config-backups', { params }).then(r => r.data)
+export const exportConfigPackage = (params = {}) => api.get('/system/config-export', { params }).then(r => r.data)
+export const previewConfigImport = (data) => api.post('/system/config-import/preview', data).then(r => r.data)
+export const importConfigPackage = (data, params = {}) => api.post('/system/config-import', data, { params }).then(r => r.data)
 
 export default api

@@ -216,8 +216,33 @@ function getDefaultOptions(teableType, sqlType) {
 /**
  * Convert a value from SQL type to Teable type
  */
+function normalizeTeableFieldType(type) {
+  return String(type || '').toLowerCase().replace(/[_-]/g, '');
+}
+
+function convertTeableValue(value, sourceType, targetType) {
+  const src = normalizeTeableFieldType(sourceType);
+  const tgt = normalizeTeableFieldType(targetType);
+  if (src === tgt) return value;
+  if (['singlelinetext', 'longtext'].includes(tgt)) {
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+  if (tgt === 'number') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (tgt === 'checkbox') return Boolean(value);
+  if (tgt === 'date') return convertDateToISO(value, false);
+  return value;
+}
+
 export function convertValue(value, sqlType, teableType) {
   if (value === null || value === undefined) return null;
+
+  if (String(sqlType || '').startsWith('teable:')) {
+    return convertTeableValue(value, String(sqlType).slice(7), teableType);
+  }
   
   const norm = normalizeSqlType(sqlType);
   const compat = TYPE_COMPATIBILITY[norm];
@@ -241,7 +266,22 @@ export function convertValue(value, sqlType, teableType) {
 /**
  * Check if a SQL → Teable type mapping is safe
  */
+function isTextType(type) {
+  return ['singlelinetext', 'longtext'].includes(normalizeTeableFieldType(type));
+}
+
 export function isTypeCompatible(sqlType, teableType) {
+  if (String(sqlType || '').startsWith('teable:')) {
+    const src = normalizeTeableFieldType(String(sqlType).slice(7));
+    const tgt = normalizeTeableFieldType(teableType);
+    if (src === tgt) return { safe: true, warning: null };
+    if (isTextType(tgt)) return { safe: false, warning: 'Teable 字段转文本，格式可能变化' };
+    if (src === 'number' && tgt === 'number') return { safe: true, warning: null };
+    if (src === 'date' && tgt === 'date') return { safe: true, warning: null };
+    if (src === 'checkbox' && tgt === 'checkbox') return { safe: true, warning: null };
+    return { safe: false, warning: '不兼容的目标类型' };
+  }
+
   const norm = normalizeSqlType(sqlType);
   const compat = TYPE_COMPATIBILITY[norm];
   if (!compat) return { safe: false, warning: '未知SQL类型' };

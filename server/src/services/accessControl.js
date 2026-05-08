@@ -21,8 +21,11 @@ export function validateTaskConnections(config, user, task) {
 
   if (sourceId && !srcConn) return { error: '无权使用源连接或连接不存在' };
   if (targetId && !tgtConn) return { error: '无权使用目标连接或连接不存在' };
-  if (srcConn && srcConn.type === 'teable') return { error: '源连接必须是 SQL 数据库' };
+  if (srcConn && !['mssql', 'mysql', 'pg', 'teable'].includes(srcConn.type)) return { error: '源连接必须是 SQL 数据库或 Teable' };
   if (tgtConn && tgtConn.type !== 'teable') return { error: '目标连接必须是 Teable' };
+  if ((task.syncDirection === 'bidirectional' || task.direction === 'bidirectional') && srcConn?.type !== 'teable') {
+    return { error: '双向同步仅支持 Teable ↔ Teable' };
+  }
 
   return { srcConn, tgtConn };
 }

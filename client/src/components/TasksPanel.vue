@@ -31,6 +31,9 @@
       <button class="fs-btn fs-btn-primary" @click="openDialog()">
         <el-icon><Plus /></el-icon>新建任务
       </button>
+      <button class="fs-btn fs-btn-ghost" @click="openTemplateDialog">
+        从模板
+      </button>
     </div>
 
     <div class="task-list" v-if="filteredTasks.length > 0">
@@ -52,6 +55,9 @@
             <span v-if="taskHealth[task.id]" class="health-badge" :class="taskHealth[task.id].status">{{ healthLabel(taskHealth[task.id].status) }}</span>
             <span v-if="!task.connectionStatus?.ok" class="health-badge invalid">连接异常</span>
             <span class="status-badge" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
+            <button class="fs-btn fs-btn-ghost" @click="openTaskDetail(task)" style="padding:8px 16px;font-size:13px">
+              <el-icon><View /></el-icon>详情
+            </button>
             <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running' || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
               <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
               <el-icon v-else class="is-loading"><Loading /></el-icon>
@@ -63,6 +69,12 @@
             <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
               <el-icon><View /></el-icon>预览
             </button>
+            <button class="fs-btn fs-btn-ghost" @click="runPreflight(task)" :disabled="preflightLoading" style="padding:8px 16px;font-size:13px">
+              预检
+            </button>
+            <button class="fs-btn fs-btn-ghost" @click="checkSchemaDrift(task)" :disabled="schemaDriftLoading" style="padding:8px 16px;font-size:13px">
+              字段
+            </button>
             <button class="fs-btn fs-btn-ghost" @click="runReconcile(task)" :disabled="reconcileLoading" style="padding:8px 16px;font-size:13px">
               校验
             </button>
@@ -70,7 +82,13 @@
               失败 {{ failureCounts[task.id] }}
             </button>
             <button class="fs-btn fs-btn-ghost" @click="openTaskLogs(task)" style="padding:8px 16px;font-size:13px">
-              日志
+              <el-icon><View /></el-icon>日志
+            </button>
+            <button class="fs-btn fs-btn-ghost" @click="duplicateTask(task)" :disabled="copyingTaskId === task.id" style="padding:8px 16px;font-size:13px">
+              复制
+            </button>
+            <button class="fs-btn fs-btn-ghost" @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id" style="padding:8px 16px;font-size:13px">
+              存模板
             </button>
             <!-- 仅定时/实时模式显示启停按钮 -->
             <button v-if="task.syncMode && (task.syncMode === 'scheduled' || task.syncMode === 'realtime')" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" style="padding:8px 16px;font-size:13px">
@@ -99,6 +117,12 @@
               </span>
             </div>
             <div class="detail-item">
+              <span class="detail-label">方向</span>
+              <span class="detail-value">
+                <span class="direction-badge" :class="task.syncDirection || 'one_way'">{{ syncDirectionLabel(task.syncDirection) }}</span>
+              </span>
+            </div>
+            <div class="detail-item">
               <span class="detail-label">冲突策略</span>
               <span class="detail-value">
                 <span class="strategy-badge" :class="task.conflictStrategy">{{ conflictLabel(task.conflictStrategy) }}</span>
@@ -120,7 +144,10 @@
             <span>成功率 {{ healthRate(taskHealth[task.id]) }}</span>
             <span>平均耗时 {{ formatDuration(taskHealth[task.id].averageDurationMs) }}</span>
             <span>最近 {{ latestStatusLabel(taskHealth[task.id].latestStatus) }}</span>
-            <span v-if="taskHealth[task.id].latestError" class="health-error" :title="taskHealth[task.id].latestError">错误：{{ taskHealth[task.id].latestError }}</span>
+              <span v-if="taskHealth[task.id].latestError" class="health-error" :title="taskHealth[task.id].latestError">错误：{{ taskHealth[task.id].latestError }}</span>
+            </div>
+          <div v-if="task.schemaSnapshotError" class="connection-issues">
+            <span class="connection-issue warn">字段快照失败：{{ task.schemaSnapshotError }}</span>
           </div>
           <div class="state-strip">
             <div class="state-item" :class="runStateClass(task)">
@@ -160,6 +187,173 @@
     <el-empty v-if="tasks.length === 0" description="暂无同步任务" />
     <el-empty v-else-if="filteredTasks.length === 0" description="没有匹配的任务" />
 
+    <el-dialog
+      v-model="taskDetailDialogVisible"
+      :title="detailTask ? `任务详情 · ${detailTask.name}` : '任务详情'"
+      width="920px"
+      top="5vh"
+      destroy-on-close
+    >
+      <div v-if="detailTask" class="task-detail-shell">
+        <div class="detail-hero">
+          <div>
+            <div class="detail-hero-title">{{ detailTask.name }}</div>
+            <div class="detail-hero-flow">
+              <span>{{ connName(detailTask.sourceConnectionId || detailTask.sourceId) }}</span>
+              <span class="flow-arrow-inline">→</span>
+              <span>{{ connName(detailTask.targetConnectionId || detailTask.targetId) }}</span>
+            </div>
+          </div>
+          <div class="detail-hero-badges">
+            <span v-if="taskHealth[detailTask.id]" class="health-badge" :class="taskHealth[detailTask.id].status">{{ healthLabel(taskHealth[detailTask.id].status) }}</span>
+            <span v-if="!detailTask.connectionStatus?.ok" class="health-badge invalid">连接异常</span>
+            <span class="status-badge" :class="statusClass(detailTask.status)">{{ statusLabel(detailTask.status) }}</span>
+          </div>
+        </div>
+
+        <el-tabs class="detail-tabs">
+          <el-tab-pane label="概览">
+            <div class="detail-panel-grid">
+              <div class="detail-metric" :class="runStateClass(detailTask)">
+                <span>当前运行</span>
+                <strong>{{ runStateLabel(detailTask) }}</strong>
+              </div>
+              <div class="detail-metric" :class="scheduleStateClass(detailTask)">
+                <span>调度状态</span>
+                <strong>{{ scheduleStateLabel(detailTask) }}</strong>
+              </div>
+              <div class="detail-metric" :class="latestStateClass(detailTask)">
+                <span>最近结果</span>
+                <strong>{{ latestRunLabel(detailTask) }}</strong>
+              </div>
+              <div class="detail-metric">
+                <span>失败批次</span>
+                <strong>{{ failureCounts[detailTask.id] || 0 }}</strong>
+              </div>
+            </div>
+
+            <div v-if="taskProgress[detailTask.id] && taskProgress[detailTask.id].status !== 'idle'" class="progress-panel detail-progress">
+              <div class="progress-line">
+                <span class="progress-phase">{{ progressPhaseLabel(taskProgress[detailTask.id].phase) }}</span>
+                <span class="progress-meta">{{ progressSummary(taskProgress[detailTask.id]) }}</span>
+              </div>
+              <el-progress
+                :percentage="progressPercent(taskProgress[detailTask.id])"
+                :indeterminate="taskProgress[detailTask.id].status === 'running' || taskProgress[detailTask.id].status === 'cancelling'"
+                :status="progressStatus(taskProgress[detailTask.id])"
+                :stroke-width="8"
+              />
+            </div>
+
+            <div class="detail-section">
+              <div class="detail-section-title">运行健康</div>
+              <div v-if="taskHealth[detailTask.id]" class="detail-kv-grid">
+                <div><span>成功率</span><strong>{{ healthRate(taskHealth[detailTask.id]) }}</strong></div>
+                <div><span>平均耗时</span><strong>{{ formatDuration(taskHealth[detailTask.id].averageDurationMs) }}</strong></div>
+                <div><span>最近状态</span><strong>{{ latestStatusLabel(taskHealth[detailTask.id].latestStatus) }}</strong></div>
+                <div><span>最近运行</span><strong>{{ taskHealth[detailTask.id].latestRunAt ? formatTime(taskHealth[detailTask.id].latestRunAt) : '-' }}</strong></div>
+              </div>
+              <div v-else class="detail-empty-line">暂无健康数据</div>
+              <div v-if="taskHealth[detailTask.id]?.latestError" class="detail-error-line">{{ taskHealth[detailTask.id].latestError }}</div>
+            </div>
+
+            <div class="detail-section">
+              <div class="detail-section-title">连接状态</div>
+              <div v-if="detailTask.connectionStatus?.issues?.length" class="connection-issues">
+                <span v-for="issue in detailTask.connectionStatus.issues" :key="issue.field + issue.message" :class="['connection-issue', issue.level]">
+                  {{ issue.message }}
+                </span>
+              </div>
+              <div v-else class="detail-empty-line">源端和目标端连接未发现异常</div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="配置">
+            <div class="detail-kv-grid wide">
+              <div><span>源连接</span><strong>{{ connName(detailTask.sourceConnectionId || detailTask.sourceId) }}</strong></div>
+              <div><span>源表</span><strong>{{ detailTask.sourceTable || '-' }}</strong></div>
+              <div><span>源库/Base</span><strong>{{ detailTask.sourceDatabase || detailTask.sourceBaseId || '-' }}</strong></div>
+              <div><span>目标连接</span><strong>{{ connName(detailTask.targetConnectionId || detailTask.targetId) }}</strong></div>
+              <div><span>目标 Base</span><strong>{{ detailTask.targetBaseId || '-' }}</strong></div>
+              <div><span>目标表</span><strong>{{ detailTask.targetTableId || '-' }}</strong></div>
+              <div><span>同步模式</span><strong>{{ syncModeLabel(detailTask.syncMode || 'manual') }}</strong></div>
+              <div><span>同步间隔</span><strong>{{ isAutoSyncMode(detailTask.syncMode) ? intervalLabel(detailTask.syncInterval || 300) : '-' }}</strong></div>
+              <div><span>同步方向</span><strong>{{ syncDirectionLabel(detailTask.syncDirection) }}</strong></div>
+              <div><span>冲突策略</span><strong>{{ conflictLabel(detailTask.conflictStrategy) }}</strong></div>
+              <div><span>增量策略</span><strong>{{ watermarkLabel(detailTask.watermarkType) }}</strong></div>
+              <div><span>增量列</span><strong>{{ detailTask.watermarkColumn || detailTask.sourceTimestampColumn || '-' }}</strong></div>
+              <div><span>主键列</span><strong>{{ detailTask.sourcePrimaryKey || '-' }}</strong></div>
+              <div><span>源分页大小</span><strong>{{ detailTask.pageSize || 1000 }}</strong></div>
+              <div><span>Teable 写入批量</span><strong>{{ detailTask.batchSize || 500 }}</strong></div>
+              <div><span>失败重试次数</span><strong>{{ detailTask.retryCount || 3 }}</strong></div>
+              <div><span>删除同步</span><strong>{{ deletionModeLabel(detailTask.deletionMode) }}</strong></div>
+              <div><span>软删除字段</span><strong>{{ detailTask.softDeleteField || '-' }}</strong></div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="字段映射">
+            <div class="detail-section">
+              <div class="detail-section-bar">
+                <div class="detail-section-title">字段映射</div>
+                <span class="detail-count">{{ mappingRowsForTask(detailTask).length }} 个字段</span>
+              </div>
+              <el-table :data="mappingRowsForTask(detailTask)" size="small" border max-height="420" empty-text="暂无字段映射">
+                <el-table-column prop="source" label="源字段" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="target" label="目标字段" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="forceInclude" label="处理方式" width="120">
+                  <template #default="{ row }">{{ row.forceInclude ? '强制包含' : '同步' }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="字段变更">
+            <div class="detail-section">
+              <div class="detail-section-bar">
+                <div class="detail-section-title">字段快照</div>
+                <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="checkSchemaDrift(detailTask)" :disabled="schemaDriftLoading">
+                  立即检测
+                </button>
+              </div>
+              <div v-if="detailTask.schemaSnapshot" class="detail-kv-grid">
+                <div><span>源字段数</span><strong>{{ snapshotFieldCount(detailTask.schemaSnapshot?.source) }}</strong></div>
+                <div><span>目标字段数</span><strong>{{ snapshotFieldCount(detailTask.schemaSnapshot?.target) }}</strong></div>
+                <div><span>快照时间</span><strong>{{ formatTime(detailTask.schemaSnapshot?.capturedAt || detailTask.schemaSnapshot?.createdAt) }}</strong></div>
+                <div><span>任务保存时间</span><strong>{{ detailTask.updatedAt ? formatTime(detailTask.updatedAt) : '-' }}</strong></div>
+              </div>
+              <div v-else class="detail-empty-line">此任务还没有字段快照，可点击“立即检测”或编辑保存任务后生成。</div>
+              <div v-if="detailTask.schemaSnapshotError" class="detail-error-line">字段快照失败：{{ detailTask.schemaSnapshotError }}</div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="近期日志">
+            <div class="detail-section-bar">
+              <div class="detail-section-title">近期日志</div>
+              <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="refreshTaskDetailLogs" :disabled="taskDetailLogsLoading">
+                刷新
+              </button>
+            </div>
+            <div v-if="taskDetailLogsLoading" style="text-align:center;padding:32px">
+              <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+            </div>
+            <div v-else class="task-log-list detail-log-list">
+              <div v-for="(log, idx) in taskDetailLogs" :key="idx" class="task-log-row" :class="'log-' + log.level">
+                <span class="task-log-time">{{ formatTime(log.ts) }}</span>
+                <span class="task-log-level" :class="log.level">{{ logLevelLabel(log.level) }}</span>
+                <span class="task-log-message">{{ log.message }}</span>
+              </div>
+              <el-empty v-if="taskDetailLogs.length === 0" description="暂无该任务日志" :image-size="72" />
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+      <template #footer>
+        <button class="fs-btn fs-btn-ghost" @click="taskDetailDialogVisible = false">关闭</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="openDialog(detailTask)" :disabled="!isOwner(detailTask)">编辑配置</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-primary" @click="manualRun(detailTask)" :disabled="detailTask._running || detailTask.status === 'running' || !detailTask.connectionStatus?.ok">立即同步</button>
+      </template>
+    </el-dialog>
+
     <!-- Task Dialog -->
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑任务' : '新建同步任务'" width="720px" destroy-on-close>
       <el-form :model="form" label-position="top">
@@ -170,27 +364,32 @@
 
         <!-- Source -->
         <div class="section-divider">
-          <span class="section-icon">⬡</span> 数据源（SQL 数据库）
+          <span class="section-icon">⬡</span> 数据源
         </div>
         <el-row :gutter="12">
           <el-col :span="8">
-            <el-form-item label="源数据库">
-              <el-select v-model="form.sourceConnectionId" @change="onSourceChange" placeholder="选择连接" style="width:100%">
-                <el-option v-for="c in sqlConnections" :key="c.id" :label="c.name" :value="c.id" />
+            <el-form-item label="源连接">
+              <el-select v-model="form.sourceConnectionId" @change="onSourceChange" placeholder="选择 SQL 或 Teable" style="width:100%">
+                <el-option-group label="SQL 数据库">
+                  <el-option v-for="c in sqlConnections" :key="c.id" :label="c.name" :value="c.id" />
+                </el-option-group>
+                <el-option-group label="Teable">
+                  <el-option v-for="c in teableConnections" :key="c.id" :label="c.name" :value="c.id" />
+                </el-option-group>
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="源表">
+            <el-form-item :label="sourceIsTeable ? '源 Teable 表' : '源表'">
               <el-select v-model="form.sourceTable" @change="onSourceTableChange" placeholder="选择表" style="width:100%"
                 :loading="sourceLoading" :disabled="!form.sourceConnectionId" filterable>
-                <el-option v-for="t in sourceTables" :key="t.name" :label="t.name" :value="t.name" />
+                <el-option v-for="t in sourceTables" :key="t.name" :label="sourceTableLabel(t)" :value="t.name" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="源库（可选）">
-              <el-input v-model="form.sourceDatabase" placeholder="默认连接数据库" />
+              <el-input v-model="form.sourceDatabase" placeholder="默认连接数据库" :disabled="sourceIsTeable" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -241,7 +440,7 @@
             已跳过 {{ skippedMappingCount }} 个类型不兼容字段，保存后不会同步这些字段。
           </el-alert>
           <el-table :data="mappingRows" size="small" border row-key="source" :row-class-name="mappingRowClassName">
-            <el-table-column label="源字段 (SQL)" min-width="180">
+            <el-table-column :label="sourceIsTeable ? '源字段 (Teable)' : '源字段 (SQL)'" min-width="180">
               <template #default="{ row }">
                 <el-select v-model="row.source" placeholder="选择源字段" style="width:100%" filterable @change="refreshMappingCompatibility(row)">
                   <el-option v-for="c in sourceColumns" :key="c.name" :label="`${c.name} (${c.type})`" :value="c.name" />
@@ -307,16 +506,32 @@
               <el-select v-model="form.syncMode" style="width:100%">
                 <el-option label="手动执行" value="manual" />
                 <el-option label="定时同步" value="scheduled" />
-                <el-option label="实时同步" value="realtime" />
+                <el-option label="准实时同步（高频轮询）" value="realtime" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="同步方向">
+              <el-select v-model="form.syncDirection" style="width:100%">
+                <el-option label="单向同步" value="one_way" />
+                <el-option label="双向同步（Teable ↔ Teable）" value="bidirectional" :disabled="!canUseBidirectional" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="冲突策略">
               <el-select v-model="form.conflictStrategy" style="width:100%">
-                <el-option label="覆盖（以数据库为准）" value="upsert" />
-                <el-option label="跳过（保留 Teable 数据）" value="skip" />
-                <el-option label="仅新增（不更新已有记录）" value="insert_only" />
+                <template v-if="form.syncDirection === 'bidirectional'">
+                  <el-option label="源优先" value="source_wins" />
+                  <el-option label="目标优先" value="target_wins" />
+                  <el-option label="最新修改优先" value="latest_wins" />
+                  <el-option label="跳过冲突" value="skip_conflict" />
+                </template>
+                <template v-else>
+                  <el-option label="覆盖（以源端为准）" value="upsert" />
+                  <el-option label="跳过（保留目标数据）" value="skip" />
+                  <el-option label="仅新增（不更新已有记录）" value="insert_only" />
+                </template>
               </el-select>
             </el-form-item>
           </el-col>
@@ -503,6 +718,89 @@
       </div>
     </el-dialog>
 
+    <el-dialog v-model="preflightDialogVisible" title="同步前预检" width="760px" top="8vh">
+      <div v-if="preflightLoading" style="text-align:center;padding:32px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+        <div style="margin-top:8px;color:var(--text-secondary)">正在检查...</div>
+      </div>
+      <div v-else-if="preflightResult">
+        <div class="reconcile-summary">
+          <div><span class="detail-label">状态</span><strong>{{ preflightStatusLabel(preflightResult.status) }}</strong></div>
+          <div><span class="detail-label">错误</span><strong>{{ preflightResult.summary.error }}</strong></div>
+          <div><span class="detail-label">警告</span><strong>{{ preflightResult.summary.warn }}</strong></div>
+          <div><span class="detail-label">提示</span><strong>{{ preflightResult.summary.info || 0 }}</strong></div>
+          <div><span class="detail-label">源字段</span><strong>{{ preflightResult.sourceFields }}</strong></div>
+        </div>
+        <el-alert v-if="preflightResult.status === 'pass'" type="success" :closable="false" style="margin-bottom:12px">
+          预检通过，可以运行同步。
+        </el-alert>
+        <el-alert v-else-if="preflightResult.status === 'warn'" type="warning" :closable="false" style="margin-bottom:12px">
+          预检发现风险，建议确认后再运行。
+        </el-alert>
+        <el-alert v-else type="error" :closable="false" style="margin-bottom:12px">
+          预检发现会阻断同步的问题，请先修复。
+        </el-alert>
+        <el-table :data="preflightResult.issues" size="small" border max-height="360" style="width:100%">
+          <el-table-column label="级别" width="90">
+            <template #default="{ row }">
+              <el-tag size="small" :type="preflightIssueTagType(row.level)">{{ preflightIssueLevelLabel(row.level) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="code" label="代码" width="170" show-overflow-tooltip />
+          <el-table-column prop="message" label="说明" min-width="260" show-overflow-tooltip />
+          <el-table-column prop="source" label="源字段" width="130" show-overflow-tooltip />
+          <el-table-column prop="target" label="目标字段" width="130" show-overflow-tooltip />
+        </el-table>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="schemaDriftDialogVisible" title="字段变更检测" width="820px" top="7vh">
+      <div v-if="schemaDriftLoading" style="text-align:center;padding:32px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+        <div style="margin-top:8px;color:var(--text-secondary)">正在检测...</div>
+      </div>
+      <div v-else-if="schemaDriftResult">
+        <div class="reconcile-summary">
+          <div><span class="detail-label">状态</span><strong>{{ schemaDriftStatusLabel(schemaDriftResult.status) }}</strong></div>
+          <div><span class="detail-label">新增</span><strong>{{ schemaDriftResult.summary.added }}</strong></div>
+          <div><span class="detail-label">删除</span><strong>{{ schemaDriftResult.summary.removed }}</strong></div>
+          <div><span class="detail-label">类型变化</span><strong>{{ schemaDriftResult.summary.typeChanged }}</strong></div>
+          <div><span class="detail-label">快照时间</span><strong>{{ schemaDriftResult.snapshotAt ? formatTime(schemaDriftResult.snapshotAt) : '未建立' }}</strong></div>
+        </div>
+        <el-alert v-if="schemaDriftResult.status === 'changed'" type="warning" :closable="false" style="margin-bottom:12px">
+          检测到字段结构变化，建议检查字段映射并刷新快照。
+        </el-alert>
+        <el-alert v-else-if="schemaDriftResult.status === 'no_snapshot'" type="info" :closable="false" style="margin-bottom:12px">
+          此任务还没有字段快照，可以先刷新快照作为后续比对基线。
+        </el-alert>
+        <el-alert v-else type="success" :closable="false" style="margin-bottom:12px">
+          字段结构与快照一致。
+        </el-alert>
+        <el-tabs>
+          <el-tab-pane label="源端变化">
+            <el-table :data="schemaDriftRows(schemaDriftResult.source)" size="small" border max-height="280">
+              <el-table-column prop="change" label="变化" width="100" />
+              <el-table-column prop="name" label="字段" min-width="180" />
+              <el-table-column prop="before" label="原类型" min-width="140" />
+              <el-table-column prop="after" label="当前类型" min-width="140" />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="目标变化">
+            <el-table :data="schemaDriftRows(schemaDriftResult.target)" size="small" border max-height="280">
+              <el-table-column prop="change" label="变化" width="100" />
+              <el-table-column prop="name" label="字段" min-width="180" />
+              <el-table-column prop="before" label="原类型" min-width="140" />
+              <el-table-column prop="after" label="当前类型" min-width="140" />
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+      <template #footer>
+        <button class="fs-btn fs-btn-ghost" @click="schemaDriftDialogVisible = false">关闭</button>
+        <button class="fs-btn fs-btn-primary" @click="refreshSchemaSnapshot" :disabled="!selectedSchemaTask || schemaSnapshotSaving">刷新快照</button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="reconcileDialogVisible" title="一致性校验" width="760px" top="8vh">
       <div v-if="reconcileLoading" style="text-align:center;padding:32px">
         <el-icon class="is-loading" :size="24"><Loading /></el-icon>
@@ -563,6 +861,36 @@
         <button class="fs-btn fs-btn-primary" @click="refreshTaskLogs" :disabled="!selectedLogTask || taskLogsLoading">刷新</button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="templateDialogVisible" title="同步任务模板" width="760px" top="8vh">
+      <div v-if="templatesLoading" style="text-align:center;padding:32px">
+        <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+      </div>
+      <div v-else>
+        <el-table :data="taskTemplates" size="small" border style="width:100%" empty-text="暂无模板">
+          <el-table-column prop="name" label="模板" min-width="180" show-overflow-tooltip />
+          <el-table-column label="源表" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.config?.sourceTable || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="方向" width="100">
+            <template #default="{ row }">{{ syncDirectionLabel(row.config?.syncDirection) }}</template>
+          </el-table-column>
+          <el-table-column label="策略" width="120">
+            <template #default="{ row }">{{ conflictLabel(row.config?.conflictStrategy) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="180" align="center">
+            <template #default="{ row }">
+              <button class="fs-btn fs-btn-primary" style="padding:6px 12px;font-size:12px" @click="createFromTemplate(row)">创建</button>
+              <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="removeTemplate(row)">删除</button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <button class="fs-btn fs-btn-ghost" @click="templateDialogVisible = false">关闭</button>
+        <button class="fs-btn fs-btn-primary" @click="loadTemplates" :disabled="templatesLoading">刷新</button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -570,7 +898,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, getSchedulerStatus, previewTaskData, getStoredUser, getLogs } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs } from '../api'
 
 // 当前用户身份
 const currentUser = getStoredUser()
@@ -614,6 +942,14 @@ const failuresDialogVisible = ref(false)
 const failuresLoading = ref(false)
 const taskFailures = ref([])
 const selectedFailureTask = ref(null)
+const preflightDialogVisible = ref(false)
+const preflightLoading = ref(false)
+const preflightResult = ref(null)
+const schemaDriftDialogVisible = ref(false)
+const schemaDriftLoading = ref(false)
+const schemaSnapshotSaving = ref(false)
+const schemaDriftResult = ref(null)
+const selectedSchemaTask = ref(null)
 const reconcileDialogVisible = ref(false)
 const reconcileLoading = ref(false)
 const reconcileResult = ref(null)
@@ -621,7 +957,16 @@ const taskLogsDialogVisible = ref(false)
 const taskLogsLoading = ref(false)
 const taskLogs = ref([])
 const selectedLogTask = ref(null)
+const taskDetailDialogVisible = ref(false)
+const detailTask = ref(null)
+const taskDetailLogsLoading = ref(false)
+const taskDetailLogs = ref([])
 const hydratingTaskForm = ref(false)
+const copyingTaskId = ref(null)
+const templateSavingId = ref(null)
+const templateDialogVisible = ref(false)
+const templatesLoading = ref(false)
+const taskTemplates = ref([])
 let progressTimer = null
 
 const activeMappingCount = computed(() => mappingRows.value.filter(rowShouldSync).length)
@@ -632,9 +977,10 @@ const watermarkCandidates = ref({ pkCol: null, candidates: { timestamp: [], rowv
 const watermarkLoading = ref(false)
 
 const defaultForm = {
-  name: '', sourceConnectionId: '', sourceTable: '', sourceDatabase: '',
+  name: '', sourceConnectionId: '', sourceTable: '', sourceDatabase: '', sourceBaseId: '',
   targetConnectionId: '', targetTableId: '', _baseId: '',
   columnMapping: {}, conflictStrategy: 'upsert',
+  syncDirection: 'one_way',
   sourcePrimaryKey: '', watermarkType: '', watermarkColumn: '',
   syncMode: 'manual', syncInterval: 300,
   pageSize: 1000, batchSize: 500, retryCount: 3,
@@ -644,6 +990,10 @@ const form = ref({ ...defaultForm })
 
 const sqlConnections = computed(() => connections.value.filter(c => c.type !== 'teable'))
 const teableConnections = computed(() => connections.value.filter(c => c.type === 'teable'))
+const sourceConnection = computed(() => connections.value.find(c => c.id === form.value.sourceConnectionId) || null)
+const sourceIsTeable = computed(() => sourceConnection.value?.type === 'teable')
+const targetConnection = computed(() => connections.value.find(c => c.id === form.value.targetConnectionId) || null)
+const canUseBidirectional = computed(() => sourceConnection.value?.type === 'teable' && targetConnection.value?.type === 'teable')
 
 const taskSummary = computed(() => ({
   total: tasks.value.length,
@@ -695,19 +1045,43 @@ const watermarkColumnOptions = computed(() => {
 })
 
 function connName(id) { return connections.value.find(c => c.id === id)?.name || id }
+function sourceTableLabel(table) {
+  if (!table) return ''
+  if (table.baseName && table.displayName) return table.baseName + ' / ' + table.displayName
+  return table.displayName || table.name
+}
+function syncDirectionLabel(direction) {
+  return direction === 'bidirectional' ? '双向同步' : '单向同步'
+}
 function conflictLabel(s) {
-  const m = { upsert: '覆盖', skip: '跳过', insert_only: '仅新增' }
+  const m = {
+    upsert: '覆盖',
+    skip: '跳过',
+    insert_only: '仅新增',
+    source_wins: '源优先',
+    target_wins: '目标优先',
+    latest_wins: '最新修改优先',
+    skip_conflict: '跳过冲突',
+  }
   return m[s] || s
 }
 function watermarkLabel(w) {
   const m = { '': '自动', timestamp: '时间戳', rowversion: 'Rowversion', auto_pk: '自增主键', full_scan: '全量扫描' }
   return m[w] || '自动'
 }
+function deletionModeLabel(mode) {
+  const map = {
+    ignore: '不处理删除',
+    soft_delete: '软删除标记',
+    hard_delete: '从 Teable 删除',
+  }
+  return map[mode || 'ignore'] || mode
+}
 function syncModeLabel(m) {
   const map = {
     manual: '手动执行',
     scheduled: '定时同步',
-    realtime: '实时同步',
+    realtime: '准实时同步',
     incremental: '定时同步',  // legacy: 保持定时行为
     full: '手动执行',          // legacy: 保持手动行为
   }
@@ -807,6 +1181,25 @@ function formatRelativeTime(ts) {
 function logLevelLabel(level) {
   return ({ info: '信息', warn: '警告', error: '错误' }[level] || level || '-')
 }
+function mappingRowsForTask(task) {
+  const mapping = task?.columnMapping || task?.fieldMapping || {}
+  if (Array.isArray(mapping)) {
+    return mapping
+      .filter(row => row?.source || row?.target)
+      .map(row => ({
+        source: row.source || '-',
+        target: row.target || '-',
+        forceInclude: Boolean(row.forceInclude),
+      }))
+  }
+  return Object.entries(mapping).map(([source, target]) => ({ source, target, forceInclude: false }))
+}
+function snapshotFieldCount(group) {
+  if (Array.isArray(group)) return group.length
+  if (Array.isArray(group?.fields)) return group.fields.length
+  if (group && typeof group === 'object') return Object.keys(group).length
+  return 0
+}
 function taskNeedsAttention(task) {
   const health = taskHealth.value[task.id]
   return Boolean(failureCounts.value[task.id])
@@ -890,8 +1283,14 @@ function getTargetField(target) {
 }
 function isSafeMappingPair(sourceColumn, targetField) {
   if (!sourceColumn || !targetField) return undefined
-  const sourceType = String(sourceColumn.type || '').toLowerCase()
-  const targetType = String(targetField.type || '').toLowerCase()
+  let sourceType = String(sourceColumn.type || '').toLowerCase().replace(/[_-]/g, '')
+  const targetType = String(targetField.type || '').toLowerCase().replace(/[_-]/g, '')
+  if (sourceType.startsWith('teable:')) {
+    sourceType = sourceType.slice(7)
+    if (sourceType === targetType) return { safe: true }
+    if (['singlelinetext', 'longtext'].includes(targetType)) return { safe: false, warning: 'Teable 字段转文本有风险' }
+    return { safe: false, warning: '不兼容的目标类型' }
+  }
   if (['singlelinetext', 'longtext'].includes(targetType)) {
     if (/(char|text|uuid|uniqueidentifier|json|xml)/.test(sourceType)) return { safe: true }
     return { safe: false, warning: '转文本有风险' }
@@ -1043,8 +1442,28 @@ function startProgressPolling() {
 }
 
 watch(() => form.value.sourceDatabase, () => {
-  if (hydratingTaskForm.value) return
+  if (hydratingTaskForm.value || sourceIsTeable.value) return
   if (form.value.sourceConnectionId) onSourceChange()
+})
+
+watch(() => form.value.syncDirection, (direction) => {
+  if (direction === 'bidirectional') {
+    form.value.conflictStrategy = ['source_wins', 'target_wins', 'latest_wins', 'skip_conflict'].includes(form.value.conflictStrategy)
+      ? form.value.conflictStrategy
+      : 'source_wins'
+    form.value.watermarkType = 'full_scan'
+    form.value.deletionMode = 'ignore'
+  } else {
+    form.value.conflictStrategy = ['upsert', 'skip', 'insert_only'].includes(form.value.conflictStrategy)
+      ? form.value.conflictStrategy
+      : 'upsert'
+  }
+})
+
+watch(canUseBidirectional, (ok) => {
+  if (!ok && form.value.syncDirection === 'bidirectional') {
+    form.value.syncDirection = 'one_way'
+  }
 })
 
 async function onSourceChange(options = {}) {
@@ -1052,16 +1471,23 @@ async function onSourceChange(options = {}) {
   const currentTable = form.value.sourceTable
   sourceTables.value = []
   sourceColumns.value = []
-  if (!preserveSelection) form.value.sourceTable = ''
+  if (!preserveSelection) {
+    form.value.sourceTable = ''
+    form.value.sourceBaseId = ''
+    if (sourceIsTeable.value) form.value.sourceDatabase = ''
+  }
   if (!form.value.sourceConnectionId) return
   sourceLoading.value = true
   try {
-    const db = form.value.sourceDatabase || undefined
+    const db = sourceIsTeable.value ? undefined : (form.value.sourceDatabase || undefined)
     sourceTables.value = await getTables(form.value.sourceConnectionId, db)
     if (preserveSelection && currentTable) {
       form.value.sourceTable = currentTable
       const found = sourceTables.value.find(t => t.name === currentTable)
-      if (found) sourceColumns.value = found.columns || []
+      if (found) {
+        form.value.sourceBaseId = found.baseId || form.value.sourceBaseId || ''
+        sourceColumns.value = found.columns || []
+      }
     }
   } catch (err) {
     ElMessage.error('获取表列表失败: ' + err.message)
@@ -1073,17 +1499,21 @@ async function onSourceChange(options = {}) {
 async function onSourceTableChange() {
   if (!form.value.sourceConnectionId || !form.value.sourceTable) return
   try {
-    const db = form.value.sourceDatabase || undefined
+    const db = sourceIsTeable.value ? undefined : (form.value.sourceDatabase || undefined)
     const tables = await getTables(form.value.sourceConnectionId, db)
     const found = tables.find(t => t.name === form.value.sourceTable)
-    if (found) sourceColumns.value = found.columns || []
+    if (found) {
+      form.value.sourceBaseId = found.baseId || ''
+      sourceColumns.value = found.columns || []
+    }
     if (targetFields.value.length > 0) smartMap()
   } catch (e) { /* ignore */ }
   // Fetch watermark candidates
   watermarkLoading.value = true
   try {
     const db = form.value.sourceDatabase || undefined
-    watermarkCandidates.value = await getWatermarkCandidates(form.value.sourceConnectionId, form.value.sourceTable, db)
+    watermarkCandidates.value = await getWatermarkCandidates(form.value.sourceConnectionId, form.value.sourceTable, sourceIsTeable.value ? undefined : db)
+    if (sourceIsTeable.value && !form.value.watermarkType) form.value.watermarkType = 'full_scan'
   } catch (e) {
     watermarkCandidates.value = { pkCol: null, candidates: { timestamp: [], rowversion: [], auto_pk: [] } }
   } finally {
@@ -1185,7 +1615,8 @@ async function openDialog(task = null) {
         ...task,
         sourceConnectionId: srcConnId,
         targetConnectionId: tgtConnId,
-        _baseId: task.targetBaseId || ''
+        _baseId: task.targetBaseId || '',
+        sourceBaseId: task.sourceBaseId || ''
       }
       const mapping = task.columnMapping || task.fieldMapping
       if (Array.isArray(mapping)) {
@@ -1198,6 +1629,7 @@ async function openDialog(task = null) {
         form.value.watermarkType = 'timestamp'
         form.value.watermarkColumn = task.sourceTimestampColumn
       }
+      if (!form.value.syncDirection) form.value.syncDirection = 'one_way'
       if (srcConnId) {
         await onSourceChange({ preserveSelection: true })
         if (form.value.sourceTable) await onSourceTableChange()
@@ -1225,8 +1657,12 @@ async function openDialog(task = null) {
 
 async function saveTask() {
   if (!form.value.name) { ElMessage.warning('请输入任务名称'); return }
-  if (!form.value.sourceConnectionId || !form.value.sourceTable) { ElMessage.warning('请选择源数据库和源表'); return }
+  if (!form.value.sourceConnectionId || !form.value.sourceTable) { ElMessage.warning('请选择源连接和源表'); return }
   if (!form.value.targetConnectionId || !form.value.targetTableId) { ElMessage.warning('请选择 Teable 目标表'); return }
+  if (form.value.syncDirection === 'bidirectional' && !canUseBidirectional.value) {
+    ElMessage.warning('双向同步仅支持 Teable ↔ Teable')
+    return
+  }
   saving.value = true
   try {
     const forcedRows = mappingRows.value.filter(row => row.source && row.target && row._typeSafe === false && row._forceInclude)
@@ -1241,12 +1677,19 @@ async function saveTask() {
     for (const row of mappingRows.value) {
       if (rowShouldSync(row)) columnMapping[row.source] = row.target
     }
-    const payload = { ...form.value, columnMapping }
+    const payload = { ...form.value, columnMapping, targetBaseId: form.value._baseId }
+    if (!sourceIsTeable.value) delete payload.sourceBaseId
+    if (payload.syncDirection === 'bidirectional') {
+      payload.watermarkType = 'full_scan'
+      payload.watermarkColumn = ''
+      payload.sourceTimestampColumn = ''
+      payload.deletionMode = 'ignore'
+    }
     delete payload._baseId
     // Backward compat: also set sourceTimestampColumn from watermark config
-    if (payload.watermarkType === 'timestamp' && payload.watermarkColumn) {
+    if (payload.syncDirection !== 'bidirectional' && payload.watermarkType === 'timestamp' && payload.watermarkColumn) {
       payload.sourceTimestampColumn = payload.watermarkColumn
-    } else {
+    } else if (payload.syncDirection !== 'bidirectional') {
       payload.sourceTimestampColumn = ''
     }
 
@@ -1274,6 +1717,72 @@ async function removeTask(id) {
   await loadAll()
 }
 
+async function duplicateTask(task) {
+  if (!task?.id) return
+  copyingTaskId.value = task.id
+  try {
+    const copied = await copyTask(task.id, { name: `${task.name || '同步任务'} 副本` })
+    ElMessage.success(`已复制任务：${copied.name}`)
+    await loadAll()
+  } catch (err) {
+    ElMessage.error('复制失败: ' + err.message)
+  } finally {
+    copyingTaskId.value = null
+  }
+}
+
+async function saveTaskAsTemplate(task) {
+  if (!task?.id) return
+  templateSavingId.value = task.id
+  try {
+    const template = await createTaskTemplate({ sourceTaskId: task.id, name: `${task.name || '同步任务'} 模板` })
+    ElMessage.success(`已保存模板：${template.name}`)
+  } catch (err) {
+    ElMessage.error('保存模板失败: ' + err.message)
+  } finally {
+    templateSavingId.value = null
+  }
+}
+
+async function loadTemplates() {
+  templatesLoading.value = true
+  try {
+    taskTemplates.value = await getTaskTemplates()
+  } catch (err) {
+    ElMessage.error('加载模板失败: ' + err.message)
+  } finally {
+    templatesLoading.value = false
+  }
+}
+
+async function openTemplateDialog() {
+  templateDialogVisible.value = true
+  await loadTemplates()
+}
+
+async function createFromTemplate(template) {
+  try {
+    const task = await createTaskFromTemplate(template.id, { name: `${template.config?.name || template.name || '同步任务'} 副本` })
+    ElMessage.success(`已从模板创建：${task.name}`)
+    templateDialogVisible.value = false
+    await loadAll()
+  } catch (err) {
+    ElMessage.error('从模板创建失败: ' + err.message)
+  }
+}
+
+async function removeTemplate(template) {
+  try {
+    await ElMessageBox.confirm(`确定删除模板「${template.name}」？`, '删除模板', { type: 'warning' })
+    await deleteTaskTemplate(template.id)
+    ElMessage.success('模板已删除')
+    await loadTemplates()
+  } catch (err) {
+    if (err === 'cancel' || err?.message === 'cancel') return
+    ElMessage.error('删除模板失败: ' + (err.message || err))
+  }
+}
+
 async function manualRun(task) {
   task._running = true
   try {
@@ -1284,7 +1793,13 @@ async function manualRun(task) {
     startProgressPolling()
     setTimeout(loadAll, 2000)
   } catch (err) {
-    ElMessage.error('启动失败: ' + err.message)
+    if (err.preflight) {
+      preflightResult.value = err.preflight
+      preflightDialogVisible.value = true
+      ElMessage.error('预检未通过，已阻止同步')
+    } else {
+      ElMessage.error('启动失败: ' + err.message)
+    }
     setTimeout(loadAll, 1000)
   } finally {
     task._running = false
@@ -1300,6 +1815,87 @@ async function cancelRunningTask(task) {
     startProgressPolling()
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('取消失败: ' + (err.message || err))
+  }
+}
+
+function preflightStatusLabel(status) {
+  return { pass: '通过', warn: '有风险', fail: '未通过' }[status] || status
+}
+
+function preflightIssueLevelLabel(level) {
+  return { error: '错误', warn: '警告', info: '提示' }[level] || level
+}
+
+function preflightIssueTagType(level) {
+  if (level === 'error') return 'danger'
+  if (level === 'warn') return 'warning'
+  return 'info'
+}
+
+function schemaDriftStatusLabel(status) {
+  return { unchanged: '无变化', changed: '有变化', no_snapshot: '无快照' }[status] || status
+}
+
+function schemaDriftRows(group = {}) {
+  return [
+    ...(group.added || []).map(field => ({ change: '新增', name: field.name, before: '-', after: field.type })),
+    ...(group.removed || []).map(field => ({ change: '删除', name: field.name, before: field.type, after: '-' })),
+    ...(group.typeChanged || []).map(field => ({ change: '类型变化', name: field.name, before: field.before, after: field.after })),
+  ]
+}
+
+async function runPreflight(task) {
+  preflightDialogVisible.value = true
+  preflightLoading.value = true
+  preflightResult.value = null
+  try {
+    preflightResult.value = await preflightTask(task.id)
+    if (preflightResult.value.status === 'pass') ElMessage.success('预检通过')
+    else if (preflightResult.value.status === 'warn') ElMessage.warning('预检发现 ' + preflightResult.value.summary.warn + ' 个风险')
+    else ElMessage.error('预检未通过：' + preflightResult.value.summary.error + ' 个错误')
+  } catch (err) {
+    if (err.preflight) {
+      preflightResult.value = err.preflight
+      ElMessage.error('预检未通过：' + err.message)
+      return
+    }
+    ElMessage.error('预检失败: ' + err.message)
+    preflightDialogVisible.value = false
+  } finally {
+    preflightLoading.value = false
+  }
+}
+
+async function checkSchemaDrift(task) {
+  selectedSchemaTask.value = task
+  schemaDriftDialogVisible.value = true
+  schemaDriftLoading.value = true
+  schemaDriftResult.value = null
+  try {
+    schemaDriftResult.value = await getTaskSchemaDrift(task.id)
+    if (schemaDriftResult.value.status === 'changed') ElMessage.warning('检测到字段结构变化')
+    else if (schemaDriftResult.value.status === 'no_snapshot') ElMessage.info('此任务还没有字段快照')
+    else ElMessage.success('字段结构无变化')
+  } catch (err) {
+    ElMessage.error('字段检测失败: ' + err.message)
+    schemaDriftDialogVisible.value = false
+  } finally {
+    schemaDriftLoading.value = false
+  }
+}
+
+async function refreshSchemaSnapshot() {
+  if (!selectedSchemaTask.value) return
+  schemaSnapshotSaving.value = true
+  try {
+    await refreshTaskSchemaSnapshot(selectedSchemaTask.value.id)
+    ElMessage.success('字段快照已刷新')
+    await loadAll()
+    schemaDriftResult.value = await getTaskSchemaDrift(selectedSchemaTask.value.id)
+  } catch (err) {
+    ElMessage.error('刷新快照失败: ' + err.message)
+  } finally {
+    schemaSnapshotSaving.value = false
   }
 }
 
@@ -1384,6 +1980,26 @@ async function openTaskLogs(task) {
   await refreshTaskLogs()
 }
 
+async function refreshTaskDetailLogs() {
+  if (!detailTask.value) return
+  taskDetailLogsLoading.value = true
+  try {
+    taskDetailLogs.value = await getLogs({ taskId: detailTask.value.id })
+  } catch (err) {
+    ElMessage.error('获取任务日志失败: ' + err.message)
+    taskDetailLogs.value = []
+  } finally {
+    taskDetailLogsLoading.value = false
+  }
+}
+
+async function openTaskDetail(task) {
+  detailTask.value = task
+  taskDetailLogs.value = []
+  taskDetailDialogVisible.value = true
+  await refreshTaskDetailLogs()
+}
+
 async function toggleSync(task) {
   if (task.status === 'scheduled' || schedulerStatus.value[task.id]) {
     // Stop auto-sync
@@ -1406,7 +2022,13 @@ async function toggleSync(task) {
       startProgressPolling()
       await loadAll()
     } catch (err) {
-      ElMessage.error('启动失败: ' + err.message)
+      if (err.preflight) {
+        preflightResult.value = err.preflight
+        preflightDialogVisible.value = true
+        ElMessage.error('预检未通过，已阻止启动')
+      } else {
+        ElMessage.error('启动失败: ' + err.message)
+      }
     }
   }
 }
@@ -1592,6 +2214,20 @@ onUnmounted(() => {
 .strategy-badge.upsert { background: rgba(99,102,241,0.15); color: var(--accent-hover); }
 .strategy-badge.skip { background: rgba(245,158,11,0.15); color: var(--amber); }
 .strategy-badge.insert_only { background: rgba(16,185,129,0.15); color: var(--green); }
+.strategy-badge.source_wins { background: rgba(99,102,241,0.15); color: var(--accent-hover); }
+.strategy-badge.target_wins { background: rgba(5,150,105,0.15); color: var(--green); }
+.strategy-badge.latest_wins { background: rgba(14,165,233,0.15); color: #0284c7; }
+.strategy-badge.skip_conflict { background: rgba(245,158,11,0.15); color: var(--amber); }
+
+.direction-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+}
+.direction-badge.one_way { background: rgba(148,149,160,0.12); color: var(--text-tertiary); }
+.direction-badge.bidirectional { background: rgba(14,165,233,0.15); color: #0284c7; }
 
 .watermark-badge {
   display: inline-block;
@@ -1731,6 +2367,147 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
   color: var(--text-secondary);
   line-height: 1.5;
+}
+
+.task-detail-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.detail-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.detail-hero-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.detail-hero-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.detail-hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.detail-tabs {
+  min-height: 420px;
+}
+
+.detail-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.detail-metric {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.detail-metric span,
+.detail-kv-grid span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.detail-metric strong,
+.detail-kv-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.detail-progress {
+  margin-top: 12px;
+}
+
+.detail-section {
+  margin-top: 14px;
+}
+
+.detail-section-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.detail-section-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.detail-count {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.detail-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.detail-kv-grid.wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.detail-kv-grid > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.detail-empty-line {
+  padding: 12px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.detail-error-line {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(220,38,38,0.08);
+  color: var(--red);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.detail-log-list {
+  max-height: 430px;
 }
 
 .connection-issues {
@@ -1885,6 +2662,9 @@ onUnmounted(() => {
 @media (max-width: 1100px) {
   .task-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .detail-panel-grid,
+  .detail-kv-grid,
+  .detail-kv-grid.wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .state-strip { grid-template-columns: 1fr; }
   .task-card-top {
     flex-direction: column;
@@ -1901,5 +2681,11 @@ onUnmounted(() => {
   }
   .task-search { max-width: none; }
   .detail-grid { grid-template-columns: 1fr; }
+  .detail-hero { flex-direction: column; }
+  .detail-hero-badges { justify-content: flex-start; }
+  .detail-panel-grid,
+  .detail-kv-grid,
+  .detail-kv-grid.wide { grid-template-columns: 1fr; }
+  .task-log-row { grid-template-columns: 1fr; }
 }
 </style>

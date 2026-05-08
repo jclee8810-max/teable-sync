@@ -10,7 +10,7 @@
 //   2. Auto-detect: rowversion (MSSQL) → timestamp → auto_pk → full_scan
 
 import { query, getTableSchema } from './dbService.js';
-import { getTeableFields, getTeableRecords, createTeableRecords, updateTeableRecords, deleteTeableRecords, createTeableField, ensureTeableFields } from './teableService.js';
+import { getTeableFields, getTeableRecords, createTeableRecords, updateTeableRecords, deleteTeableRecords, createTeableField, ensureTeableFields, normalizeTeableRecordsResponse, teableFieldToSourceColumn } from './teableService.js';
 import { createSyncHistory, updateSyncHistory } from './syncHistory.js';
 import { addSyncFailure, clearSyncFailures } from './syncFailures.js';
 import { convertValue } from './typeConverter.js';
@@ -48,6 +48,18 @@ function toPositiveInt(value, fallback, max = 5000) {
 
 function isSafeIdentifier(name) {
   return /^[a-zA-Z0-9_]+$/.test(name || '');
+}
+
+function isTeableSource(conn) {
+  return conn?.type === 'teable';
+}
+
+function normalizeSourceType(type, sourceKind) {
+  return sourceKind === 'teable' ? 'teable:' + type : type;
+}
+
+function unwrapTeableRecord(rec) {
+  return rec?.fields || rec || {};
 }
 
 function isTimestampLike(value) {
@@ -149,6 +161,348 @@ function extractBatchPrimaryKeys(records, pkFieldName) {
   return records.map((rec) => rec.fields?.[pkFieldName]).filter((v) => v !== undefined && v !== null).map(String);
 }
 
+function isBidirectionalTask(task) {
+  return task?.syncDirection === 'bidirectional' || task?.direction === 'bidirectional';
+}
+
+function normalizeBidirectionalStrategy(strategy) {
+  if (strategy === 'target_wins' || strategy === 'latest_wins' || strategy === 'skip_conflict') return strategy;
+  if (strategy === 'skip' || strategy === 'insert_only') return 'skip_conflict';
+  return 'source_wins';
+}
+
+function getTeableModifiedTime(record) {
+  const fields = record?.fields || {};
+  const value = record?.lastModifiedTime || record?.modifiedTime || record?.updatedTime || record?.createdTime
+    || fields.lastModifiedTime || fields.modifiedTime || fields.updatedTime || fields.createdTime;
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function stableValue(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (typeof value === 'object') {
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) sorted[key] = stableValue(value[key]);
+    return sorted;
+  }
+  return value;
+}
+
+function valuesEqual(a, b) {
+  return JSON.stringify(stableValue(a)) === JSON.stringify(stableValue(b));
+}
+
+function fieldsDiffer(candidateFields, existingFields) {
+  for (const [field, value] of Object.entries(candidateFields)) {
+    if (!valuesEqual(value, existingFields?.[field])) return true;
+  }
+  return false;
+}
+
+function isWritableTeableField(field) {
+  const type = String(field?.type || '').toLowerCase();
+  return !['autonumber', 'formula', 'rollup', 'lookup', 'createdtime', 'lastmodifiedtime', 'createdby', 'lastmodifiedby'].includes(type);
+}
+
+function indexFieldsByName(fields) {
+  const map = new Map();
+  for (const field of fields || []) map.set(field.name, field);
+  return map;
+}
+
+async function loadAllTeableRecords(conn, tableId, pageSize, retryCount, log, label, checkCancelled, report) {
+  const records = [];
+  let offset = 0;
+  while (true) {
+    checkCancelled();
+    if (report) report(records.length);
+    const result = await withRetry(() => getTeableRecords(conn, tableId, { skip: offset, take: pageSize }), retryCount, log, label);
+    const page = normalizeTeableRecordsResponse(result);
+    records.push(...page);
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return records;
+}
+
+async function flushBidirectionalWrites({
+  task,
+  conn,
+  tableId,
+  inserts,
+  updates,
+  batchSize,
+  retryCount,
+  log,
+  pkFieldName,
+  operationLabel,
+}) {
+  let inserted = 0;
+  let updated = 0;
+  let failed = 0;
+
+  for (let i = 0; i < inserts.length; i += batchSize) {
+    const batch = inserts.slice(i, i + batchSize);
+    try {
+      await withRetry(() => createTeableRecords(conn, tableId, batch), retryCount, log, operationLabel + '新增');
+      inserted += batch.length;
+    } catch (err) {
+      failed += batch.length;
+      addSyncFailure({
+        task,
+        operation: 'insert',
+        tableId,
+        records: batch,
+        primaryKeys: extractBatchPrimaryKeys(batch, pkFieldName),
+        error: err,
+      });
+      log('warn', operationLabel + '新增失败: ' + err.message);
+    }
+  }
+
+  for (let i = 0; i < updates.length; i += batchSize) {
+    const batch = updates.slice(i, i + batchSize);
+    try {
+      await withRetry(() => updateTeableRecords(conn, tableId, batch), retryCount, log, operationLabel + '更新');
+      updated += batch.length;
+    } catch (err) {
+      failed += batch.length;
+      addSyncFailure({
+        task,
+        operation: 'update',
+        tableId,
+        records: batch,
+        primaryKeys: extractBatchPrimaryKeys(batch, pkFieldName),
+        error: err,
+      });
+      log('warn', operationLabel + '更新失败: ' + err.message);
+    }
+  }
+
+  return { inserted, updated, failed };
+}
+
+async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
+  const { taskId, startTime, pageSize, batchSize, retryCount, log, report, checkCancelled } = context;
+  if (!isTeableSource(srcConn) || !isTeableSource(tgtConn)) {
+    throw new Error('双向同步仅支持 Teable ↔ Teable 任务');
+  }
+
+  const strategy = normalizeBidirectionalStrategy(task.conflictStrategy);
+  const historyRec = createSyncHistory(taskId, task.name, task.sourceTable, task.targetTableId);
+  historyRec.mode = 'bidirectional';
+  log('info', '双向同步模式: Teable ↔ Teable | 冲突策略: ' + strategy + ' | 分页: ' + pageSize + '/页 | 写入批量: ' + batchSize);
+  report({ phase: 'preparing', mode: 'bidirectional', pageSize, batchSize, processedRows: 0 });
+
+  const [srcFields, tgtFields] = await Promise.all([
+    getTeableFields(srcConn, task.sourceTable),
+    getTeableFields(tgtConn, task.targetTableId),
+  ]);
+  const srcFieldMap = indexFieldsByName(srcFields);
+  const tgtFieldMap = indexFieldsByName(tgtFields);
+  const sourceSchema = srcFields.map(teableFieldToSourceColumn);
+  const columnMapping = task.columnMapping || {};
+  const { mapping: autoMapping, createdFields } = await ensureTeableFields(tgtConn, task.targetTableId, sourceSchema, columnMapping, tgtFields, log);
+  const mapping = { ...autoMapping, ...columnMapping };
+
+  for (const [srcCol, tgtField] of Object.entries(columnMapping)) {
+    const created = createdFields.find(f => f.col === srcCol);
+    if (created) {
+      mapping[srcCol] = created.fieldName;
+    } else if (!tgtFieldMap.has(tgtField)) {
+      log('warn', '用户映射 ' + srcCol + '->' + tgtField + '，但目标字段不存在，已忽略此映射');
+      delete mapping[srcCol];
+    }
+  }
+
+  for (const [srcCol, tgtField] of Object.entries({ ...mapping })) {
+    const srcField = srcFieldMap.get(srcCol);
+    const tgtFieldMeta = tgtFieldMap.get(tgtField) || createdFields.find(f => f.fieldName === tgtField);
+    if (!srcField || !tgtFieldMeta) {
+      delete mapping[srcCol];
+      continue;
+    }
+    if (!isWritableTeableField(srcField) || !isWritableTeableField(tgtFieldMeta)) {
+      log('warn', '跳过不可写字段映射: ' + srcCol + '->' + tgtField);
+      delete mapping[srcCol];
+    }
+  }
+
+  const { pkCol: autoPkCol } = await detectWatermarkCandidates(srcConn, task.sourceTable);
+  const pkCol = task.sourcePrimaryKey || autoPkCol;
+  if (!pkCol) throw new Error('无法检测到主键列,请手动配置 sourcePrimaryKey');
+  const pkFieldName = mapping[pkCol] || pkCol;
+  if (!mapping[pkCol]) mapping[pkCol] = pkFieldName;
+  if (!srcFieldMap.has(pkCol)) throw new Error('源主键字段不存在: ' + pkCol);
+  if (!tgtFieldMap.has(pkFieldName) && !createdFields.find(f => f.fieldName === pkFieldName)) throw new Error('目标主键字段不存在: ' + pkFieldName);
+
+  const reverseMapping = {};
+  for (const [srcCol, tgtField] of Object.entries(mapping)) reverseMapping[tgtField] = srcCol;
+
+  const srcTypeMap = {};
+  for (const field of srcFields) srcTypeMap[field.name] = normalizeSourceType(field.type, 'teable');
+  const tgtTypeMap = {};
+  for (const field of tgtFields) tgtTypeMap[field.name] = field.type;
+  for (const cf of createdFields) tgtTypeMap[cf.fieldName] = cf.type;
+
+  log('info', '字段映射: ' + Object.entries(mapping).map(([k, v]) => k + '↔' + v).join(', '));
+  report({ phase: 'loading_source', processedRows: 0 });
+  const sourceRecords = await loadAllTeableRecords(srcConn, task.sourceTable, pageSize, retryCount, log, '读取源 Teable 记录', checkCancelled, (count) => {
+    report({ phase: 'loading_source', processedRows: count });
+  });
+  report({ phase: 'loading_target', processedRows: sourceRecords.length, targetRows: 0 });
+  const targetRecords = await loadAllTeableRecords(tgtConn, task.targetTableId, pageSize, retryCount, log, '读取目标 Teable 记录', checkCancelled, (count) => {
+    report({ phase: 'loading_target', processedRows: sourceRecords.length, targetRows: count });
+  });
+
+  const sourceMap = new Map();
+  for (const rec of sourceRecords) {
+    const fields = rec.fields || {};
+    const pkVal = fields[pkCol];
+    if (pkVal !== undefined && pkVal !== null && pkVal !== '') sourceMap.set(String(pkVal), { id: rec.id || rec.recordId, fields, record: rec });
+  }
+  const targetMap = new Map();
+  for (const rec of targetRecords) {
+    const fields = rec.fields || {};
+    const pkVal = fields[pkFieldName];
+    if (pkVal !== undefined && pkVal !== null && pkVal !== '') targetMap.set(String(pkVal), { id: rec.id || rec.recordId, fields, record: rec });
+  }
+
+  const keys = new Set([...sourceMap.keys(), ...targetMap.keys()]);
+  const targetInserts = [];
+  const targetUpdates = [];
+  const sourceInserts = [];
+  const sourceUpdates = [];
+  let skipCount = 0;
+  let conflictCount = 0;
+
+  for (const key of keys) {
+    checkCancelled();
+    const source = sourceMap.get(key);
+    const target = targetMap.get(key);
+    if (source && !target) {
+      const fields = createRecordFields(source.fields, mapping, srcTypeMap, tgtTypeMap, log);
+      targetInserts.push({ fields });
+      continue;
+    }
+    if (!source && target) {
+      const fields = createRecordFields(target.fields, reverseMapping, tgtTypeMap, srcTypeMap, log);
+      sourceInserts.push({ fields });
+      continue;
+    }
+    if (!source || !target) continue;
+
+    const targetCandidate = createRecordFields(source.fields, mapping, srcTypeMap, tgtTypeMap, log);
+    const sourceCandidate = createRecordFields(target.fields, reverseMapping, tgtTypeMap, srcTypeMap, log);
+    const targetDiffers = fieldsDiffer(targetCandidate, target.fields);
+    const sourceDiffers = fieldsDiffer(sourceCandidate, source.fields);
+    if (!targetDiffers && !sourceDiffers) {
+      skipCount++;
+      continue;
+    }
+
+    conflictCount++;
+    let winner = strategy;
+    if (strategy === 'latest_wins') {
+      const sourceTs = getTeableModifiedTime(source.record);
+      const targetTs = getTeableModifiedTime(target.record);
+      if (sourceTs === null || targetTs === null || sourceTs === targetTs) winner = 'skip_conflict';
+      else winner = sourceTs > targetTs ? 'source_wins' : 'target_wins';
+    }
+
+    if (winner === 'source_wins') {
+      if (targetDiffers) targetUpdates.push({ id: target.id, fields: targetCandidate });
+      else skipCount++;
+    } else if (winner === 'target_wins') {
+      if (sourceDiffers) sourceUpdates.push({ id: source.id, fields: sourceCandidate });
+      else skipCount++;
+    } else {
+      skipCount++;
+    }
+  }
+
+  report({ phase: 'syncing_source', processedRows: sourceRecords.length, targetRows: targetRecords.length, skipped: skipCount });
+  const targetResult = await flushBidirectionalWrites({
+    task,
+    conn: tgtConn,
+    tableId: task.targetTableId,
+    inserts: targetInserts,
+    updates: targetUpdates,
+    batchSize,
+    retryCount,
+    log,
+    pkFieldName,
+    operationLabel: '写入目标 Teable ',
+  });
+  const sourceResult = await flushBidirectionalWrites({
+    task,
+    conn: srcConn,
+    tableId: task.sourceTable,
+    inserts: sourceInserts,
+    updates: sourceUpdates,
+    batchSize,
+    retryCount,
+    log,
+    pkFieldName: pkCol,
+    operationLabel: '写回源 Teable ',
+  });
+
+  const insertCount = targetResult.inserted + sourceResult.inserted;
+  const updateCount = targetResult.updated + sourceResult.updated;
+  const errorCount = targetResult.failed + sourceResult.failed;
+  if (errorCount > 0) throw new Error('双向同步存在 ' + errorCount + ' 条失败记录');
+
+  saveSyncState(taskId, {
+    ...getSyncState(taskId),
+    lastRunAt: new Date().toISOString(),
+    lastSyncAt: new Date().toISOString(),
+    mode: 'bidirectional',
+    conflictStrategy: strategy,
+  });
+
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  log('info', '双向同步完成: 源 ' + sourceRecords.length + ', 目标 ' + targetRecords.length + ', 新增 ' + insertCount + ', 更新 ' + updateCount + ', 冲突 ' + conflictCount + ', 跳过 ' + skipCount + ', 失败 ' + errorCount + ' | 耗时 ' + elapsed + 's');
+  report({
+    status: 'success',
+    phase: 'completed',
+    mode: 'bidirectional',
+    processedRows: sourceRecords.length,
+    targetRows: targetRecords.length,
+    inserted: insertCount,
+    updated: updateCount,
+    skipped: skipCount,
+    failed: errorCount,
+    conflicts: conflictCount,
+  });
+  updateSyncHistory(historyRec.id, {
+    status: 'success',
+    mode: 'bidirectional',
+    sourceRows: sourceRecords.length,
+    inserted: insertCount,
+    updated: updateCount,
+    skipped: skipCount,
+    failed: errorCount,
+    durationMs: Date.now() - startTime,
+  });
+  clearSyncFailures(taskId);
+  return {
+    status: 'success',
+    mode: 'bidirectional',
+    sourceRows: sourceRecords.length,
+    targetRows: targetRecords.length,
+    inserted: insertCount,
+    updated: updateCount,
+    skipped: skipCount,
+    failed: errorCount,
+    conflicts: conflictCount,
+    durationMs: Date.now() - startTime,
+  };
+}
+
 function validateTaskConfig(task, pkCol, watermark) {
   if (!task?.id) throw new Error('任务缺少 id');
   if (!task.sourceTable) throw new Error('任务缺少源表 sourceTable');
@@ -180,6 +534,21 @@ function saveSyncState(taskId, state) {
  * Returns { pkCol, candidates: { timestamp: [], rowversion: [], auto_pk: [] } }
  */
 export async function detectWatermarkCandidates(srcConn, tableName, database = null) {
+  if (isTeableSource(srcConn)) {
+    const fields = await getTeableFields(srcConn, tableName);
+    const names = fields.map((field) => field.name).filter(Boolean);
+    const dateFields = fields.filter((field) => ['date', 'createdTime', 'lastModifiedTime'].includes(field.type)).map((field) => field.name);
+    const preferredPk = names.find((name) => /^(id|ID|编号|编码|code|key|name|名称)$/i.test(name)) || names[0] || null;
+    return {
+      pkCol: preferredPk,
+      candidates: {
+        timestamp: dateFields,
+        rowversion: [],
+        auto_pk: names,
+      },
+    };
+  }
+
   const db = database;
   let pkCol = null;
   const candidates = { timestamp: [], rowversion: [], auto_pk: [] };
@@ -365,29 +734,50 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
   let historyRec = null;
   try {
     checkCancelled();
+    if (isBidirectionalTask(task)) {
+      return await runBidirectionalTeableSync(task, srcConn, tgtConn, {
+        taskId,
+        startTime,
+        pageSize,
+        batchSize,
+        retryCount,
+        log,
+        report,
+        checkCancelled,
+      });
+    }
+
     const { pkCol: autoPkCol, candidates } = await detectWatermarkCandidates(srcConn, task.sourceTable, db);
     const pkCol = task.sourcePrimaryKey || autoPkCol;
     const watermark = resolveWatermark(task, pkCol, candidates);
     validateTaskConfig(task, pkCol, watermark);
     const state = getSyncState(taskId);
-    const table = quoteIdentifier(srcConn.type, task.sourceTable);
-    const pkIdentifier = quoteIdentifier(srcConn.type, pkCol);
-    const orderIdentifier = watermark.type === 'rowversion' && watermark.col
-      ? quoteIdentifier(srcConn.type, watermark.col)
-      : pkIdentifier;
+    const sourceKind = isTeableSource(srcConn) ? 'teable' : 'sql';
+    const table = sourceKind === 'sql' ? quoteIdentifier(srcConn.type, task.sourceTable) : null;
+    const pkIdentifier = sourceKind === 'sql' ? quoteIdentifier(srcConn.type, pkCol) : null;
+    const orderIdentifier = sourceKind === 'sql'
+      ? (watermark.type === 'rowversion' && watermark.col ? quoteIdentifier(srcConn.type, watermark.col) : pkIdentifier)
+      : null;
 
-    let baseSql = 'SELECT * FROM ' + table;
+    let baseSql = table ? 'SELECT * FROM ' + table : '';
     const baseParams = [];
     let isIncremental = false;
 
-    if (watermark.type === 'timestamp') {
+    if (sourceKind === 'teable' && watermark.type !== 'full_scan') {
+      log('warn', 'Teable 源端 MVP 暂仅支持全量扫描，已自动降级为全量扫描');
+      watermark.type = 'full_scan';
+      watermark.col = null;
+      watermark.description = 'Teable 全量扫描';
+    }
+
+    if (sourceKind === 'sql' && watermark.type === 'timestamp') {
       const tsCol = watermark.col;
       if (state.lastSyncAt) {
         baseSql += ' WHERE ' + quoteIdentifier(srcConn.type, tsCol) + ' > ' + placeholder(srcConn.type, baseParams.length);
         baseParams.push(state.lastSyncAt);
         isIncremental = true;
       }
-    } else if (watermark.type === 'rowversion') {
+    } else if (sourceKind === 'sql' && watermark.type === 'rowversion') {
       const rvCol = watermark.col;
       if (srcConn.type !== 'mssql') throw new Error('rowversion 策略仅支持 MSSQL');
       if (state.watermarkValue) {
@@ -395,7 +785,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
         baseParams.push(state.watermarkValue);
         isIncremental = true;
       }
-    } else if (watermark.type === 'auto_pk') {
+    } else if (sourceKind === 'sql' && watermark.type === 'auto_pk') {
       if (state.watermarkPkValue !== undefined && state.watermarkPkValue !== null) {
         baseSql += ' WHERE ' + pkIdentifier + ' > ' + placeholder(srcConn.type, baseParams.length);
         baseParams.push(state.watermarkPkValue);
@@ -412,12 +802,14 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     checkCancelled();
     const fields = await getTeableFields(tgtConn, task.targetTableId);
     const columnMapping = task.columnMapping || {};
-    const sourceSchema = await getTableSchema(srcConn, task.sourceTable, db);
+    const sourceSchema = sourceKind === 'teable'
+      ? (await getTeableFields(srcConn, task.sourceTable)).map(teableFieldToSourceColumn)
+      : await getTableSchema(srcConn, task.sourceTable, db);
     const { mapping: autoMapping, createdFields } = await ensureTeableFields(tgtConn, task.targetTableId, sourceSchema, columnMapping, fields, log);
     const mapping = { ...autoMapping, ...columnMapping };
 
     const srcTypeMap = {};
-    for (const col of sourceSchema) srcTypeMap[col.name] = col.type;
+    for (const col of sourceSchema) srcTypeMap[col.name] = normalizeSourceType(col.type, sourceKind);
     const tgtTypeMap = {};
     for (const f of fields) tgtTypeMap[f.name] = f.type;
     for (const cf of createdFields) tgtTypeMap[cf.fieldName] = cf.type;
@@ -516,13 +908,19 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
 
     let sourceOffset = 0;
     let sourceCursor = null;
-    const useKeysetPaging = watermark.type !== 'rowversion';
+    const useKeysetPaging = sourceKind === 'sql' && watermark.type !== 'rowversion';
     while (true) {
       checkCancelled();
-      const { sql: pageSql, params: pageParams } = useKeysetPaging
-        ? buildKeysetSql(srcConn.type, baseSql, orderIdentifier, sourceCursor, pageSize, baseParams.length)
-        : buildPagedSql(srcConn.type, baseSql, orderIdentifier + ' ASC', pageSize, sourceOffset, baseParams.length);
-      const sourceRows = await query(srcConn, pageSql, [...baseParams, ...pageParams], db);
+      let sourceRows;
+      if (sourceKind === 'teable') {
+        const result = await withRetry(() => getTeableRecords(srcConn, task.sourceTable, { skip: sourceOffset, take: pageSize }), retryCount, log, '读取 Teable 源记录');
+        sourceRows = normalizeTeableRecordsResponse(result).map(unwrapTeableRecord);
+      } else {
+        const { sql: pageSql, params: pageParams } = useKeysetPaging
+          ? buildKeysetSql(srcConn.type, baseSql, orderIdentifier, sourceCursor, pageSize, baseParams.length)
+          : buildPagedSql(srcConn.type, baseSql, orderIdentifier + ' ASC', pageSize, sourceOffset, baseParams.length);
+        sourceRows = await query(srcConn, pageSql, [...baseParams, ...pageParams], db);
+      }
       if (sourceRows.length === 0) break;
 
       sourceRowsCount += sourceRows.length;
@@ -532,6 +930,11 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
         checkCancelled();
         try {
           const pkValRaw = row[pkCol];
+          if (pkValRaw === undefined || pkValRaw === null || pkValRaw === '') {
+            skipCount++;
+            log('warn', '跳过主键为空的源记录');
+            continue;
+          }
           const pkVal = String(pkValRaw);
           seenSourcePks.add(pkVal);
           pkValues.push(pkValRaw);
@@ -570,7 +973,8 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
         targetRows: existingRecords.length,
       });
       if (sourceRows.length < pageSize) break;
-      if (useKeysetPaging) sourceCursor = sourceRows[sourceRows.length - 1][pkCol];
+      if (sourceKind === 'teable') sourceOffset += pageSize;
+      else if (useKeysetPaging) sourceCursor = sourceRows[sourceRows.length - 1][pkCol];
       else sourceOffset += pageSize;
     }
 
