@@ -132,7 +132,7 @@ const navItems = computed(() => {
   const items = [
     { key: 'connections', icon: 'Link', label: '数据源', badge: null },
     { key: 'tasks', icon: 'RefreshRight', label: '同步任务', badge: null },
-    { key: 'logs', icon: 'Terminal', label: '日志', badge: null },
+    { key: 'logs', icon: 'Document', label: '日志', badge: null },
   ]
   if (currentUser.value?.role === 'super_admin') {
     items.push({ key: 'doctor', icon: 'FirstAidKit', label: '系统检查', badge: null })

@@ -34,7 +34,7 @@
     </div>
 
     <div class="task-list" v-if="filteredTasks.length > 0">
-      <div v-for="task in filteredTasks" :key="task.id" class="fs-card task-card" :class="{ attention: taskNeedsAttention(task), running: isTaskRunning(task) }">
+      <div v-for="task in filteredTasks" :key="task.id" class="fs-card task-card" :class="{ attention: taskNeedsAttention(task), invalid: !task.connectionStatus?.ok, running: isTaskRunning(task) }">
         <div class="task-card-top">
           <div class="task-info">
             <div class="task-name">{{ task.name }}</div>
@@ -50,8 +50,9 @@
           </div>
           <div class="task-actions">
             <span v-if="taskHealth[task.id]" class="health-badge" :class="taskHealth[task.id].status">{{ healthLabel(taskHealth[task.id].status) }}</span>
+            <span v-if="!task.connectionStatus?.ok" class="health-badge invalid">连接异常</span>
             <span class="status-badge" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
-            <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running'" style="padding:8px 16px;font-size:13px">
+            <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running' || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
               <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
               <el-icon v-else class="is-loading"><Loading /></el-icon>
               {{ (task._running || task.status === 'running') ? '同步中...' : '同步' }}
@@ -117,6 +118,11 @@
             <span>平均耗时 {{ formatDuration(taskHealth[task.id].averageDurationMs) }}</span>
             <span>最近 {{ latestStatusLabel(taskHealth[task.id].latestStatus) }}</span>
             <span v-if="taskHealth[task.id].latestError" class="health-error" :title="taskHealth[task.id].latestError">错误：{{ taskHealth[task.id].latestError }}</span>
+          </div>
+          <div v-if="task.connectionStatus?.issues?.length" class="connection-issues">
+            <span v-for="issue in task.connectionStatus.issues" :key="issue.field + issue.message" :class="['connection-issue', issue.level]">
+              {{ issue.message }}
+            </span>
           </div>
           <div v-if="taskProgress[task.id] && taskProgress[task.id].status !== 'idle'" class="progress-panel">
             <div class="progress-line">
@@ -309,8 +315,9 @@
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="写入批量">
+            <el-form-item label="Teable 写入批量">
               <el-input-number v-model="form.batchSize" :min="50" :max="1000" :step="50" style="width:100%" />
+              <div class="form-help">Teable 单次最多写入 1000 条，保存时后端也会限制在 50-1000。</div>
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -1235,6 +1242,7 @@ onUnmounted(() => {
   border-left: 3px solid transparent;
 }
 .task-card.attention { border-left-color: var(--red); }
+.task-card.invalid { border-left-color: var(--amber); }
 .task-card.running { border-left-color: var(--accent); }
 
 .task-card-top {
@@ -1381,6 +1389,7 @@ onUnmounted(() => {
 .health-badge.healthy { background: rgba(5,150,105,0.12); color: var(--green); }
 .health-badge.has_failures,
 .health-badge.recent_failed { background: rgba(220,38,38,0.12); color: var(--red); }
+.health-badge.invalid { background: rgba(245,158,11,0.16); color: var(--amber); }
 .health-badge.cancelled,
 .health-badge.never_run,
 .health-badge.unknown { background: rgba(148,149,160,0.12); color: var(--text-tertiary); }
@@ -1400,6 +1409,32 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--red);
+}
+
+.connection-issues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.connection-issue {
+  max-width: 100%;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.connection-issue.error {
+  background: rgba(220,38,38,0.1);
+  color: var(--red);
+}
+
+.connection-issue.warn {
+  background: rgba(245,158,11,0.14);
+  color: var(--amber);
 }
 
 .reconcile-summary {
@@ -1473,6 +1508,13 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--border-subtle);
 }
 .section-icon { font-size: 14px; opacity: 0.6; }
+
+.form-help {
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+}
 
 .mapping-area {
   background: var(--bg-elevated);

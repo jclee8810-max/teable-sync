@@ -81,6 +81,7 @@ function sqlPlaceholder(type, index) {
 
 const CONNECTION_SECRET_FIELDS = ['password', 'token', 'oauthClientSecret', 'teableOAuthToken'];
 const CONNECTION_DTO_ONLY_FIELDS = ['hasPassword', 'hasToken', 'hasOauthClientSecret'];
+const CONNECTION_TEST_FIELDS = ['lastTest'];
 
 function sanitizeConnection(conn) {
   const safe = { ...conn };
@@ -110,7 +111,7 @@ function sanitizeConnection(conn) {
 
 function cleanConnectionInput(body = {}) {
   const { id, ownerId, createdAt, deletedAt, ...cleaned } = body;
-  for (const field of CONNECTION_DTO_ONLY_FIELDS) delete cleaned[field];
+  for (const field of [...CONNECTION_DTO_ONLY_FIELDS, ...CONNECTION_TEST_FIELDS]) delete cleaned[field];
   for (const field of CONNECTION_SECRET_FIELDS) {
     if (cleaned[field] === '') delete cleaned[field];
   }
@@ -124,13 +125,82 @@ function clampInt(value, fallback, min, max) {
 }
 
 function cleanTaskInput(body = {}) {
-  const { id, userId, createdAt, deletedAt, status, enabled, lastSyncAt, ...cleaned } = body;
+  const { id, userId, createdAt, deletedAt, status, enabled, lastSyncAt, connectionStatus, ...cleaned } = body;
   cleaned.pageSize = clampInt(cleaned.pageSize, 1000, 100, 5000);
   cleaned.batchSize = clampInt(cleaned.batchSize, 500, 50, 1000);
   cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
   if (!['ignore', 'soft_delete', 'hard_delete'].includes(cleaned.deletionMode)) cleaned.deletionMode = 'ignore';
   if (!/^[a-zA-Z0-9_]+$/.test(cleaned.softDeleteField || 'deleted')) cleaned.softDeleteField = 'deleted';
   return cleaned;
+}
+
+function connectionLabel(conn, fallbackId) {
+  return conn?.name || fallbackId || '未配置';
+}
+
+function buildTaskConnectionStatus(config, user, task) {
+  const sourceId = task.sourceConnectionId || task.sourceId;
+  const targetId = task.targetConnectionId || task.targetId;
+  const srcConnRaw = sourceId ? config.connections.find((c) => c.id === sourceId) : null;
+  const tgtConnRaw = targetId ? config.connections.find((c) => c.id === targetId) : null;
+  const validation = validateTaskConnections(config, user, task);
+  const issues = [];
+
+  if (!sourceId) issues.push({ field: 'sourceConnectionId', level: 'error', message: '未配置源数据库连接' });
+  if (!targetId) issues.push({ field: 'targetConnectionId', level: 'error', message: '未配置 Teable 目标连接' });
+  if (sourceId && !srcConnRaw) issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接不存在: ${sourceId}` });
+  else if (srcConnRaw?.deletedAt) issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接已删除: ${connectionLabel(srcConnRaw, sourceId)}` });
+  if (targetId && !tgtConnRaw) issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接不存在: ${targetId}` });
+  else if (tgtConnRaw?.deletedAt) issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接已删除: ${connectionLabel(tgtConnRaw, targetId)}` });
+  if (srcConnRaw && srcConnRaw.type === 'teable') issues.push({ field: 'sourceConnectionId', level: 'error', message: `源连接类型错误: ${connectionLabel(srcConnRaw, sourceId)} 是 Teable，源端必须是 SQL 数据库` });
+  if (tgtConnRaw && tgtConnRaw.type !== 'teable') issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接类型错误: ${connectionLabel(tgtConnRaw, targetId)} 不是 Teable` });
+  if (validation.error && issues.length === 0) issues.push({ field: 'connections', level: 'error', message: validation.error });
+
+  for (const [field, conn] of [['sourceConnectionId', srcConnRaw], ['targetConnectionId', tgtConnRaw]]) {
+    if (!conn || conn.deletedAt) continue;
+    if (conn.lastTest?.success === false) {
+      issues.push({ field, level: 'warn', message: `${connectionLabel(conn)} 最近测试失败: ${conn.lastTest.error || '未知错误'}` });
+    }
+  }
+
+  return {
+    ok: issues.filter((issue) => issue.level === 'error').length === 0,
+    source: sourceId ? {
+      id: sourceId,
+      name: connectionLabel(srcConnRaw, sourceId),
+      type: srcConnRaw?.type || null,
+      readable: Boolean(validation.srcConn),
+      lastTest: srcConnRaw?.lastTest || null,
+    } : null,
+    target: targetId ? {
+      id: targetId,
+      name: connectionLabel(tgtConnRaw, targetId),
+      type: tgtConnRaw?.type || null,
+      readable: Boolean(validation.tgtConn),
+      lastTest: tgtConnRaw?.lastTest || null,
+    } : null,
+    issues,
+  };
+}
+
+function taskDto(config, user, task) {
+  return {
+    ...task,
+    connectionStatus: buildTaskConnectionStatus(config, user, task),
+  };
+}
+
+function recordConnectionTest(config, connId, result) {
+  const idx = config.connections.findIndex((c) => c.id === connId);
+  if (idx === -1) return Promise.resolve();
+  config.connections[idx].lastTest = {
+    success: result.success === true,
+    testedAt: new Date().toISOString(),
+    message: result.message || result.version || null,
+    error: result.success === true ? null : (result.error || '未知错误'),
+    testedBy: result.testedBy || null,
+  };
+  return saveConfig(config, { backup: false });
 }
 
 function createRunState(task, trigger) {
@@ -593,17 +663,22 @@ app.post('/api/connections/:id/test', async (req, res) => {
   if (!canReadConnection(req.user, conn)) return res.status(403).json({ error: '无权访问此连接' });
 
   try {
+    let result;
     if (conn.type === 'teable') {
       const { getTeableSpaces } = await import('./services/teableService.js');
       const spaces = await getTeableSpaces(conn);
-      res.json({ success: true, type: 'teable', spaces: spaces.length, message: `连接成功，共 ${spaces.length} 个空间` });
+      result = { success: true, type: 'teable', spaces: spaces.length, message: `连接成功，共 ${spaces.length} 个空间` };
     } else {
       const { testConnection } = await import('./services/dbService.js');
-      const result = await testConnection(conn);
-      res.json({ success: true, type: conn.type, ...result });
+      const testResult = await testConnection(conn);
+      result = { success: true, type: conn.type, ...testResult };
     }
+    await recordConnectionTest(config, conn.id, { ...result, testedBy: req.user.id });
+    res.json(result);
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    const result = { success: false, type: conn.type, error: err.message };
+    await recordConnectionTest(config, conn.id, { ...result, testedBy: req.user.id });
+    res.json(result);
   }
 });
 
@@ -795,7 +870,7 @@ app.get('/api/tasks', (req, res) => {
     if (!includeDeleted && t.deletedAt) return false;
     return role === 'super_admin' || t.userId === userId;
   });
-  res.json(visible);
+  res.json(visible.map((task) => taskDto(config, req.user, task)));
 });
 
 app.post('/api/tasks', (req, res) => {

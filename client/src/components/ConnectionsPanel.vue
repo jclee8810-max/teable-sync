@@ -72,9 +72,9 @@
         </div>
 
         <div class="conn-card-footer">
-          <span v-if="conn._tested === true" class="conn-status active">● 已连接</span>
-          <span v-else-if="conn._tested === false" class="conn-status error">● 连接失败</span>
-          <span v-else class="conn-status unknown">○ 未测试</span>
+          <span :class="['conn-status', connStatus(conn).className]" :title="connStatus(conn).title">
+            {{ connStatus(conn).label }}
+          </span>
           <span class="conn-visibility" :class="conn.shared ? 'shared' : 'private'">
             {{ conn.shared ? '🌐 共享' : '🔒 私有' }}
           </span>
@@ -262,6 +262,39 @@ const canEditSharing = computed(() => {
 
 function connById(id) {
   return connections.value.find(c => c.id === id) || null
+}
+
+function relativeTime(ts) {
+  if (!ts) return ''
+  const diffMs = Date.now() - new Date(ts).getTime()
+  if (!Number.isFinite(diffMs)) return ''
+  const mins = Math.max(0, Math.round(diffMs / 60000))
+  if (mins < 1) return '刚刚'
+  if (mins < 60) return `${mins}分钟前`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `${hours}小时前`
+  return `${Math.round(hours / 24)}天前`
+}
+
+function connStatus(conn) {
+  const test = conn.lastTest
+  if (test?.success === true) {
+    const when = relativeTime(test.testedAt)
+    return {
+      className: 'active',
+      label: `● 已连接${when ? ` · ${when}` : ''}`,
+      title: test.message || '最近测试通过',
+    }
+  }
+  if (test?.success === false) {
+    const when = relativeTime(test.testedAt)
+    return {
+      className: 'error',
+      label: `● 连接失败${when ? ` · ${when}` : ''}`,
+      title: test.error || '最近测试失败',
+    }
+  }
+  return { className: 'unknown', label: '○ 未测试', title: '还没有保存过连接测试结果' }
 }
 
 function onTypeChange() {
@@ -468,7 +501,14 @@ async function testConn(id) {
     const result = await testConnection(id)
     loading.close()
     const conn = connections.value.find(c => c.id === id)
-    if (conn) conn._tested = !!result.success
+    if (conn) {
+      conn.lastTest = {
+        success: !!result.success,
+        testedAt: new Date().toISOString(),
+        message: result.message || result.version || null,
+        error: result.success ? null : (result.error || '未知错误'),
+      }
+    }
     if (result.success) {
       ElMessage.success('连接成功! ' + (result.message || result.version || ''))
     } else {
@@ -478,7 +518,14 @@ async function testConn(id) {
   } catch (err) {
     loading.close()
     const conn = connections.value.find(c => c.id === id)
-    if (conn) conn._tested = false
+    if (conn) {
+      conn.lastTest = {
+        success: false,
+        testedAt: new Date().toISOString(),
+        message: null,
+        error: err.message,
+      }
+    }
     ElMessage.error('测试失败: ' + err.message)
     return { success: false, error: err.message }
   }
@@ -644,6 +691,10 @@ onMounted(loadConnections)
 .conn-status {
   font-size: 12px;
   font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .conn-status.active { color: var(--green); }
 .conn-status.error { color: var(--red); }
