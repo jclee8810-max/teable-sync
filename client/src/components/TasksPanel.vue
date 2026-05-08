@@ -516,10 +516,10 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, getSchedulerStatus, previewTaskData } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, getSchedulerStatus, previewTaskData, getStoredUser } from '../api'
 
 // 当前用户身份
-const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
+const currentUser = getStoredUser()
 const currentUserId = currentUser?.id || null
 const isSuperAdmin = currentUser?.role === 'super_admin'
 

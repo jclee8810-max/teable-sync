@@ -130,7 +130,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, updateUserRole, exchangeTeableLoginCode, setToken, clearToken, getToken } from '../api.js'
+import { login, register, getCurrentUser, changePassword, getUsers, deleteUser, updateUserRole, exchangeTeableLoginCode, setToken, setStoredUser, clearToken, getToken } from '../api.js'
 
 const emit = defineEmits(['auth-changed'])
 
@@ -162,7 +162,7 @@ onMounted(async () => {
     window.history.replaceState({}, '', window.location.pathname)
     try {
       const data = await exchangeTeableLoginCode(oauthCode)
-      setToken(data.token)
+      setToken(data.token, data.user)
       user.value = data.user
       emit('auth-changed', data.user)
       return
@@ -187,6 +187,7 @@ onMounted(async () => {
 async function loadProfile() {
   try {
     user.value = await getCurrentUser()
+    setStoredUser(user.value)
     if (user.value.role === 'super_admin') {
       usersLoading.value = true
       try {
@@ -210,7 +211,7 @@ async function handleLogin() {
   loading.value = true
   try {
     const data = await login({ email: form.value.email, password: form.value.password })
-    setToken(data.token)
+    setToken(data.token, data.user)
     user.value = data.user
     emit('auth-changed', data.user)
   } catch (e) {
@@ -233,7 +234,7 @@ async function handleRegister() {
   loading.value = true
   try {
     const data = await register({ email: form.value.email, password: form.value.password })
-    setToken(data.token)
+    setToken(data.token, data.user)
     user.value = data.user
     emit('auth-changed', data.user)
   } catch (e) {

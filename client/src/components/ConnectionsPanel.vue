@@ -220,7 +220,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getConnections, createConnection, updateConnection, deleteConnection, testConnection, testTeable, getToken } from '../api'
+import { getConnections, createConnection, updateConnection, deleteConnection, testConnection, testTeable, getToken, getStoredUser } from '../api'
 
 const connections = ref([])
 const dialogVisible = ref(false)
@@ -245,7 +245,7 @@ function typeLabel(type) {
 }
 
 // 当前用户身份
-const currentUser = JSON.parse(localStorage.getItem('user') || 'null')
+const currentUser = getStoredUser()
 const currentUserId = currentUser?.id || null
 const isSuperAdmin = currentUser?.role === 'super_admin'
 

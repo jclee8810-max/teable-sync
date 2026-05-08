@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 const TOKEN_KEY = 'teable_sync_token'
+const USER_KEY = 'user'
 
 // 动态获取 API 地址：支持局域网访问
 // 如果从 192.168.x.x 访问，API 也走 192.168.x.x
@@ -25,6 +26,7 @@ api.interceptors.response.use(
   err => {
     if (err.response?.status === 401) {
       localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(USER_KEY)
       window.location.hash = '#/login'
     }
     return Promise.reject(err)
@@ -40,9 +42,25 @@ export const exchangeTeableLoginCode = (code) => api.post('/auth/teable-token-ex
 export const getUsers = () => api.get('/auth/users').then(r => r.data)
 export const deleteUser = (id) => api.delete(`/auth/users/${id}`).then(r => r.data)
 export const updateUserRole = (id, role) => api.put(`/auth/users/${id}/role`, { role }).then(r => r.data)
-export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
+export const setToken = (token, user = null) => {
+  localStorage.setItem(TOKEN_KEY, token)
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user))
+}
 export const getToken = () => localStorage.getItem(TOKEN_KEY)
-export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
+export const getStoredUser = () => {
+  try {
+    return JSON.parse(localStorage.getItem(USER_KEY) || 'null')
+  } catch {
+    return null
+  }
+}
+export const setStoredUser = (user) => {
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user))
+}
+export const clearToken = () => {
+  localStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(USER_KEY)
+}
 
 // Connections
 export const getConnections = () => api.get('/connections').then(r => r.data)

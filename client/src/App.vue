@@ -118,7 +118,7 @@ import TasksPanel from './components/TasksPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
 import SystemDoctorPanel from './components/SystemDoctorPanel.vue'
 import AuthPage from './components/AuthPage.vue'
-import { getCurrentUser, clearToken, getToken, getVersionInfo } from './api.js'
+import { getCurrentUser, clearToken, getToken, getVersionInfo, setStoredUser } from './api.js'
 
 const activeTab = ref('tasks')
 const isLoggedIn = ref(false)
@@ -207,6 +207,7 @@ onMounted(async () => {
   if (token) {
     try {
       currentUser.value = await getCurrentUser()
+      setStoredUser(currentUser.value)
       isLoggedIn.value = true
     } catch {
       clearToken()

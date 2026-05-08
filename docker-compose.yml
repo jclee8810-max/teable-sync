@@ -24,6 +24,7 @@ services:
       - TEABLE_OAUTH_HOST=${TEABLE_OAUTH_HOST:-http://localhost:3000}
       - FRONTEND_BASE_URL=${FRONTEND_BASE_URL:-http://localhost:3101}
       - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-change-in-production}
+      - CONFIG_ENCRYPTION_KEY=${CONFIG_ENCRYPTION_KEY:-${JWT_SECRET:-your-jwt-secret-change-in-production}}
     volumes:
       - teable-sync-data:/app/server/data
     depends_on:

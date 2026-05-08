@@ -1,24 +1,28 @@
 // Sync history service - records each sync run
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(dirname(dirname(__dirname)), 'data');
 const HISTORY_FILE = join(DATA_DIR, 'sync-history.json');
+const MAX_HISTORY_RECORDS = 2000;
 
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
 function loadHistory() {
   if (!existsSync(HISTORY_FILE)) return [];
   try {
-    return JSON.parse(readFileSync(HISTORY_FILE, 'utf-8'));
+    const parsed = JSON.parse(readFileSync(HISTORY_FILE, 'utf-8'));
+    return Array.isArray(parsed) ? parsed : [];
   } catch { return []; }
 }
 
 function saveHistory(history) {
-  writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf-8');
+  const tmpFile = `${HISTORY_FILE}.tmp`;
+  writeFileSync(tmpFile, JSON.stringify(history.slice(0, MAX_HISTORY_RECORDS), null, 2), 'utf-8');
+  renameSync(tmpFile, HISTORY_FILE);
 }
 
 // Create a new sync history record when sync starts

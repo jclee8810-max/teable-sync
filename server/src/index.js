@@ -51,10 +51,11 @@ function loadConfig() {
   return defaults;
 }
 
-function saveConfig(config) {
+function saveConfig(config, options = {}) {
+  const { backup = true, backupReason = 'write' } = options;
   _writeLock = _writeLock.then(() => {
     const tmpFile = `${CONFIG_FILE}.tmp`;
-    createConfigBackup(CONFIG_FILE);
+    if (backup) createConfigBackup(CONFIG_FILE, backupReason);
     writeFileSync(tmpFile, JSON.stringify(encryptConfigSecrets(config), null, 2), 'utf-8');
     renameSync(tmpFile, CONFIG_FILE);
   }).catch(err => {
@@ -262,7 +263,7 @@ function persistSyncLog(entry) {
   const cfg = loadConfig();
   cfg.syncLogs.push(entry);
   if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
-  saveConfig(cfg);
+  saveConfig(cfg, { backup: false });
 }
 
 function persistUserSyncLog(entry, userId) {
@@ -271,7 +272,7 @@ function persistUserSyncLog(entry, userId) {
   const cfg = loadConfig();
   cfg.syncLogs.push(enhanced);
   if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
-  saveConfig(cfg);
+  saveConfig(cfg, { backup: false });
 }
 
 function getTaskStartMissingFields(task) {
@@ -1242,7 +1243,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
       const cfg = loadConfig();
       cfg.syncLogs.push(enhanced);
       if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
-      saveConfig(cfg);
+      saveConfig(cfg, { backup: false });
     };
 
     let result;
@@ -1263,17 +1264,21 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
     // Mark done
     const cfg1 = loadConfig();
-    cfg1.syncTasks[taskIdx].status = syncScheduler.has(task.id) ? 'scheduled' : 'idle';
-    cfg1.syncTasks[taskIdx].lastSyncAt = new Date().toISOString();
-    saveConfig(cfg1);
+    const idx1 = cfg1.syncTasks.findIndex((x) => x.id === task.id);
+    if (idx1 !== -1) {
+      cfg1.syncTasks[idx1].status = syncScheduler.has(task.id) ? 'scheduled' : 'idle';
+      cfg1.syncTasks[idx1].lastSyncAt = new Date().toISOString();
+      saveConfig(cfg1);
+    }
   } catch (err) {
     const cancelled = err.code === 'SYNC_CANCELLED';
     const entry = { taskId: task.id, level: cancelled ? 'warn' : 'error', message: err.message, ts: new Date().toISOString(), userId: task.userId };
     broadcastLogUser(entry, task.userId);
     const cfg = loadConfig();
     cfg.syncLogs.push(entry);
-    cfg.syncTasks[taskIdx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled ? 'idle' : 'error');
-    saveConfig(cfg);
+    const idx = cfg.syncTasks.findIndex((x) => x.id === task.id);
+    if (idx !== -1) cfg.syncTasks[idx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled ? 'idle' : 'error');
+    saveConfig(cfg, { backup: false });
   }
 });
 
@@ -1298,7 +1303,7 @@ app.delete('/api/logs', (req, res) => {
   } else {
     config.syncLogs = config.syncLogs.filter((log) => log.userId && log.userId !== req.user.id);
   }
-  saveConfig(config);
+  saveConfig(config, { backup: false });
   res.json({ ok: true });
 });
 
