@@ -1,58 +1,77 @@
 <template>
   <div class="logs-page">
-    <!-- Header -->
-    <div class="page-actions">
-      <el-segmented v-model="activeView" :options="viewOptions" />
+    <div class="log-switcher">
+      <button
+        v-for="option in viewOptions"
+        :key="option.value"
+        type="button"
+        class="log-mode"
+        :class="{ active: activeView === option.value }"
+        @click="activeView = option.value"
+      >
+        <span>{{ option.label }}</span>
+        <small>{{ option.description }}</small>
+      </button>
+    </div>
+
+    <div class="log-toolbar">
       <div v-if="activeView === 'sync'" class="log-stats">
-        <span class="stat-item" v-if="stats.info > 0">
-          <span class="stat-dot info"></span>{{ stats.info }} 信息
-        </span>
-        <span class="stat-item" v-if="stats.warn > 0">
-          <span class="stat-dot warn"></span>{{ stats.warn }} 警告
-        </span>
-        <span class="stat-item" v-if="stats.error > 0">
-          <span class="stat-dot error"></span>{{ stats.error }} 错误
-        </span>
+        <button class="stat-item" :class="{ active: levelFilter === '' }" type="button" @click="levelFilter = ''">
+          全部 {{ logs.length }}
+        </button>
+        <button class="stat-item info" :class="{ active: levelFilter === 'info' }" type="button" @click="levelFilter = 'info'">
+          信息 {{ stats.info }}
+        </button>
+        <button class="stat-item warn" :class="{ active: levelFilter === 'warn' }" type="button" @click="levelFilter = 'warn'">
+          警告 {{ stats.warn }}
+        </button>
+        <button class="stat-item error" :class="{ active: levelFilter === 'error' }" type="button" @click="levelFilter = 'error'">
+          错误 {{ stats.error }}
+        </button>
       </div>
       <div v-else class="audit-tools">
-        <el-select v-model="auditResourceType" placeholder="资源" clearable size="small" style="width:120px" @change="loadAuditLogs">
+        <el-select v-model="auditResourceType" placeholder="资源类型" clearable size="small" style="width:128px" @change="loadAuditLogs">
           <el-option label="连接" value="connection" />
           <el-option label="任务" value="task" />
           <el-option label="系统" value="system" />
+          <el-option label="用户" value="user" />
         </el-select>
         <button class="fs-btn fs-btn-ghost" @click="loadAuditLogs" style="padding:8px 16px;font-size:13px">
           <el-icon><Refresh /></el-icon>刷新
         </button>
       </div>
       <button v-if="activeView === 'sync'" class="fs-btn fs-btn-ghost" @click="clearAll" style="padding:8px 16px;font-size:13px">
-        <el-icon><Delete /></el-icon>清空
+        <el-icon><Delete /></el-icon>清空可见日志
       </button>
     </div>
 
-    <!-- Terminal-style Log Viewer -->
-    <div v-if="activeView === 'sync'" class="terminal" ref="logContainer">
-      <div class="terminal-header">
-        <div class="terminal-dots">
-          <span class="dot red"></span>
-          <span class="dot yellow"></span>
-          <span class="dot green"></span>
+    <div v-if="activeView === 'sync'" class="log-card" ref="logContainer">
+      <div class="log-card-head">
+        <div>
+          <strong>同步执行流</strong>
+          <span>来自任务运行和 WebSocket 推送</span>
         </div>
-        <span class="terminal-title">Teable Sync — 实时日志</span>
-        <span class="terminal-count">{{ logs.length }} 条</span>
+        <em>{{ filteredLogs.length }} 条</em>
       </div>
-      <div class="terminal-body">
-        <div v-for="(log, idx) in logs" :key="idx" class="log-line" :class="'log-' + log.level">
+      <div class="sync-log-list">
+        <div v-for="(log, idx) in filteredLogs" :key="idx" class="log-row" :class="'log-' + log.level">
           <span class="log-time">{{ formatTime(log.ts) }}</span>
-          <span class="log-level" :class="log.level">{{ ({ info: '信息', warn: '警告', error: '错误' }[log.level] || log.level).toUpperCase() }}</span>
+          <span class="log-level" :class="log.level">{{ levelLabel(log.level) }}</span>
+          <span class="log-task" :title="log.taskId">{{ shortTaskId(log.taskId) }}</span>
           <span class="log-msg">{{ log.message }}</span>
         </div>
-        <div v-if="logs.length === 0" class="log-empty">
-          等待日志…
-        </div>
+        <el-empty v-if="filteredLogs.length === 0" description="暂无匹配日志" :image-size="72" />
       </div>
     </div>
 
-    <div v-else class="audit-card">
+    <div v-else class="log-card">
+      <div class="log-card-head">
+        <div>
+          <strong>操作审计</strong>
+          <span>记录用户、资源和管理动作</span>
+        </div>
+        <em>{{ auditLogs.length }} 条</em>
+      </div>
       <el-table :data="auditLogs" size="small" border v-loading="auditLoading" empty-text="暂无审计记录">
         <el-table-column label="时间" width="150">
           <template #default="{ row }">{{ formatDateTime(row.ts) }}</template>
@@ -83,12 +102,13 @@ import { ElMessage } from 'element-plus'
 const logs = ref([])
 const logContainer = ref(null)
 const activeView = ref('sync')
+const levelFilter = ref('')
 const auditLogs = ref([])
 const auditLoading = ref(false)
 const auditResourceType = ref('')
 const viewOptions = [
-  { label: '实时日志', value: 'sync' },
-  { label: '操作审计', value: 'audit' },
+  { label: '实时日志', value: 'sync', description: '任务执行过程与错误' },
+  { label: '操作审计', value: 'audit', description: '用户操作与权限记录' },
 ]
 
 const stats = computed(() => {
@@ -97,6 +117,11 @@ const stats = computed(() => {
     if (s[l.level] !== undefined) s[l.level]++
   }
   return s
+})
+
+const filteredLogs = computed(() => {
+  if (!levelFilter.value) return logs.value
+  return logs.value.filter(log => log.level === levelFilter.value)
 })
 
 function formatTime(ts) {
@@ -111,7 +136,7 @@ function formatDateTime(ts) {
 
 function scrollToBottom() {
   nextTick(() => {
-    const body = logContainer.value?.querySelector('.terminal-body')
+    const body = logContainer.value?.querySelector('.sync-log-list')
     if (body) body.scrollTop = body.scrollHeight
   })
 }
@@ -144,7 +169,7 @@ async function loadAuditLogs() {
 async function clearAll() {
   logs.value = []
   await clearLogs()
-  ElMessage.success('日志已清空')
+  ElMessage.success('可见日志已清空')
 }
 
 function onSyncLog(event) {
@@ -152,7 +177,15 @@ function onSyncLog(event) {
 }
 
 function resourceLabel(type) {
-  return ({ connection: '连接', task: '任务', system: '系统' }[type] || type || '-')
+  return ({ connection: '连接', task: '任务', system: '系统', user: '用户' }[type] || type || '-')
+}
+
+function levelLabel(level) {
+  return ({ info: '信息', warn: '警告', error: '错误' }[level] || level || '-')
+}
+
+function shortTaskId(taskId) {
+  return taskId ? `任务 ${String(taskId).slice(0, 8)}` : '系统'
 }
 
 function actionLabel(action) {
@@ -174,6 +207,8 @@ function actionLabel(action) {
     'task.reconcile': '一致性校验',
     'task.failures.clear': '清除失败',
     'task.failures.retry': '重试失败',
+    'user.delete': '删除用户',
+    'user.role.update': '修改角色',
     'system.doctor': '系统检查',
   }[action] || action)
 }
@@ -197,152 +232,158 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.logs-page {}
+.logs-page {
+  display: grid;
+  gap: 16px;
+}
 
-.page-actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
+.log-switcher {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
-.log-stats {
-  display: flex;
-  gap: 16px;
-  flex: 1;
+.log-mode {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  text-align: left;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.log-mode:hover,
+.log-mode.active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+.log-mode span {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.log-mode small {
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
+.log-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.log-stats,
 .audit-tools {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: 1;
-  justify-content: flex-end;
-}
-
-.audit-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 16px;
-  box-shadow: var(--shadow-sm);
+  flex-wrap: wrap;
 }
 
 .stat-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-}
-
-.stat-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-}
-.stat-dot.info { background: #60a5fa; }
-.stat-dot.warn { background: #fbbf24; }
-.stat-dot.error { background: #f87171; }
-
-/* Terminal */
-.terminal {
-  background: #1e1e2e;
-  border-radius: var(--radius-lg);
   border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.stat-item:hover,
+.stat-item.active { border-color: var(--accent); color: var(--accent); }
+.stat-item.info.active { color: #2563eb; border-color: rgba(37,99,235,0.35); }
+.stat-item.warn.active { color: var(--amber); border-color: rgba(217,119,6,0.35); }
+.stat-item.error.active { color: var(--red); border-color: rgba(220,38,38,0.35); }
+
+.log-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
   overflow: hidden;
-  box-shadow: var(--shadow-md);
 }
 
-.terminal-header {
+.log-card-head {
   display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
-  background: rgba(255,255,255,0.03);
+  padding: 14px 16px;
   border-bottom: 1px solid var(--border-subtle);
 }
-
-.terminal-dots {
-  display: flex;
-  gap: 6px;
+.log-card-head div {
+  display: grid;
+  gap: 3px;
 }
-.dot {
-  width: 10px; height: 10px;
-  border-radius: 50%;
+.log-card-head strong {
+  font-size: 14px;
+  color: var(--text-primary);
 }
-.dot.red { background: #ff5f57; }
-.dot.yellow { background: #febc2e; }
-.dot.green { background: #28c840; }
-
-.terminal-title {
-  flex: 1;
+.log-card-head span,
+.log-card-head em {
   font-size: 12px;
   color: var(--text-tertiary);
-  font-family: var(--font-mono);
+  font-style: normal;
 }
 
-.terminal-count {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  opacity: 0.5;
-}
-
-.terminal-body {
-  height: calc(100vh - 300px);
-  min-height: 400px;
+.sync-log-list {
+  height: calc(100vh - 340px);
+  min-height: 360px;
   overflow-y: auto;
-  padding: 16px 20px;
-  font-family: var(--font-mono);
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 86px 58px 100px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: 13px;
-  line-height: 1.7;
 }
+.log-row:last-child { border-bottom: 0; }
+.log-row.log-error { background: rgba(220,38,38,0.04); }
+.log-row.log-warn { background: rgba(217,119,6,0.04); }
 
-.log-line {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 3px 0;
-}
-
-.log-time {
-  color: #6c6f85;
-  flex-shrink: 0;
+.log-time,
+.log-task {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
   font-size: 12px;
-  min-width: 72px;
 }
 
 .log-level {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
+  justify-self: start;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.5px;
-  min-width: 48px;
-  text-align: center;
 }
-
-.log-level.info { background: rgba(96,165,250,0.12); color: #60a5fa; }
-.log-level.warn { background: rgba(251,191,36,0.12); color: #fbbf24; }
-.log-level.error { background: rgba(248,113,113,0.12); color: #f87171; }
+.log-level.info { background: rgba(37,99,235,0.10); color: #2563eb; }
+.log-level.warn { background: rgba(217,119,6,0.12); color: var(--amber); }
+.log-level.error { background: rgba(220,38,38,0.12); color: var(--red); }
 
 .log-msg {
-  color: #cdd6f4;
-  word-break: break-all;
+  color: var(--text-secondary);
+  word-break: break-word;
+  line-height: 1.5;
 }
 
-.log-error .log-msg { color: #fca5a5; }
-.log-warn .log-msg { color: #fde68a; }
-
-.log-empty {
-  color: var(--text-tertiary);
-  font-style: italic;
-  text-align: center;
-  padding: 60px 0;
-  opacity: 0.5;
+@media (max-width: 760px) {
+  .log-switcher { grid-template-columns: 1fr; }
+  .log-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .log-row {
+    grid-template-columns: 76px 54px minmax(0, 1fr);
+  }
+  .log-task { display: none; }
 }
 </style>

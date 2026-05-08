@@ -1293,7 +1293,11 @@ app.get('/api/logs', (req, res) => {
 
 app.delete('/api/logs', (req, res) => {
   const config = loadConfig();
-  config.syncLogs = [];
+  if (req.user.role === 'super_admin') {
+    config.syncLogs = [];
+  } else {
+    config.syncLogs = config.syncLogs.filter((log) => log.userId && log.userId !== req.user.id);
+  }
   saveConfig(config);
   res.json({ ok: true });
 });
