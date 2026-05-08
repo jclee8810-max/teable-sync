@@ -11,8 +11,8 @@
     "start": "cd server && node src/index.js",
     "e2e:smoke": "node server/scripts/run-e2e-smoke.mjs",
     "docker:build": "npm run build && docker build -t teable-sync .",
-    "docker:up": "docker-compose up -d",
-    "docker:down": "docker-compose down"
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
