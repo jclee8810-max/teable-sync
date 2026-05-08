@@ -229,18 +229,21 @@
         <div class="section-divider">
           <span class="section-icon">⟐</span> 字段映射
           <el-tag v-if="mappingLoading" size="small" type="info" style="margin-left:8px">智能匹配中...</el-tag>
-          <el-tag v-if="mappingSuggestions && !mappingLoading" size="small" :type="mappingSuggestions.mappings.length > 0 ? 'success' : 'info'" style="margin-left:8px">
-            {{ mappingSuggestions.mappings.length }} 个已匹配{{ mappingSuggestions.unmatchedSource.length > 0 ? ` + ${mappingSuggestions.unmatchedSource.length} 待创建` : '' }}
+          <el-tag v-if="mappingSuggestions && !mappingLoading" size="small" :type="activeMappingCount > 0 ? 'success' : 'info'" style="margin-left:8px">
+            {{ activeMappingCount }} 个将同步{{ skippedMappingCount > 0 ? `，${skippedMappingCount} 个已跳过` : '' }}
           </el-tag>
         </div>
         <div v-if="sourceColumns.length > 0 && targetFields.length > 0" class="mapping-area">
           <el-alert type="info" :closable="false" style="margin-bottom:12px">
-            智能匹配支持同名、驼峰转换（user_name↔userName）、模糊匹配。类型兼容性自动检测。
+            智能匹配会自动跳过不兼容字段。需要承担转换风险时，可手动强制包含。
           </el-alert>
-          <el-table :data="mappingRows" size="small" border row-key="source">
+          <el-alert v-if="skippedMappingCount > 0" type="warning" :closable="false" style="margin-bottom:12px">
+            已跳过 {{ skippedMappingCount }} 个类型不兼容字段，保存后不会同步这些字段。
+          </el-alert>
+          <el-table :data="mappingRows" size="small" border row-key="source" :row-class-name="mappingRowClassName">
             <el-table-column label="源字段 (SQL)" min-width="180">
               <template #default="{ row }">
-                <el-select v-model="row.source" placeholder="选择源字段" style="width:100%" filterable>
+                <el-select v-model="row.source" placeholder="选择源字段" style="width:100%" filterable @change="refreshMappingCompatibility(row)">
                   <el-option v-for="c in sourceColumns" :key="c.name" :label="`${c.name} (${c.type})`" :value="c.name" />
                 </el-select>
               </template>
@@ -252,18 +255,27 @@
             </el-table-column>
             <el-table-column label="目标字段 (Teable)" min-width="180">
               <template #default="{ row }">
-                <el-select v-model="row.target" placeholder="选择目标字段" style="width:100%" filterable>
+                <el-select v-model="row.target" placeholder="选择目标字段" style="width:100%" filterable @change="refreshMappingCompatibility(row)">
                   <el-option v-for="f in targetFields" :key="f.name" :label="`${f.name} (${f.type})`" :value="f.name" />
                   <!-- For auto-create: add the source name as option -->
                   <el-option v-if="!targetFields.find(f => f.name === row.source)" :key="'create-'+row.source" :label="`${row.source} (自动创建)`" :value="row.source" />
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column width="90" align="center" label="兼容性">
+            <el-table-column width="140" align="center" label="处理">
               <template #default="{ row }">
-                <span v-if="row._typeSafe === undefined" class="compat-tag compat-unknown">—</span>
-                <span v-else-if="row._typeSafe" class="compat-tag compat-safe">✓ 兼容</span>
-                <span v-else class="compat-tag compat-warn" :title="row._typeWarning">⚠ {{ row._typeWarning ? row._typeWarning.slice(0, 8) : '不兼容' }}</span>
+                <span v-if="row._typeSafe === undefined" class="compat-tag compat-unknown">手动</span>
+                <span v-else-if="row._typeSafe" class="compat-tag compat-safe">将同步</span>
+                <button
+                  v-else
+                  type="button"
+                  class="compat-action"
+                  :class="{ forced: row._forceInclude }"
+                  :title="row._typeWarning"
+                  @click="toggleForceMapping(row)"
+                >
+                  {{ row._forceInclude ? '强制同步' : '已跳过' }}
+                </button>
               </template>
             </el-table-column>
             <el-table-column width="50" align="center">
@@ -333,8 +345,8 @@
           </el-col>
           <el-col :span="8">
             <el-form-item label="Teable 写入批量">
-              <el-input-number v-model="form.batchSize" :min="50" :max="1000" :step="50" style="width:100%" />
-              <div class="form-help">Teable 单次最多写入 1000 条，保存时后端也会限制在 50-1000。</div>
+              <el-input-number v-model="form.batchSize" :min="10" :max="1000" :step="50" style="width:100%" />
+              <div class="form-help">每次向 Teable 写入的记录数，建议 200-500；Teable 单次最多 1000 条。</div>
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -612,6 +624,9 @@ const selectedLogTask = ref(null)
 const hydratingTaskForm = ref(false)
 let progressTimer = null
 
+const activeMappingCount = computed(() => mappingRows.value.filter(rowShouldSync).length)
+const skippedMappingCount = computed(() => mappingRows.value.filter(row => row.source && row.target && row._typeSafe === false && !row._forceInclude).length)
+
 // Watermark candidates (fetched from API when source table changes)
 const watermarkCandidates = ref({ pkCol: null, candidates: { timestamp: [], rowversion: [], auto_pk: [] } })
 const watermarkLoading = ref(false)
@@ -857,6 +872,64 @@ function closePreview() {
 
 function addMapping() { mappingRows.value.push({ source: '', target: '' }) }
 function removeMapping(i) { mappingRows.value.splice(i, 1) }
+function rowShouldSync(row) {
+  return Boolean(row.source && row.target && (row._typeSafe !== false || row._forceInclude))
+}
+function toggleForceMapping(row) {
+  row._forceInclude = !row._forceInclude
+}
+function mappingRowClassName({ row }) {
+  if (row.source && row.target && row._typeSafe === false && !row._forceInclude) return 'mapping-row-skipped'
+  return ''
+}
+function getSourceColumn(source) {
+  return sourceColumns.value.find(c => c.name === source)
+}
+function getTargetField(target) {
+  return targetFields.value.find(f => f.name === target)
+}
+function isSafeMappingPair(sourceColumn, targetField) {
+  if (!sourceColumn || !targetField) return undefined
+  const sourceType = String(sourceColumn.type || '').toLowerCase()
+  const targetType = String(targetField.type || '').toLowerCase()
+  if (['singlelinetext', 'longtext'].includes(targetType)) {
+    if (/(char|text|uuid|uniqueidentifier|json|xml)/.test(sourceType)) return { safe: true }
+    return { safe: false, warning: '转文本有风险' }
+  }
+  if (targetType === 'number') {
+    return /(int|decimal|numeric|float|double|real|money)/.test(sourceType)
+      ? { safe: true }
+      : { safe: false, warning: '目标需要数字' }
+  }
+  if (targetType === 'date') {
+    return /(date|time|timestamp)/.test(sourceType)
+      ? { safe: true }
+      : { safe: false, warning: '目标需要日期' }
+  }
+  if (targetType === 'checkbox') {
+    return /(bit|bool|boolean)/.test(sourceType)
+      ? { safe: true }
+      : { safe: false, warning: '目标需要布尔' }
+  }
+  return { safe: false, warning: '不兼容的目标类型' }
+}
+function refreshMappingCompatibility(row) {
+  const sourceColumn = getSourceColumn(row.source)
+  const targetField = getTargetField(row.target)
+  if (!sourceColumn || !targetField) {
+    row._typeSafe = undefined
+    row._typeWarning = ''
+    row._forceInclude = false
+    return
+  }
+  const result = isSafeMappingPair(sourceColumn, targetField)
+  row._typeSafe = result?.safe
+  row._typeWarning = result?.warning || ''
+  row._forceInclude = false
+}
+function refreshAllMappingCompatibility() {
+  for (const row of mappingRows.value) refreshMappingCompatibility(row)
+}
 
 function confidenceClass(row) {
   if (row._confidenceLevel === 'exact') return 'conf-exact'
@@ -894,6 +967,7 @@ async function smartMap() {
       _confidenceLevel: m.confidenceLevel,
       _typeSafe: m.typeSafe,
       _typeWarning: m.typeWarning,
+      _forceInclude: false,
     }));
     // Auto-create unmatched source fields
     for (const us of result.unmatchedSource) {
@@ -905,14 +979,14 @@ async function smartMap() {
         _confidenceLevel: 'auto_create',
         _typeSafe: us.suggestionSafe !== false,
         _typeWarning: us.suggestionWarning,
+        _forceInclude: false,
       });
     }
     if (mappingRows.value.length === 0) {
       ElMessage.info('没有可匹配的字段');
     } else {
-      const safe = mappingRows.value.filter(r => r._typeSafe).length;
-      const warn = mappingRows.value.length - safe;
-      ElMessage.success(`已智能匹配 ${mappingRows.value.length} 个字段${warn > 0 ? `，${warn} 个存在类型转换风险` : ''}`);
+      const skipped = skippedMappingCount.value;
+      ElMessage.success(`已智能匹配 ${mappingRows.value.length} 个字段${skipped > 0 ? `，${skipped} 个类型不兼容已跳过` : ''}`);
     }
   } catch (err) {
     ElMessage.error('智能匹配失败: ' + err.message);
@@ -1115,9 +1189,9 @@ async function openDialog(task = null) {
       }
       const mapping = task.columnMapping || task.fieldMapping
       if (Array.isArray(mapping)) {
-        mappingRows.value = mapping.map(m => ({ source: m.source, target: m.target }))
+        mappingRows.value = mapping.map(m => ({ source: m.source, target: m.target, _forceInclude: Boolean(m.forceInclude) }))
       } else {
-        mappingRows.value = Object.entries(mapping || {}).map(([s, t]) => ({ source: s, target: t }))
+        mappingRows.value = Object.entries(mapping || {}).map(([s, t]) => ({ source: s, target: t, _forceInclude: true }))
       }
       // Migrate sourceTimestampColumn → watermarkType/watermarkColumn
       if (task.watermarkType === undefined && task.sourceTimestampColumn) {
@@ -1131,6 +1205,7 @@ async function openDialog(task = null) {
       if (tgtConnId) {
         await onTeableConnChange({ preserveSelection: true })
       }
+      refreshAllMappingCompatibility()
     } finally {
       hydratingTaskForm.value = false
     }
@@ -1154,9 +1229,17 @@ async function saveTask() {
   if (!form.value.targetConnectionId || !form.value.targetTableId) { ElMessage.warning('请选择 Teable 目标表'); return }
   saving.value = true
   try {
+    const forcedRows = mappingRows.value.filter(row => row.source && row.target && row._typeSafe === false && row._forceInclude)
+    if (forcedRows.length > 0) {
+      await ElMessageBox.confirm(
+        `有 ${forcedRows.length} 个类型不兼容字段被强制同步，可能导致写入失败或数据格式异常。确定继续保存吗？`,
+        '确认字段映射',
+        { type: 'warning' }
+      )
+    }
     const columnMapping = {}
     for (const row of mappingRows.value) {
-      if (row.source && row.target) columnMapping[row.source] = row.target
+      if (rowShouldSync(row)) columnMapping[row.source] = row.target
     }
     const payload = { ...form.value, columnMapping }
     delete payload._baseId
@@ -1177,6 +1260,7 @@ async function saveTask() {
     dialogVisible.value = false
     await loadAll()
   } catch (err) {
+    if (err === 'cancel' || err?.message === 'cancel') return
     ElMessage.error('保存失败: ' + err.message)
   } finally {
     saving.value = false
@@ -1779,6 +1863,24 @@ onUnmounted(() => {
 .compat-safe { background: rgba(16,185,129,0.12); color: var(--green); }
 .compat-warn { background: rgba(245,158,11,0.12); color: var(--amber); cursor: help; }
 .compat-unknown { color: var(--text-tertiary); }
+.compat-action {
+  border: 1px solid rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.10);
+  color: var(--amber);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.compat-action.forced {
+  border-color: rgba(239,68,68,0.45);
+  background: rgba(239,68,68,0.10);
+  color: var(--red);
+}
+:deep(.mapping-row-skipped) {
+  opacity: 0.58;
+  background: rgba(245,158,11,0.05);
+}
 
 @media (max-width: 1100px) {
   .task-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }

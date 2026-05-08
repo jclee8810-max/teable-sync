@@ -127,7 +127,7 @@ function clampInt(value, fallback, min, max) {
 function cleanTaskInput(body = {}) {
   const { id, userId, createdAt, deletedAt, status, enabled, lastSyncAt, connectionStatus, ...cleaned } = body;
   cleaned.pageSize = clampInt(cleaned.pageSize, 1000, 100, 5000);
-  cleaned.batchSize = clampInt(cleaned.batchSize, 500, 50, 1000);
+  cleaned.batchSize = clampInt(cleaned.batchSize, 500, 10, 1000);
   cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
   if ('syncMode' in cleaned && !['manual', 'scheduled', 'realtime', 'incremental'].includes(cleaned.syncMode)) cleaned.syncMode = 'manual';
   if (!['ignore', 'soft_delete', 'hard_delete'].includes(cleaned.deletionMode)) cleaned.deletionMode = 'ignore';
