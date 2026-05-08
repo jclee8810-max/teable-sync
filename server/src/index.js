@@ -1295,7 +1295,14 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(`[Reconcile] task ${task.id} failed:`, err);
+    const message = err?.message || '一致性校验失败';
+    const status = /connect|timeout|ECONN|ENOTFOUND|EAI_AGAIN|Teable API/i.test(message)
+      ? 502
+      : /主键|配置|非法|缺少|Connection not found/i.test(message)
+        ? 400
+        : 500;
+    res.status(status).json({ error: message });
   }
 });
 

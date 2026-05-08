@@ -29,6 +29,9 @@ api.interceptors.response.use(
       localStorage.removeItem(USER_KEY)
       window.location.hash = '#/login'
     }
+    if (err.response?.data?.error) {
+      err.message = err.response.data.error
+    }
     return Promise.reject(err)
   }
 )

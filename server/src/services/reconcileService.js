@@ -1,6 +1,7 @@
 import { query, getTableSchema } from './dbService.js';
 import { getTeableFields, getTeableRecords } from './teableService.js';
 import { convertValue } from './typeConverter.js';
+import { detectWatermarkCandidates } from './syncEngine.js';
 
 const DEFAULT_LIMIT = 10000;
 const DEFAULT_SAMPLE_LIMIT = 100;
@@ -159,8 +160,9 @@ export async function reconcileTask(task, srcConn, tgtConn, options = {}) {
   const sourceSchema = await getTableSchema(srcConn, task.sourceTable, task.sourceDatabase || null);
   const targetFields = await getTeableFields(tgtConn, task.targetTableId);
   const mapping = task.columnMapping || {};
-  const pkCol = task.sourcePrimaryKey;
-  if (!pkCol) throw new Error('一致性校验需要先在任务中配置主键列');
+  const { pkCol: detectedPkCol } = await detectWatermarkCandidates(srcConn, task.sourceTable, task.sourceDatabase || null);
+  const pkCol = task.sourcePrimaryKey || detectedPkCol;
+  if (!pkCol) throw new Error('一致性校验无法自动检测主键列，请先在任务中配置主键列');
   const effectiveMapping = Object.keys(mapping).length > 0
     ? mapping
     : Object.fromEntries(sourceSchema.map((col) => [col.name, col.name]));
