@@ -46,6 +46,35 @@ function toPositiveInt(value, fallback, max = 5000) {
   return Math.min(Math.floor(n), max);
 }
 
+function isSafeIdentifier(name) {
+  return /^[a-zA-Z0-9_]+$/.test(name || '');
+}
+
+function isTimestampLike(value) {
+  return value instanceof Date || typeof value === 'string' || typeof value === 'number';
+}
+
+export function normalizeTimestampWatermark(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (value instanceof Date) return value.toISOString();
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toISOString();
+}
+
+export function compareWatermarkValues(a, b) {
+  if (a === undefined || a === null) return -1;
+  if (b === undefined || b === null) return 1;
+  if (isTimestampLike(a) || isTimestampLike(b)) {
+    const ta = new Date(a).getTime();
+    const tb = new Date(b).getTime();
+    if (!Number.isNaN(ta) && !Number.isNaN(tb)) return ta - tb;
+  }
+  if (a > b) return 1;
+  if (a < b) return -1;
+  return 0;
+}
+
 function buildPagedSql(type, baseSql, orderBy, limit, offset, paramStart) {
   if (type === 'mssql') {
     return {
@@ -118,6 +147,19 @@ function createRecordFields(row, mapping, srcTypeMap, tgtTypeMap, log) {
 
 function extractBatchPrimaryKeys(records, pkFieldName) {
   return records.map((rec) => rec.fields?.[pkFieldName]).filter((v) => v !== undefined && v !== null).map(String);
+}
+
+function validateTaskConfig(task, pkCol, watermark) {
+  if (!task?.id) throw new Error('任务缺少 id');
+  if (!task.sourceTable) throw new Error('任务缺少源表 sourceTable');
+  if (!task.targetTableId) throw new Error('任务缺少目标表 targetTableId');
+  if (!pkCol) throw new Error('无法检测到主键列,请手动配置 sourcePrimaryKey');
+  if (!isSafeIdentifier(pkCol)) throw new Error('非法列名: pkCol=' + pkCol);
+  if (watermark.col && !isSafeIdentifier(watermark.col)) throw new Error('非法列名: watermark=' + watermark.col);
+  if (task.deletionMode && task.deletionMode !== 'ignore' && watermark.type !== 'full_scan') {
+    return { deletionSkipped: true };
+  }
+  return { deletionSkipped: false };
 }
 
 function getSyncState(taskId) {
@@ -217,7 +259,7 @@ export async function detectWatermarkCandidates(srcConn, tableName, database = n
  * Resolve effective watermark strategy + column for a task.
  * Priority: explicit task config → auto-detect
  */
-function resolveWatermark(task, pkCol, candidates) {
+export function resolveWatermark(task, pkCol, candidates) {
   const explicit = task.watermarkType; // 'timestamp' | 'rowversion' | 'auto_pk' | 'full_scan'
   const explicitCol = task.watermarkColumn || task.sourceTimestampColumn; // override the auto-selected column
 
@@ -325,12 +367,8 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     checkCancelled();
     const { pkCol: autoPkCol, candidates } = await detectWatermarkCandidates(srcConn, task.sourceTable, db);
     const pkCol = task.sourcePrimaryKey || autoPkCol;
-    if (!pkCol) throw new Error('无法检测到主键列,请手动配置 sourcePrimaryKey');
-
-    const safeId = (name) => /^[a-zA-Z0-9_]+$/.test(name);
-    if (!safeId(pkCol)) throw new Error('非法列名: pkCol=' + pkCol);
-
     const watermark = resolveWatermark(task, pkCol, candidates);
+    validateTaskConfig(task, pkCol, watermark);
     const state = getSyncState(taskId);
     const table = quoteIdentifier(srcConn.type, task.sourceTable);
     const pkIdentifier = quoteIdentifier(srcConn.type, pkCol);
@@ -344,7 +382,6 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
 
     if (watermark.type === 'timestamp') {
       const tsCol = watermark.col;
-      if (!safeId(tsCol)) throw new Error('非法列名: tsCol=' + tsCol);
       if (state.lastSyncAt) {
         baseSql += ' WHERE ' + quoteIdentifier(srcConn.type, tsCol) + ' > ' + placeholder(srcConn.type, baseParams.length);
         baseParams.push(state.lastSyncAt);
@@ -352,7 +389,6 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       }
     } else if (watermark.type === 'rowversion') {
       const rvCol = watermark.col;
-      if (!safeId(rvCol)) throw new Error('非法列名: rvCol=' + rvCol);
       if (srcConn.type !== 'mssql') throw new Error('rowversion 策略仅支持 MSSQL');
       if (state.watermarkValue) {
         baseSql += ' WHERE ' + quoteIdentifier(srcConn.type, rvCol) + ' > CONVERT(varbinary(8), ' + placeholder(srcConn.type, baseParams.length) + ', 1)';
@@ -437,6 +473,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     const seenSourcePks = new Set();
     const rowversionValues = [];
     const pkValues = [];
+    const timestampValues = [];
 
     async function flushWrites(toInsert, toUpdate) {
       for (let i = 0; i < toInsert.length; i += batchSize) {
@@ -498,6 +535,9 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
           const pkVal = String(pkValRaw);
           seenSourcePks.add(pkVal);
           pkValues.push(pkValRaw);
+          if (watermark.type === 'timestamp' && watermark.col && row[watermark.col] !== undefined && row[watermark.col] !== null) {
+            timestampValues.push(row[watermark.col]);
+          }
           if (watermark.type === 'rowversion' && watermark.col && row[watermark.col]) rowversionValues.push(row[watermark.col]);
           const existing = existingMap.get(pkVal);
           const recordFields = createRecordFields(row, mapping, srcTypeMap, tgtTypeMap, log);
@@ -590,8 +630,11 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
 
     if (errorCount > 0) throw new Error('同步存在 ' + errorCount + ' 条失败记录，未推进增量水位');
 
-    const newState = { ...state, lastSyncAt: new Date().toISOString() };
-    if (watermark.type === 'rowversion' && rowversionValues.length > 0) {
+    const newState = { ...state, lastRunAt: new Date().toISOString(), watermarkType: watermark.type, watermarkColumn: watermark.col };
+    if (watermark.type === 'timestamp' && timestampValues.length > 0) {
+      const maxTs = timestampValues.reduce((max, value) => (compareWatermarkValues(value, max) > 0 ? value : max), timestampValues[0]);
+      newState.lastSyncAt = normalizeTimestampWatermark(maxTs);
+    } else if (watermark.type === 'rowversion' && rowversionValues.length > 0) {
       const maxRv = rowversionValues.reduce((max, rv) => {
         const rawHex = Buffer.isBuffer(rv) ? rv.toString('hex') : String(rv).replace(/^0x/i, '');
         const hex = '0x' + rawHex;
@@ -601,6 +644,8 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     } else if (watermark.type === 'auto_pk' && pkValues.length > 0) {
       const maxPk = pkValues.reduce((a, b) => (a > b ? a : b));
       if (newState.watermarkPkValue === undefined || newState.watermarkPkValue === null || maxPk > newState.watermarkPkValue) newState.watermarkPkValue = maxPk;
+    } else if (watermark.type === 'full_scan') {
+      newState.lastSyncAt = newState.lastRunAt;
     }
     saveSyncState(taskId, newState);
 

@@ -129,6 +129,7 @@ function cleanTaskInput(body = {}) {
   cleaned.pageSize = clampInt(cleaned.pageSize, 1000, 100, 5000);
   cleaned.batchSize = clampInt(cleaned.batchSize, 500, 50, 1000);
   cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
+  if ('syncMode' in cleaned && !['manual', 'scheduled', 'realtime', 'incremental'].includes(cleaned.syncMode)) cleaned.syncMode = 'manual';
   if (!['ignore', 'soft_delete', 'hard_delete'].includes(cleaned.deletionMode)) cleaned.deletionMode = 'ignore';
   if (!/^[a-zA-Z0-9_]+$/.test(cleaned.softDeleteField || 'deleted')) cleaned.softDeleteField = 'deleted';
   return cleaned;
@@ -354,6 +355,10 @@ function getTaskStartMissingFields(task) {
   return missingFields;
 }
 
+function isAutoSyncMode(mode) {
+  return ['scheduled', 'realtime', 'incremental'].includes(mode || 'manual');
+}
+
 async function runScheduledTask(taskId, trigger, mode, intervalSec) {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === taskId);
@@ -443,6 +448,9 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
 
   const intervalSec = task.syncInterval || 300;
   const mode = task.syncMode || 'scheduled';
+  if (!isAutoSyncMode(mode)) {
+    throw Object.assign(new Error('手动任务不能启动自动同步，请改为定时或实时模式'), { status: 400 });
+  }
 
   const cfg = loadConfig();
   const idx = cfg.syncTasks.findIndex((t) => t.id === task.id);
@@ -881,6 +889,7 @@ app.post('/api/tasks', (req, res) => {
   const task = {
     ...body,
     id: crypto.randomUUID(),
+    syncMode: body.syncMode || 'manual',
     enabled: false,
     createdAt: new Date().toISOString(),
     lastSyncAt: null,
@@ -912,6 +921,14 @@ app.put('/api/tasks/:id', (req, res) => {
   const nextTask = { ...task, ...updates, id: task.id, userId: task.userId, createdAt: task.createdAt };
   const validation = validateTaskConnections(config, req.user, nextTask);
   if (validation.error) return res.status(400).json({ error: validation.error });
+  if (!isAutoSyncMode(nextTask.syncMode)) {
+    if (syncScheduler.has(task.id)) {
+      clearInterval(syncScheduler.get(task.id).intervalId);
+      syncScheduler.delete(task.id);
+    }
+    nextTask.enabled = false;
+    nextTask.status = 'idle';
+  }
   config.syncTasks[idx] = nextTask;
   saveConfig(config);
   appendAuditLog(req.user, 'task.update', {
