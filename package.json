@@ -10,6 +10,7 @@
     "build": "cd client && npm run build",
     "start": "cd server && node src/index.js",
     "e2e:smoke": "node server/scripts/run-e2e-smoke.mjs",
+    "e2e:contract": "node server/scripts/run-api-contract-smoke.mjs",
     "check:release": "node server/scripts/pre-release-check.mjs",
     "stress:readiness": "node server/scripts/large-sync-readiness.mjs",
     "docker:build": "npm run build && docker build -t teable-sync .",

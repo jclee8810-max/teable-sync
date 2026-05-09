@@ -48,6 +48,7 @@ try {
   runStep('Docker service status', docker, ['compose', 'ps']);
   runStep('API health', 'curl', ['-fsS', 'http://127.0.0.1:3101/health']);
   runStep('API version', 'curl', ['-fsS', 'http://127.0.0.1:3101/api/version']);
+  runStep('API contract smoke', 'npm', ['run', 'e2e:contract']);
   runStep('Auto resume log check', docker, ['compose', 'logs', '--tail=80', 'teable-sync'], { required: false });
   runStep('GitHub Actions workflow exists', 'test', ['-f', '.github/workflows/docker-publish.yml']);
 } catch (err) {

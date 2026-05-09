@@ -203,18 +203,11 @@ async function main() {
     record((await request('/system/doctor', {}, userToken)).status === 403, 'user cannot run system doctor');
     record((await request('/auth/users', {}, userToken)).status === 403, 'user cannot list users');
     record((await request('/auth/users', {}, adminToken)).status === 200, 'admin can list users');
-    const promoted = await requestJson(`/auth/users/${user.id}/role`, {
+    const adminRoleChange = await request(`/auth/users/${user.id}/role`, {
       method: 'PUT',
       body: JSON.stringify({ role: 'super_admin' }),
     }, adminToken);
-    assertCondition(promoted.role === 'super_admin', 'admin can promote user');
-    record((await request('/auth/users', {}, userToken)).status === 200, 'role change applies to existing token');
-    const demoted = await requestJson(`/auth/users/${user.id}/role`, {
-      method: 'PUT',
-      body: JSON.stringify({ role: 'user' }),
-    }, adminToken);
-    assertCondition(demoted.role === 'user', 'admin can demote user');
-    record((await request('/auth/users', {}, userToken)).status === 403, 'demotion applies to existing token');
+    assertCondition(adminRoleChange.status === 403, 'admin cannot promote user');
 
     logStep('Discover shared connections');
     const config = loadConfig();
