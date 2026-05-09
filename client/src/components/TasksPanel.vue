@@ -61,7 +61,7 @@
               <button class="fs-btn fs-btn-ghost" @click="openTaskDetail(task)">
                 <el-icon><View /></el-icon>详情
               </button>
-              <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running' || !task.connectionStatus?.ok">
+              <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="isManualRunDisabled(task)" :title="manualRunTitle(task)">
                 <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
                 <el-icon v-else class="is-loading"><Loading /></el-icon>
                 {{ (task._running || task.status === 'running') ? '同步中' : '同步' }}
@@ -300,7 +300,7 @@
         <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="openDialog(detailTask)" :disabled="!isOwner(detailTask)">编辑配置</button>
         <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">重跑全量</button>
         <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="continueInitialization(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">继续初始化</button>
-        <button v-if="detailTask" class="fs-btn fs-btn-primary" @click="manualRun(detailTask)" :disabled="detailTask._running || detailTask.status === 'running' || !detailTask.connectionStatus?.ok">立即同步</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-primary" @click="manualRun(detailTask)" :disabled="isManualRunDisabled(detailTask)" :title="manualRunTitle(detailTask)">立即同步</button>
       </template>
     </el-dialog>
 
@@ -1183,6 +1183,18 @@ function healthRate(health) {
 function isAutoSyncMode(mode) {
   return ['scheduled', 'realtime', 'incremental'].includes(mode || 'manual')
 }
+function isRealtimeTask(task) {
+  return (task?.syncMode || 'manual') === 'realtime'
+}
+function isManualRunDisabled(task) {
+  return isRealtimeTask(task) || task?._running || task?.status === 'running' || !task?.connectionStatus?.ok
+}
+function manualRunTitle(task) {
+  if (isRealtimeTask(task)) return '准实时同步任务由启动/停止调度控制，不支持手动同步'
+  if (!task?.connectionStatus?.ok) return '连接异常，需先修复数据源后再同步'
+  if (task?._running || task?.status === 'running') return '任务正在同步中'
+  return '立即执行一次同步'
+}
 function isTaskRunning(task) {
   const p = taskProgress.value[task.id]
   return task.status === 'running' || task._running || p?.status === 'running' || p?.status === 'cancelling'
@@ -1863,6 +1875,10 @@ async function removeTemplate(template) {
 }
 
 async function manualRun(task) {
+  if (isRealtimeTask(task)) {
+    ElMessage.warning('准实时同步任务由启动/停止调度控制，无需手动同步')
+    return
+  }
   task._running = true
   try {
     await runTask(task.id)

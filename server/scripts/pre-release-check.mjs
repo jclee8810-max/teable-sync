@@ -40,6 +40,7 @@ try {
   runStep('Git diff whitespace check', 'git', ['diff', '--check']);
   runStep('Server entry syntax check', 'node', ['--check', 'server/src/index.js']);
   runStep('Sync engine syntax check', 'node', ['--check', 'server/src/services/syncEngine.js']);
+  runStep('Sync reliability self-test', 'npm', ['run', 'test:reliability']);
   runStep('Frontend build', 'npm', ['run', 'build']);
 
   const docker = findDocker();
