@@ -11,7 +11,7 @@ import oauthRouter from './routes/oauth.js';
 import { authMiddleware, verifyToken } from './middleware/auth.js';
 import { canReadConnection, validateTaskConnections } from './services/accessControl.js';
 import { decryptConfigSecrets, encryptConfigSecrets } from './services/secretStore.js';
-import { getSyncFailures, getSyncFailureCounts, clearSyncFailures, removeSyncFailures, markSyncFailureRetried } from './services/syncFailures.js';
+import { getSyncFailures, getSyncFailure, getSyncFailureCounts, clearSyncFailures, removeSyncFailures, markSyncFailureRetried } from './services/syncFailures.js';
 import { createTeableRecords, updateTeableRecords, deleteTeableRecords, getTeableRecords, normalizeTeableRecordsResponse } from './services/teableService.js';
 import { runSystemDoctor } from './services/systemDoctor.js';
 import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
@@ -28,7 +28,7 @@ import {
   sendAlertNotifications,
   sendTestAlertNotification,
 } from './services/alertNotificationService.js';
-import { clearTaskSyncState } from './services/syncEngine.js';
+import { clearTaskSyncState, getTaskInitializationState } from './services/syncEngine.js';
 import { isAdmin, isOwner } from './services/roles.js';
 import { logger } from './services/logger.js';
 
@@ -341,6 +341,28 @@ function getRunState(taskId) {
   return syncRuns.get(taskId)?.state || { taskId, status: 'idle', phase: 'idle', cancellable: false };
 }
 
+function assertTaskAccess(user, task, action = '访问') {
+  if (!task) {
+    const err = new Error('Not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!isAdmin(user) && task.userId !== user.id) {
+    const err = new Error(`无权${action}此任务`);
+    err.status = 403;
+    throw err;
+  }
+}
+
+function sanitizeFailureForApi(failure) {
+  return {
+    ...failure,
+    records: undefined,
+    recordIds: undefined,
+    hasPayload: Boolean(failure.records || failure.recordIds),
+  };
+}
+
 function buildVersionInfo() {
   return {
     version: APP_VERSION,
@@ -499,6 +521,12 @@ function preflightError(result) {
   return err;
 }
 
+function shouldUseInitializationMode(preflight, requested = false) {
+  if (requested) return true;
+  const estimate = preflight?.initialFullSync;
+  return Boolean(estimate?.initialRun && Number(estimate.sourceRows || 0) > 0);
+}
+
 function teableFormulaString(value) {
   return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -561,8 +589,10 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     return { status: 'invalid', error };
   }
 
+  let preflightForRun = null;
   try {
     const preflight = await runTaskPreflightCheck(task, validation.srcConn || srcConn, validation.tgtConn || tgtConn);
+    preflightForRun = preflight;
     const gateError = preflightError(preflight);
     if (gateError) {
       await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 预检未通过: ${gateError.message}`, ts: new Date().toISOString() }, task.userId);
@@ -571,6 +601,7 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     if (preflight.status === 'warn') {
       await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 预检有 ${preflight.summary.warn} 个警告，继续执行`, ts: new Date().toISOString() }, task.userId);
     }
+    task._initializationMode = shouldUseInitializationMode(preflight);
   } catch (err) {
     await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 预检失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
     return { status: 'preflight_failed', error: err.message };
@@ -595,7 +626,7 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
       srcConn,
       tgtConn,
       (entry) => persistUserSyncLog(entry, task.userId),
-      runControl,
+      { ...runControl, initializationMode: task._initializationMode === true, trigger },
     );
     runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
 
@@ -1690,6 +1721,20 @@ app.get('/api/tasks/:id/progress', (req, res) => {
   res.json(getRunState(req.params.id));
 });
 
+app.get('/api/tasks/:id/initialization', (req, res) => {
+  try {
+    const config = loadConfig();
+    const task = config.syncTasks.find((t) => t.id === req.params.id);
+    assertTaskAccess(req.user, task);
+    res.json({
+      ...getTaskInitializationState(req.params.id),
+      runState: getRunState(req.params.id),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 app.post('/api/tasks/:id/cancel', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
@@ -1721,12 +1766,7 @@ app.get('/api/tasks/:id/failures', (req, res) => {
   if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
-  res.json(getSyncFailures(req.params.id).map((f) => ({
-    ...f,
-    records: undefined,
-    recordIds: undefined,
-    hasPayload: Boolean(f.records || f.recordIds),
-  })));
+  res.json(getSyncFailures(req.params.id).map(sanitizeFailureForApi));
 });
 
 app.get('/api/sync-failures/counts', (req, res) => {
@@ -1759,6 +1799,54 @@ app.delete('/api/tasks/:id/failures', (req, res) => {
   res.json({ removed });
 });
 
+async function retryFailureBatchForTask(config, user, task, failure) {
+  assertTaskAccess(user, task, '操作');
+  if (!failure || failure.taskId !== task.id) {
+    const err = new Error('失败批次不存在');
+    err.status = 404;
+    throw err;
+  }
+  const validation = validateTaskRunnable(config, user, task);
+  if (validation.error) {
+    const err = new Error(validation.error);
+    err.status = 400;
+    throw err;
+  }
+  const tgtConn = validation.tgtConn || config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+  if (!tgtConn) {
+    const err = new Error('Target connection not found');
+    err.status = 400;
+    throw err;
+  }
+  if (!failure.hasPayload && !failure.records && !failure.recordIds) {
+    const err = new Error('失败批次缺少可重放载荷，只能清理记录后重新运行任务');
+    err.status = 400;
+    throw err;
+  }
+  return replayFailureBatch(tgtConn, task, failure);
+}
+
+app.post('/api/tasks/:id/failures/:failureId/retry', async (req, res) => {
+  const config = loadConfig();
+  const task = config.syncTasks.find((t) => t.id === req.params.id);
+  const failure = getSyncFailure(req.params.failureId);
+  try {
+    const stats = await retryFailureBatchForTask(config, req.user, task, failure);
+    removeSyncFailures([failure.id]);
+    appendAuditLog(req.user, 'task.failures.retry_one', {
+      resourceType: 'task',
+      resourceId: task.id,
+      resourceName: task.name,
+      message: `重试单个失败批次 ${task.name || task.id}`,
+      metadata: { failureId: failure.id, ...stats },
+    });
+    res.json({ retried: 1, failed: 0, failureId: failure.id, ...stats });
+  } catch (err) {
+    if (failure?.id) markSyncFailureRetried(failure.id, err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 app.post('/api/tasks/:id/retry-failures', async (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
@@ -1766,8 +1854,8 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
   if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
-  const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
-  if (!tgtConn) return res.status(400).json({ error: 'Target connection not found' });
+  const validation = validateTaskRunnable(config, req.user, task);
+  if (validation.error) return res.status(400).json({ error: validation.error });
 
   const failures = getSyncFailures(req.params.id);
   const retried = [];
@@ -1775,7 +1863,7 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
   const replayStats = { inserted: 0, updated: 0, deleted: 0 };
   for (const failure of failures) {
     try {
-      const stats = await replayFailureBatch(tgtConn, task, failure);
+      const stats = await retryFailureBatchForTask(config, req.user, task, failure);
       replayStats.inserted += stats.inserted || 0;
       replayStats.updated += stats.updated || 0;
       replayStats.deleted += stats.deleted || 0;
@@ -1969,7 +2057,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   }
 
   const resetState = req.body?.resetState === true;
-  const initializationMode = req.body?.initializationMode === true || resetState;
+  const initializationMode = shouldUseInitializationMode(preflightForRun, req.body?.initializationMode === true || resetState);
   if (resetState) clearTaskSyncState(task.id);
   const { runSyncWithControl } = await import('./services/syncEngine.js');
   const runControl = startTrackedRun(task, initializationMode ? 'initialization' : 'manual');

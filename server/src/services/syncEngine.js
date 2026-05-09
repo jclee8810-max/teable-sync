@@ -644,6 +644,10 @@ function getSyncState(taskId) {
   return { lastSyncAt: null, watermark: null, syncedIds: [] };
 }
 
+export function getTaskSyncState(taskId) {
+  return getSyncState(taskId);
+}
+
 function saveSyncState(taskId, state) {
   const file = join(STATE_DIR, `${taskId}.json`);
   const tmpFile = `${file}.tmp`;
@@ -653,6 +657,21 @@ function saveSyncState(taskId, state) {
 
 export function clearTaskSyncState(taskId) {
   saveSyncState(taskId, { lastSyncAt: null, watermark: null, syncedIds: [], checkpoint: null, checkpoints: [] });
+}
+
+export function getTaskInitializationState(taskId) {
+  const state = getSyncState(taskId);
+  const checkpoint = state.checkpoint || null;
+  return {
+    taskId,
+    hasCheckpoint: Boolean(checkpoint),
+    checkpoint,
+    recentCheckpoints: Array.isArray(state.checkpoints) ? state.checkpoints.slice(-10).reverse() : [],
+    lastRunAt: state.lastRunAt || null,
+    lastSyncAt: state.lastSyncAt || null,
+    watermarkType: state.watermarkType || checkpoint?.watermarkType || null,
+    watermarkColumn: state.watermarkColumn || checkpoint?.watermarkColumn || null,
+  };
 }
 
 function compactCheckpoints(checkpoints = [], max = 80) {
@@ -706,6 +725,24 @@ function buildCheckpoint({
     failed: totals.failed,
     savedAt: new Date().toISOString(),
   };
+}
+
+function updateRunHistoryProgress(historyRec, stats) {
+  if (!historyRec?.id) return;
+  updateSyncHistory(historyRec.id, {
+    status: 'running',
+    runId: stats.runId,
+    trigger: stats.trigger,
+    mode: stats.mode,
+    sourceRows: stats.sourceRows,
+    inserted: stats.inserted,
+    updated: stats.updated,
+    skipped: stats.skipped,
+    deleted: stats.deleted,
+    softDeleted: stats.softDeleted,
+    failed: stats.failed,
+    durationMs: stats.durationMs,
+  });
 }
 
 /**
@@ -1235,6 +1272,19 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
         softDeleted: softDeleteCount,
         failed: errorCount,
         targetRows: existingRecords.length,
+      });
+      updateRunHistoryProgress(historyRec, {
+        runId,
+        trigger: control.trigger || 'manual',
+        mode,
+        sourceRows: sourceRowsCount,
+        inserted: insertCount,
+        updated: updateCount,
+        skipped: skipCount,
+        deleted: deleteCount,
+        softDeleted: softDeleteCount,
+        failed: errorCount,
+        durationMs: Date.now() - startTime,
       });
       if (sourceRows.length < pageSize) break;
       if (sourceKind === 'teable') sourceOffset += pageSize;

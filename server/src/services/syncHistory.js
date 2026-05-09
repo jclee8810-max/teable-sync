@@ -62,20 +62,22 @@ export function updateSyncHistory(recordId, stats) {
   if (index === -1) return null;
   
   const record = history[index];
-  record.endTime = new Date().toISOString();
-  record.status = stats.status; // success, failed
+  record.status = stats.status || record.status; // running, success, failed
+  if (record.status !== 'running') {
+    record.endTime = new Date().toISOString();
+  }
   record.runId = stats.runId || record.runId || record.id;
   record.trigger = stats.trigger || record.trigger || 'unknown';
   record.mode = stats.mode || record.mode;
-  record.sourceRows = stats.sourceRows || 0;
-  record.inserted = stats.inserted || 0;
-  record.updated = stats.updated || 0;
-  record.skipped = stats.skipped || 0;
-  record.deleted = stats.deleted || 0;
-  record.softDeleted = stats.softDeleted || 0;
-  record.failed = stats.failed || 0;
-  record.errorMessage = stats.errorMessage || null;
-  record.durationMs = stats.durationMs || 0;
+  record.sourceRows = stats.sourceRows ?? record.sourceRows ?? 0;
+  record.inserted = stats.inserted ?? record.inserted ?? 0;
+  record.updated = stats.updated ?? record.updated ?? 0;
+  record.skipped = stats.skipped ?? record.skipped ?? 0;
+  record.deleted = stats.deleted ?? record.deleted ?? 0;
+  record.softDeleted = stats.softDeleted ?? record.softDeleted ?? 0;
+  record.failed = stats.failed ?? record.failed ?? 0;
+  record.errorMessage = stats.errorMessage ?? record.errorMessage ?? null;
+  record.durationMs = stats.durationMs ?? record.durationMs ?? 0;
   
   history[index] = record;
   saveHistory(history);

@@ -190,6 +190,29 @@
               />
             </div>
 
+            <div v-if="taskInitialization?.hasCheckpoint" class="detail-section init-resume-box">
+              <div class="detail-section-bar">
+                <div class="detail-section-title">初始化断点</div>
+                <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="refreshTaskInitialization" :disabled="taskInitializationLoading">
+                  刷新
+                </button>
+              </div>
+              <div class="detail-kv-grid">
+                <div><span>已处理</span><strong>{{ formatNumber(taskInitialization.checkpoint?.processedRows || 0) }} 行</strong></div>
+                <div><span>最近批次</span><strong>{{ taskInitialization.checkpoint?.batchNo || '-' }}</strong></div>
+                <div><span>最近保存</span><strong>{{ formatTime(taskInitialization.checkpoint?.savedAt) }}</strong></div>
+                <div><span>水位策略</span><strong>{{ watermarkLabel(taskInitialization.watermarkType) }}</strong></div>
+              </div>
+              <div class="detail-action-row">
+                <button class="fs-btn fs-btn-primary" @click="continueInitialization(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">
+                  继续初始化
+                </button>
+                <button class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">
+                  重新开始全量
+                </button>
+              </div>
+            </div>
+
             <div class="detail-section">
               <div class="detail-section-title">运行健康</div>
               <div v-if="taskHealth[detailTask.id]" class="detail-kv-grid">
@@ -769,7 +792,7 @@
       <div v-else style="text-align:center;padding:40px;color:var(--text-tertiary)">暂无数据</div>
     </el-dialog>
 
-    <el-dialog v-model="failuresDialogVisible" title="失败记录" width="760px" top="8vh">
+    <el-dialog v-model="failuresDialogVisible" title="失败批次恢复" width="860px" top="8vh">
       <div v-if="failuresLoading" style="text-align:center;padding:32px">
         <el-icon class="is-loading" :size="24"><Loading /></el-icon>
       </div>
@@ -777,7 +800,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <span class="detail-value">共 {{ taskFailures.length }} 个失败批次</span>
           <div style="display:flex;gap:8px">
-            <button class="fs-btn fs-btn-primary" @click="retryFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">重试失败</button>
+            <button class="fs-btn fs-btn-primary" @click="retryFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">全部重试</button>
             <button class="fs-btn fs-btn-danger" @click="clearFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">清空记录</button>
           </div>
         </div>
@@ -795,6 +818,13 @@
             <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
           </el-table-column>
           <el-table-column prop="errorMessage" label="错误" min-width="220" show-overflow-tooltip />
+          <el-table-column label="操作" width="105" fixed="right">
+            <template #default="{ row }">
+              <button class="fs-btn fs-btn-ghost table-mini-btn" @click="retrySingleFailure(row)" :disabled="failureRetryingId === row.id || !row.hasPayload">
+                {{ failureRetryingId === row.id ? '重试中' : '重试' }}
+              </button>
+            </template>
+          </el-table-column>
         </el-table>
       </div>
     </el-dialog>
@@ -990,7 +1020,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs, getSyncHistory } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getTaskInitialization, getFailureCounts, getTaskFailures, retryTaskFailures, retryTaskFailure, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs, getSyncHistory } from '../api'
 
 // 当前用户身份
 const currentUser = getStoredUser()
@@ -1034,6 +1064,7 @@ const failuresDialogVisible = ref(false)
 const failuresLoading = ref(false)
 const taskFailures = ref([])
 const selectedFailureTask = ref(null)
+const failureRetryingId = ref(null)
 const preflightDialogVisible = ref(false)
 const preflightLoading = ref(false)
 const preflightResult = ref(null)
@@ -1055,6 +1086,8 @@ const taskDetailLogsLoading = ref(false)
 const taskDetailLogs = ref([])
 const taskHistoryLoading = ref(false)
 const taskHistory = ref([])
+const taskInitializationLoading = ref(false)
+const taskInitialization = ref(null)
 const hydratingTaskForm = ref(false)
 const copyingTaskId = ref(null)
 const templateSavingId = ref(null)
@@ -2192,6 +2225,24 @@ async function retryFailures() {
   }
 }
 
+async function retrySingleFailure(failure) {
+  if (!selectedFailureTask.value || !failure?.id) return
+  failureRetryingId.value = failure.id
+  try {
+    const result = await retryTaskFailure(selectedFailureTask.value.id, failure.id)
+    ElMessage.success(`已重试批次${result.inserted ? `，新增 ${result.inserted}` : ''}${result.updated ? `，更新 ${result.updated}` : ''}${result.deleted ? `，删除 ${result.deleted}` : ''}`)
+    taskFailures.value = await getTaskFailures(selectedFailureTask.value.id)
+    failureCounts.value = await getFailureCounts()
+    taskHealth.value = await getTasksHealth()
+    await refreshTaskHistory()
+  } catch (err) {
+    ElMessage.error('单批重试失败: ' + err.message)
+    taskFailures.value = await getTaskFailures(selectedFailureTask.value.id).catch(() => taskFailures.value)
+  } finally {
+    failureRetryingId.value = null
+  }
+}
+
 async function clearFailures() {
   if (!selectedFailureTask.value) return
   await ElMessageBox.confirm('确定清空该任务的失败记录？这不会改动 Teable 数据。', '清空失败记录', { type: 'warning' })
@@ -2254,12 +2305,25 @@ async function refreshTaskHistory() {
   }
 }
 
+async function refreshTaskInitialization() {
+  if (!detailTask.value) return
+  taskInitializationLoading.value = true
+  try {
+    taskInitialization.value = await getTaskInitialization(detailTask.value.id)
+  } catch (err) {
+    taskInitialization.value = null
+  } finally {
+    taskInitializationLoading.value = false
+  }
+}
+
 async function openTaskDetail(task) {
   detailTask.value = task
   taskDetailLogs.value = []
   taskHistory.value = []
+  taskInitialization.value = null
   taskDetailDialogVisible.value = true
-  await Promise.all([refreshTaskDetailLogs(), refreshTaskHistory()])
+  await Promise.all([refreshTaskDetailLogs(), refreshTaskHistory(), refreshTaskInitialization()])
 }
 
 async function toggleSync(task) {
@@ -2783,6 +2847,13 @@ onUnmounted(() => {
   margin-top: 14px;
 }
 
+.init-resume-box {
+  padding: 12px;
+  border: 1px solid rgba(245,158,11,0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(245,158,11,0.06);
+}
+
 .detail-section-title {
   color: var(--text-primary);
   font-size: 13px;
@@ -2810,6 +2881,13 @@ onUnmounted(() => {
 
 .detail-kv-grid.wide {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.detail-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .detail-kv-grid > div {
@@ -2842,6 +2920,12 @@ onUnmounted(() => {
 
 .detail-log-list {
   max-height: 430px;
+}
+
+.table-mini-btn {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .connection-issues {

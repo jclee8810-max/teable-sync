@@ -44,6 +44,7 @@ try {
     resolveWatermark,
     clearTaskSyncState,
     createPerMinuteLimiter,
+    getTaskInitializationState,
   } = await import('../src/services/syncEngine.js');
   const {
     convertValue,
@@ -54,6 +55,7 @@ try {
   const {
     addSyncFailure,
     clearSyncFailures,
+    getSyncFailure,
     getSyncFailureCounts,
     getSyncFailures,
     markSyncFailureRetried,
@@ -110,6 +112,7 @@ try {
   clearTaskSyncState(TASK_ID);
   const state = JSON.parse(readFileSync(join(STATE_DIR, `${TASK_ID}.json`), 'utf-8'));
   assert.deepEqual(state, { lastSyncAt: null, watermark: null, syncedIds: [], checkpoint: null, checkpoints: [] });
+  assert.equal(getTaskInitializationState(TASK_ID).hasCheckpoint, false);
 
   clearSyncFailures(TASK_ID);
   const task = { id: TASK_ID, name: 'Reliability Self Test' };
@@ -130,6 +133,7 @@ try {
     error: new Error('simulated write failure'),
   });
   assert.equal(getSyncFailures(TASK_ID).length, 1);
+  assert.equal(getSyncFailure(failure.id).id, failure.id);
   assert.equal(getSyncFailureCounts()[TASK_ID], 1);
   assert.equal(getSyncFailures(TASK_ID)[0].sourceRange.end, 1000);
   const retried = markSyncFailureRetried(failure.id, new Error('still failing'));
@@ -141,6 +145,16 @@ try {
   const history = createSyncHistory(TASK_ID, task.name, 'Orders', 'tbl-self-test', { runId: RUN_ID, trigger: 'self-test' });
   assert.equal(history.runId, RUN_ID);
   assert.equal(getSyncHistory(TASK_ID, 5)[0].status, 'running');
+  const progress = updateSyncHistory(history.id, {
+    status: 'running',
+    runId: RUN_ID,
+    mode: 'full',
+    sourceRows: 500,
+    inserted: 400,
+    durationMs: 500,
+  });
+  assert.equal(progress.endTime, null);
+  assert.equal(progress.sourceRows, 500);
   const updated = updateSyncHistory(history.id, {
     status: 'success',
     runId: RUN_ID,

@@ -76,6 +76,10 @@ export function getSyncFailures(taskId = null) {
   return taskId ? failures.filter((f) => f.taskId === taskId) : failures;
 }
 
+export function getSyncFailure(id) {
+  return loadFailures().find((f) => f.id === id) || null;
+}
+
 export function getSyncFailureCounts() {
   const counts = {};
   for (const failure of loadFailures()) {

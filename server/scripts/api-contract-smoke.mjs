@@ -1,15 +1,20 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { signToken } from '../src/middleware/auth.js';
 
 const API_BASE = (process.env.API_CONTRACT_BASE || 'http://127.0.0.1:3101/api').replace(/\/+$/, '');
 const CONFIG_FILE = process.env.API_CONTRACT_CONFIG_FILE || './data/config.json';
 const USERS_FILE = process.env.API_CONTRACT_USERS_FILE || './data/users.json';
 const HISTORY_FILE = process.env.API_CONTRACT_HISTORY_FILE || './data/sync-history.json';
+const FAILURES_FILE = process.env.API_CONTRACT_FAILURES_FILE || './data/sync-failures.json';
+const STATE_DIR = process.env.API_CONTRACT_STATE_DIR || './data/sync-state';
+const STATE_FILE = `${STATE_DIR}/legacy-task.json`;
 const backupStamp = Date.now();
 const configBackupFile = `${CONFIG_FILE}.api-contract-${backupStamp}`;
 const usersBackupFile = `${USERS_FILE}.api-contract-${backupStamp}`;
 const historyBackupFile = `${HISTORY_FILE}.api-contract-${backupStamp}`;
+const failuresBackupFile = `${FAILURES_FILE}.api-contract-${backupStamp}`;
+const stateBackupFile = `${STATE_FILE}.api-contract-${backupStamp}`;
 const checks = [];
 
 function record(ok, name, detail = '') {
@@ -89,6 +94,9 @@ try {
   if (existsSync(CONFIG_FILE)) writeFileSync(configBackupFile, readFileSync(CONFIG_FILE));
   if (existsSync(USERS_FILE)) writeFileSync(usersBackupFile, readFileSync(USERS_FILE));
   if (existsSync(HISTORY_FILE)) writeFileSync(historyBackupFile, readFileSync(HISTORY_FILE));
+  if (existsSync(FAILURES_FILE)) writeFileSync(failuresBackupFile, readFileSync(FAILURES_FILE));
+  mkdirSync(STATE_DIR, { recursive: true });
+  if (existsSync(STATE_FILE)) writeFileSync(stateBackupFile, readFileSync(STATE_FILE));
   writeFileSync(USERS_FILE, JSON.stringify([owner, admin, user, roleTarget], null, 2));
   writeFileSync(CONFIG_FILE, JSON.stringify({
     connections: [readySource, readyTarget, untestedSource, failedSource, untestedTarget],
@@ -121,6 +129,57 @@ try {
     errorMessage: null,
     durationMs: 1234,
   }], null, 2));
+  writeFileSync(FAILURES_FILE, JSON.stringify([{
+    id: 'contract-failure-001',
+    taskId: legacyTask.id,
+    taskName: legacyTask.name,
+    runId: 'contract-run-001',
+    batchNo: 2,
+    writeBatchNo: 1,
+    operation: 'insert',
+    tableId: legacyTask.targetTableId,
+    records: [{ fields: { Name: 'A001', Amount: 10 } }],
+    recordIds: null,
+    primaryKeys: ['A001'],
+    pkFieldName: 'Name',
+    sourceRange: { start: 501, end: 1000, count: 500 },
+    sourceOffset: 500,
+    sourceCursorBefore: '500',
+    sourceCursorAfter: '1000',
+    count: 1,
+    errorMessage: 'simulated failure',
+    createdAt: now,
+    retryCount: 0,
+    lastRetryAt: null,
+  }], null, 2));
+  writeFileSync(STATE_FILE, JSON.stringify({
+    lastSyncAt: null,
+    watermark: null,
+    syncedIds: [],
+    lastRunAt: now,
+    watermarkType: 'full_scan',
+    watermarkColumn: null,
+    checkpoint: {
+      runId: 'contract-run-001',
+      taskId: legacyTask.id,
+      taskName: legacyTask.name,
+      mode: 'full',
+      watermarkType: 'full_scan',
+      watermarkColumn: null,
+      batchNo: 2,
+      sourceKind: 'sql',
+      sourceOffset: 1000,
+      sourceCursor: null,
+      sourceRange: { start: 501, end: 1000, count: 500 },
+      processedRows: 1000,
+      inserted: 900,
+      updated: 80,
+      skipped: 20,
+      failed: 0,
+      savedAt: now,
+    },
+    checkpoints: [],
+  }, null, 2));
 
   let res = await request('/auth/users', {}, userToken);
   record(res.status === 403, 'regular user cannot list users');
@@ -164,6 +223,17 @@ try {
   res = await request('/task-templates/tpl-untested/create-task', { method: 'POST', body: JSON.stringify({}) }, ownerToken);
   record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'template create rejects untested connection');
 
+  res = await request('/tasks/legacy-task/initialization', {}, ownerToken);
+  record(res.status === 200 && res.data.hasCheckpoint === true && res.data.checkpoint?.processedRows === 1000, 'initialization endpoint exposes checkpoint');
+  res = await request('/tasks/legacy-task/failures', {}, ownerToken);
+  const failure = res.data?.[0];
+  record(res.status === 200 && failure?.id === 'contract-failure-001' && failure.hasPayload === true, 'failure list exposes batch summary');
+  record(!JSON.stringify(res.data).includes('"records"') && !JSON.stringify(res.data).includes('"recordIds"'), 'failure list hides replay payload');
+  res = await request('/tasks/legacy-task/failures/contract-failure-001/retry', { method: 'POST', body: JSON.stringify({}) }, ownerToken);
+  record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'single failure replay rejects untested connection');
+  res = await request('/tasks/legacy-task/retry-failures', { method: 'POST', body: JSON.stringify({}) }, ownerToken);
+  record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'all failure replay rejects untested connection');
+
   res = await request('/sync-history?taskId=legacy-task&limit=5', {}, ownerToken);
   const run = res.data?.[0];
   record(res.status === 200 && run?.runId === 'contract-run-001', 'sync history exposes run id');
@@ -195,4 +265,8 @@ try {
   else if (existsSync(USERS_FILE)) unlinkSync(USERS_FILE);
   if (existsSync(historyBackupFile)) renameSync(historyBackupFile, HISTORY_FILE);
   else if (existsSync(HISTORY_FILE)) unlinkSync(HISTORY_FILE);
+  if (existsSync(failuresBackupFile)) renameSync(failuresBackupFile, FAILURES_FILE);
+  else if (existsSync(FAILURES_FILE)) unlinkSync(FAILURES_FILE);
+  if (existsSync(stateBackupFile)) renameSync(stateBackupFile, STATE_FILE);
+  else if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE);
 }
