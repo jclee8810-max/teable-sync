@@ -227,7 +227,9 @@ function buildTaskConnectionStatus(config, user, task) {
 
   for (const [field, conn] of [['sourceConnectionId', srcConnRaw], ['targetConnectionId', tgtConnRaw]]) {
     if (!conn || conn.deletedAt) continue;
-    if (conn.lastTest?.success === false) {
+    if (!conn.lastTest) {
+      issues.push({ field, level: 'error', message: `${connectionLabel(conn)} 尚未测试通过` });
+    } else if (conn.lastTest.success !== true) {
       issues.push({ field, level: 'error', message: `${connectionLabel(conn)} 最近测试失败: ${conn.lastTest.error || '未知错误'}` });
     }
   }
@@ -254,21 +256,7 @@ function buildTaskConnectionStatus(config, user, task) {
 
 function validateTaskRunnable(config, user, task, options = {}) {
   const { requireTarget = true } = options;
-  const validation = validateTaskConnections(config, user, task);
-  if (validation.error) return { error: validation.error };
-
-  const checks = [
-    ['源连接', validation.srcConn],
-    ...(requireTarget ? [['目标连接', validation.tgtConn]] : []),
-  ];
-  for (const [label, conn] of checks) {
-    if (!conn) return { error: `${label}不存在或无权访问` };
-    if (conn.lastTest?.success === false) {
-      return { error: `${label}「${connectionLabel(conn)}」最近测试失败: ${conn.lastTest.error || '未知错误'}。请先重新测试连接，通过后再运行任务。` };
-    }
-  }
-
-  return validation;
+  return validateTaskConnections(config, user, task, { requireTarget, requireTested: true });
 }
 
 function taskDto(config, user, task) {
@@ -1272,7 +1260,7 @@ app.get('/api/tasks', (req, res) => {
 
 app.post('/api/tasks', async (req, res) => {
   const config = loadConfig();
-  const validation = validateTaskConnections(config, req.user, req.body);
+  const validation = validateTaskConnections(config, req.user, req.body, { requireTested: true });
   if (validation.error) return res.status(400).json({ error: validation.error });
   const body = cleanTaskInput(req.body);
   const task = {
@@ -1313,7 +1301,7 @@ app.post('/api/tasks/:id/copy', async (req, res) => {
     name: overrides.name || `${source.name || '同步任务'} 副本`,
   });
   task.userId = req.user.id;
-  const validation = validateTaskConnections(config, req.user, task);
+  const validation = validateTaskConnections(config, req.user, task, { requireTested: true });
   if (validation.error) return res.status(400).json({ error: validation.error });
   await attachSchemaSnapshot(task, validation.srcConn, validation.tgtConn);
   config.syncTasks.push(task);
@@ -1382,7 +1370,7 @@ app.post('/api/task-templates/:id/create-task', async (req, res) => {
     name: overrides.name || `${template.config?.name || template.name} 副本`,
   });
   task.userId = req.user.id;
-  const validation = validateTaskConnections(config, req.user, task);
+  const validation = validateTaskConnections(config, req.user, task, { requireTested: true });
   if (validation.error) return res.status(400).json({ error: validation.error });
   await attachSchemaSnapshot(task, validation.srcConn, validation.tgtConn);
   config.syncTasks.push(task);
@@ -1425,10 +1413,10 @@ app.put('/api/tasks/:id', async (req, res) => {
   }
   const updates = cleanTaskInput(req.body);
   const nextTask = { ...task, ...updates, id: task.id, userId: task.userId, createdAt: task.createdAt };
-  const validation = validateTaskConnections(config, req.user, nextTask);
+  const configChanged = ['sourceConnectionId', 'sourceId', 'sourceTable', 'sourceDatabase', 'sourceBaseId', 'targetConnectionId', 'targetId', 'targetBaseId', 'targetTableId', 'columnMapping'].some((field) => Object.prototype.hasOwnProperty.call(updates, field));
+  const validation = validateTaskConnections(config, req.user, nextTask, { requireTested: configChanged });
   if (validation.error) return res.status(400).json({ error: validation.error });
-  const configChanged = ['sourceConnectionId', 'sourceId', 'sourceTable', 'sourceDatabase', 'targetConnectionId', 'targetId', 'targetTableId', 'columnMapping'].some((field) => Object.prototype.hasOwnProperty.call(updates, field));
-  if (configChanged || !nextTask.schemaSnapshot) await attachSchemaSnapshot(nextTask, validation.srcConn, validation.tgtConn);
+  if (configChanged) await attachSchemaSnapshot(nextTask, validation.srcConn, validation.tgtConn);
   if (!isAutoSyncMode(nextTask.syncMode)) {
     if (syncScheduler.has(task.id)) {
       clearInterval(syncScheduler.get(task.id).intervalId);

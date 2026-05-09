@@ -316,15 +316,23 @@
         <div class="section-divider">
           <span class="section-icon">⬡</span> 数据源
         </div>
+        <el-alert
+          v-if="!hasReadySourceConnections"
+          type="warning"
+          :closable="false"
+          style="margin-bottom:12px"
+        >
+          没有可用于建任务的源连接。请先到“数据源”页面测试 SQL 或 Teable 连接，测试通过后才会出现在这里。
+        </el-alert>
         <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="源连接">
               <el-select v-model="form.sourceConnectionId" @change="onSourceChange" placeholder="选择 SQL 或 Teable" style="width:100%">
                 <el-option-group label="SQL 数据库">
-                  <el-option v-for="c in sqlConnections" :key="c.id" :label="c.name" :value="c.id" />
+                  <el-option v-for="c in sqlConnections" :key="c.id" :label="connectionOptionLabel(c)" :value="c.id" :disabled="!isConnectionReady(c)" />
                 </el-option-group>
                 <el-option-group label="Teable">
-                  <el-option v-for="c in teableConnections" :key="c.id" :label="c.name" :value="c.id" />
+                  <el-option v-for="c in teableConnections" :key="c.id" :label="connectionOptionLabel(c)" :value="c.id" :disabled="!isConnectionReady(c)" />
                 </el-option-group>
               </el-select>
             </el-form-item>
@@ -348,11 +356,19 @@
         <div class="section-divider">
           <span class="section-icon">▦</span> 目标（Teable）
         </div>
+        <el-alert
+          v-if="!hasReadyTeableConnections"
+          type="warning"
+          :closable="false"
+          style="margin-bottom:12px"
+        >
+          没有可用于写入的 Teable 连接。请先到“数据源”页面测试 Teable 连接，测试通过后才会出现在这里。
+        </el-alert>
         <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="Teable 连接">
               <el-select v-model="form.targetConnectionId" @change="onTeableConnChange" placeholder="选择Teable" style="width:100%">
-                <el-option v-for="c in teableConnections" :key="c.id" :label="c.name" :value="c.id" />
+                <el-option v-for="c in teableConnections" :key="c.id" :label="connectionOptionLabel(c)" :value="c.id" :disabled="!isConnectionReady(c)" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -983,8 +999,10 @@ const defaultForm = {
 }
 const form = ref({ ...defaultForm })
 
-const sqlConnections = computed(() => connections.value.filter(c => c.type !== 'teable'))
-const teableConnections = computed(() => connections.value.filter(c => c.type === 'teable'))
+const sqlConnections = computed(() => connections.value.filter(c => c.type !== 'teable' && shouldShowConnectionOption(c)))
+const teableConnections = computed(() => connections.value.filter(c => c.type === 'teable' && shouldShowConnectionOption(c)))
+const hasReadySourceConnections = computed(() => connections.value.some(c => ['mssql', 'mysql', 'pg', 'teable'].includes(c.type) && isConnectionReady(c)))
+const hasReadyTeableConnections = computed(() => connections.value.some(c => c.type === 'teable' && isConnectionReady(c)))
 const sourceConnection = computed(() => connections.value.find(c => c.id === form.value.sourceConnectionId) || null)
 const sourceIsTeable = computed(() => sourceConnection.value?.type === 'teable')
 const targetConnection = computed(() => connections.value.find(c => c.id === form.value.targetConnectionId) || null)
@@ -1040,6 +1058,19 @@ const watermarkColumnOptions = computed(() => {
 })
 
 function connName(id) { return connections.value.find(c => c.id === id)?.name || id }
+function isConnectionReady(conn) {
+  return conn?.lastTest?.success === true
+}
+function shouldShowConnectionOption(conn) {
+  if (!conn || conn.deletedAt) return false
+  if (isConnectionReady(conn)) return true
+  return editingId.value && (conn.id === form.value.sourceConnectionId || conn.id === form.value.targetConnectionId)
+}
+function connectionOptionLabel(conn) {
+  if (isConnectionReady(conn)) return conn.name
+  if (!conn?.lastTest) return `${conn.name}（未测试）`
+  return `${conn.name}（测试失败）`
+}
 function sourceTableLabel(table) {
   if (!table) return ''
   if (table.baseName && table.displayName) return table.baseName + ' / ' + table.displayName
@@ -1680,6 +1711,16 @@ async function saveTask() {
   if (!form.value.name) { ElMessage.warning('请输入任务名称'); return }
   if (!form.value.sourceConnectionId || !form.value.sourceTable) { ElMessage.warning('请选择源连接和源表'); return }
   if (!form.value.targetConnectionId || !form.value.targetTableId) { ElMessage.warning('请选择 Teable 目标表'); return }
+  if (!editingId.value || connectionConfigChanged()) {
+    if (!isConnectionReady(sourceConnection.value)) {
+      ElMessage.warning('源连接尚未测试通过，请先到“数据源”页面测试连接')
+      return
+    }
+    if (!isConnectionReady(targetConnection.value)) {
+      ElMessage.warning('Teable 目标连接尚未测试通过，请先到“数据源”页面测试连接')
+      return
+    }
+  }
   if (form.value.syncDirection === 'bidirectional' && !canUseBidirectional.value) {
     ElMessage.warning('双向同步仅支持 Teable ↔ Teable')
     return
@@ -1729,6 +1770,23 @@ async function saveTask() {
   } finally {
     saving.value = false
   }
+}
+
+function connectionConfigChanged() {
+  const task = tasks.value.find(t => t.id === editingId.value)
+  if (!task) return true
+  const originalSourceId = task.sourceConnectionId || task.sourceId || ''
+  const originalTargetId = task.targetConnectionId || task.targetId || ''
+  const originalTargetBaseId = task.targetBaseId || ''
+  const originalMapping = JSON.stringify(task.columnMapping || task.fieldMapping || {})
+  const nextMapping = JSON.stringify(Object.fromEntries(mappingRows.value.filter(rowShouldSync).map(row => [row.source, row.target])))
+  return originalSourceId !== form.value.sourceConnectionId
+    || originalTargetId !== form.value.targetConnectionId
+    || (task.sourceTable || '') !== (form.value.sourceTable || '')
+    || (task.sourceDatabase || '') !== (form.value.sourceDatabase || '')
+    || originalTargetBaseId !== (form.value._baseId || '')
+    || (task.targetTableId || '') !== (form.value.targetTableId || '')
+    || originalMapping !== nextMapping
 }
 
 async function removeTask(id) {
