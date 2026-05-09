@@ -11,6 +11,7 @@ server/data
 data
 knowledge
 npm-debug.log*
+*.bak
 Dockerfile
 docker-compose*.yml
 README.md

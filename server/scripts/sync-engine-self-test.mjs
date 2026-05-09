@@ -43,6 +43,7 @@ try {
     normalizeTimestampWatermark,
     resolveWatermark,
     clearTaskSyncState,
+    createPerMinuteLimiter,
   } = await import('../src/services/syncEngine.js');
   const {
     convertValue,
@@ -90,6 +91,21 @@ try {
   assert.equal(isTypeCompatible('teable:attachment', 'attachment').safe, true);
   assert.match(isTypeCompatible('varchar', 'attachment').warning, /URL/);
   assert.equal(suggestTeableType('teable:attachment').type, 'attachment');
+  {
+    let cancelChecks = 0;
+    const logs = [];
+    const limiter = createPerMinuteLimiter(1, 'self-test', (level, message) => logs.push({ level, message }), () => {
+      cancelChecks += 1;
+      if (cancelChecks > 2) {
+        const err = new Error('cancelled during limiter wait');
+        err.code = 'SELF_TEST_CANCELLED';
+        throw err;
+      }
+    });
+    await limiter();
+    await assert.rejects(() => limiter(), /cancelled during limiter wait/);
+    assert.equal(logs.some((entry) => entry.message.includes('初始化限速')), true);
+  }
 
   clearTaskSyncState(TASK_ID);
   const state = JSON.parse(readFileSync(join(STATE_DIR, `${TASK_ID}.json`), 'utf-8'));

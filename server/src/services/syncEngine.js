@@ -145,14 +145,14 @@ async function waitWithCancel(ms, checkCancelled) {
   const stepMs = 500;
   let remaining = ms;
   while (remaining > 0) {
-    checkRunControl();
+    checkCancelled();
     const waitMs = Math.min(stepMs, remaining);
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     remaining -= waitMs;
   }
 }
 
-function createPerMinuteLimiter(limitPerMinute, label, log, checkCancelled) {
+export function createPerMinuteLimiter(limitPerMinute, label, log, checkCancelled) {
   const limit = toNonNegativeInt(limitPerMinute, 0, 100000);
   if (!limit) return async () => {};
   let windowStartedAt = Date.now();
