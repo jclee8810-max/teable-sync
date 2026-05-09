@@ -52,127 +52,66 @@
             </div>
           </div>
           <div class="task-actions">
-            <span v-if="taskHealth[task.id]" class="health-badge" :class="taskHealth[task.id].status">{{ healthLabel(taskHealth[task.id].status) }}</span>
-            <span v-if="!task.connectionStatus?.ok" class="health-badge invalid">连接异常</span>
-            <span class="status-badge" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
-            <button class="fs-btn fs-btn-ghost" @click="openTaskDetail(task)" style="padding:8px 16px;font-size:13px">
-              <el-icon><View /></el-icon>详情
-            </button>
-            <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running' || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
-              <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
-              <el-icon v-else class="is-loading"><Loading /></el-icon>
-              {{ (task._running || task.status === 'running') ? '同步中...' : '同步' }}
-            </button>
-            <button v-if="isTaskRunning(task)" class="fs-btn fs-btn-danger" @click="cancelRunningTask(task)" style="padding:8px 16px;font-size:13px">
-              取消
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="restartFullSync(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
-              重跑全量
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="continueInitialization(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
-              继续初始化
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
-              <el-icon><View /></el-icon>预览
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="runPreflight(task)" :disabled="preflightLoading" style="padding:8px 16px;font-size:13px">
-              预检
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="checkSchemaDrift(task)" :disabled="schemaDriftLoading" style="padding:8px 16px;font-size:13px">
-              字段
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="runReconcile(task)" :disabled="reconcileLoading" style="padding:8px 16px;font-size:13px">
-              校验
-            </button>
-            <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)" style="padding:8px 16px;font-size:13px">
-              失败 {{ failureCounts[task.id] }}
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="openTaskLogs(task)" style="padding:8px 16px;font-size:13px">
-              <el-icon><View /></el-icon>日志
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="duplicateTask(task)" :disabled="copyingTaskId === task.id" style="padding:8px 16px;font-size:13px">
-              复制
-            </button>
-            <button class="fs-btn fs-btn-ghost" @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id" style="padding:8px 16px;font-size:13px">
-              存模板
-            </button>
-            <!-- 仅定时/实时模式显示启停按钮 -->
-            <button v-if="task.syncMode && (task.syncMode === 'scheduled' || task.syncMode === 'realtime')" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" style="padding:8px 16px;font-size:13px">
-              {{ schedulerStatus[task.id] ? '停止' : '启动' }}
-            </button>
-            <button class="icon-btn" @click="openDialog(task)" :disabled="!isOwner(task)" :title="isOwner(task) ? '编辑' : '无权限编辑'">
-              <el-icon :size="16"><Edit /></el-icon>
-            </button>
-            <button class="icon-btn icon-btn-danger" @click="removeTask(task.id)" :disabled="!isOwner(task)" :title="isOwner(task) ? '删除' : '无权限删除'">
-              <el-icon :size="16"><Delete /></el-icon>
-            </button>
+            <div class="task-badges">
+              <span v-if="taskHealth[task.id]" class="health-badge" :class="taskHealth[task.id].status">{{ healthLabel(taskHealth[task.id].status) }}</span>
+              <span v-if="!task.connectionStatus?.ok" class="health-badge invalid">连接异常</span>
+              <span class="status-badge" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
+            </div>
+            <div class="task-primary-actions">
+              <button class="fs-btn fs-btn-ghost" @click="openTaskDetail(task)">
+                <el-icon><View /></el-icon>详情
+              </button>
+              <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="task._running || task.status === 'running' || !task.connectionStatus?.ok">
+                <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
+                <el-icon v-else class="is-loading"><Loading /></el-icon>
+                {{ (task._running || task.status === 'running') ? '同步中' : '同步' }}
+              </button>
+              <button v-if="isTaskRunning(task)" class="fs-btn fs-btn-danger" @click="cancelRunningTask(task)">
+                取消
+              </button>
+              <button v-else-if="isAutoSyncMode(task.syncMode)" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)">
+                {{ schedulerStatus[task.id] ? '停止调度' : '启动调度' }}
+              </button>
+              <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)">
+                失败 {{ failureCounts[task.id] }}
+              </button>
+              <el-dropdown trigger="click">
+                <button class="fs-btn fs-btn-ghost more-action" type="button">更多</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item @click="restartFullSync(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok">重跑全量</el-dropdown-item>
+                    <el-dropdown-item @click="continueInitialization(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok">继续初始化</el-dropdown-item>
+                    <el-dropdown-item divided @click="handlePreview(task.id)">预览数据</el-dropdown-item>
+                    <el-dropdown-item @click="runPreflight(task)" :disabled="preflightLoading">预检</el-dropdown-item>
+                    <el-dropdown-item @click="checkSchemaDrift(task)" :disabled="schemaDriftLoading">字段变更</el-dropdown-item>
+                    <el-dropdown-item @click="runReconcile(task)" :disabled="reconcileLoading">一致性校验</el-dropdown-item>
+                    <el-dropdown-item @click="openTaskLogs(task)">近期日志</el-dropdown-item>
+                    <el-dropdown-item divided @click="duplicateTask(task)" :disabled="copyingTaskId === task.id">复制任务</el-dropdown-item>
+                    <el-dropdown-item @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id">存为模板</el-dropdown-item>
+                    <el-dropdown-item @click="openDialog(task)" :disabled="!isOwner(task)">编辑配置</el-dropdown-item>
+                    <el-dropdown-item @click="removeTask(task.id)" :disabled="!isOwner(task)">删除任务</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </div>
         </div>
 
-        <div class="task-card-detail">
-          <div class="detail-grid">
-            <div class="detail-item">
-              <span class="detail-label">源表</span>
-              <span class="detail-value mono">{{ task.sourceTable }}</span>
-            </div>
-            <div class="detail-item">
-              <span class="detail-label">同步模式</span>
-              <span class="detail-value">
-                <span class="sync-mode-badge" :class="task.syncMode || 'manual'">{{ syncModeLabel(task.syncMode || 'manual') }}</span>
-                <span v-if="task.syncMode && task.syncMode !== 'manual'" class="interval-text">· {{ intervalLabel(task.syncInterval || 300) }}</span>
-              </span>
-            </div>
-            <div class="detail-item">
-              <span class="detail-label">方向</span>
-              <span class="detail-value">
-                <span class="direction-badge" :class="task.syncDirection || 'one_way'">{{ syncDirectionLabel(task.syncDirection) }}</span>
-              </span>
-            </div>
-            <div class="detail-item">
-              <span class="detail-label">冲突策略</span>
-              <span class="detail-value">
-                <span class="strategy-badge" :class="task.conflictStrategy">{{ conflictLabel(task.conflictStrategy) }}</span>
-              </span>
-            </div>
-            <div class="detail-item">
-              <span class="detail-label">增量策略</span>
-              <span class="detail-value">
-                <span class="watermark-badge" :class="task.watermarkType || 'auto'">{{ watermarkLabel(task.watermarkType) }}</span>
-              </span>
-            </div>
-            <div class="detail-item">
-              <span class="detail-label">上次同步</span>
-              <span class="detail-value" v-if="task.lastSyncAt">{{ formatTime(task.lastSyncAt) }}</span>
-              <span class="detail-value empty" v-else>从未执行</span>
-            </div>
-          </div>
-          <div v-if="taskHealth[task.id]" class="health-line">
-            <span>成功率 {{ healthRate(taskHealth[task.id]) }}</span>
-            <span>平均耗时 {{ formatDuration(taskHealth[task.id].averageDurationMs) }}</span>
-            <span>最近 {{ latestStatusLabel(taskHealth[task.id].latestStatus) }}</span>
-              <span v-if="taskHealth[task.id].latestError" class="health-error" :title="taskHealth[task.id].latestError">错误：{{ taskHealth[task.id].latestError }}</span>
-            </div>
-          <div v-if="task.schemaSnapshotError" class="connection-issues">
-            <span class="connection-issue warn">字段快照失败：{{ task.schemaSnapshotError }}</span>
-          </div>
-          <div class="state-strip">
-            <div class="state-item" :class="runStateClass(task)">
-              <span class="state-label">当前运行</span>
-              <strong>{{ runStateLabel(task) }}</strong>
-            </div>
-            <div class="state-item" :class="scheduleStateClass(task)">
-              <span class="state-label">调度</span>
-              <strong>{{ scheduleStateLabel(task) }}</strong>
-            </div>
-            <div class="state-item" :class="latestStateClass(task)">
-              <span class="state-label">最近结果</span>
-              <strong>{{ latestRunLabel(task) }}</strong>
-            </div>
+        <div class="task-card-summary">
+          <div class="summary-row">
+            <span><strong>源表</strong>{{ task.sourceTable || '-' }}</span>
+            <span><strong>模式</strong>{{ compactSyncLabel(task) }}</span>
+            <span><strong>最近</strong>{{ latestRunLabel(task) }}</span>
+            <span v-if="taskHealth[task.id]"><strong>成功率</strong>{{ healthRate(taskHealth[task.id]) }}</span>
           </div>
           <div v-if="task.connectionStatus?.issues?.length" class="connection-issues">
             <span v-for="issue in task.connectionStatus.issues" :key="issue.field + issue.message" :class="['connection-issue', issue.level]">
               {{ issue.message }}
             </span>
+          </div>
+          <div v-if="taskHealth[task.id]?.latestError || task.schemaSnapshotError" class="task-warning-line">
+            <span v-if="taskHealth[task.id]?.latestError" :title="taskHealth[task.id].latestError">最近错误：{{ taskHealth[task.id].latestError }}</span>
+            <span v-if="task.schemaSnapshotError" :title="task.schemaSnapshotError">字段快照失败：{{ task.schemaSnapshotError }}</span>
           </div>
           <div v-if="taskProgress[task.id] && taskProgress[task.id].status !== 'idle'" class="progress-panel">
             <div class="progress-line">
@@ -1142,6 +1081,11 @@ function syncModeLabel(m) {
     full: '手动执行',          // legacy: 保持手动行为
   }
   return map[m] || m
+}
+function compactSyncLabel(task) {
+  const mode = syncModeLabel(task.syncMode || 'manual')
+  if (!isAutoSyncMode(task.syncMode)) return mode
+  return `${mode} · ${intervalLabel(task.syncInterval || 300)}`
 }
 function intervalLabel(sec) {
   if (sec < 60) return `${sec}秒`
@@ -2235,11 +2179,11 @@ onUnmounted(() => {
 .task-card.running { border-left-color: var(--accent); }
 
 .task-card-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: start;
+  gap: 18px;
+  margin-bottom: 14px;
 }
 
 .task-name {
@@ -2263,23 +2207,58 @@ onUnmounted(() => {
 
 .task-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-direction: column;
+  justify-content: flex-start;
 }
 
 .icon-btn-danger:hover { color: var(--red) !important; background: rgba(239,68,68,0.1) !important; }
 
-.task-card-detail {
+.task-badges,
+.task-primary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-primary-actions .fs-btn {
+  padding: 8px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.more-action {
+  min-width: 64px;
+}
+
+.task-card-summary {
   padding-top: 16px;
   border-top: 1px solid var(--border-subtle);
 }
 
-.detail-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 16px;
+.summary-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.summary-row span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.summary-row strong {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .detail-item {
@@ -2405,6 +2384,22 @@ onUnmounted(() => {
   margin-top: 12px;
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+.task-warning-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--red);
+  font-size: 12px;
+}
+
+.task-warning-line span {
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .health-error {
   max-width: 420px;
@@ -2788,7 +2783,6 @@ onUnmounted(() => {
 
 @media (max-width: 1100px) {
   .task-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .detail-panel-grid,
   .detail-kv-grid,
   .detail-kv-grid.wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2797,7 +2791,10 @@ onUnmounted(() => {
     flex-direction: column;
     align-items: stretch;
   }
-  .task-actions { justify-content: flex-start; }
+  .task-card-top { grid-template-columns: 1fr; }
+  .task-actions { align-items: stretch; }
+  .task-badges,
+  .task-primary-actions { justify-content: flex-start; }
 }
 
 @media (max-width: 720px) {
@@ -2807,7 +2804,6 @@ onUnmounted(() => {
     align-items: stretch;
   }
   .task-search { max-width: none; }
-  .detail-grid { grid-template-columns: 1fr; }
   .detail-hero { flex-direction: column; }
   .detail-hero-badges { justify-content: flex-start; }
   .detail-panel-grid,
