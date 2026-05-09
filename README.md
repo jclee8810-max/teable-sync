@@ -398,6 +398,12 @@ npm run acceptance:prod
 
 真实业务 smoke 会创建临时测试连接、任务、用户和 Teable 目标表；脚本结束时会自动清理，并在验收报告里写入测试资产清理结果。如果 Teable 表删除失败，报告会列出残留表名，方便手动处理。
 
+验收还会非阻塞检查已发布镜像：GitHub Actions 最近一次 Docker workflow、GHCR `latest` manifest，以及本机可用时的 `docker pull ghcr.io/jclee8810-max/teable-sync:latest`。如果要单独把镜像发布作为硬门禁：
+
+```bash
+IMAGE_VERIFY_STRICT=true npm run verify:image
+```
+
 只跑较小压力规模：
 
 ```bash
@@ -466,6 +472,7 @@ npm start
 npm run docker:up
 npm run docker:down
 npm run acceptance:prod
+npm run verify:image
 npm run e2e:smoke
 npm run stress:e2e
 ```

@@ -55,12 +55,26 @@ function assetCleanupSummary() {
   return null;
 }
 
+function imageVerificationSummary() {
+  const result = results.find((item) => item.name === 'Image release verification');
+  if (!result) return null;
+  const reportPath = latestReportPath(result.output);
+  const warned = /\bStatus:\s+WARN\b/.test(result.output) || /\bWARN\b/.test(result.output);
+  return {
+    ok: result.ok && !warned,
+    warned,
+    required: result.required,
+    reportPath,
+  };
+}
+
 function renderReport(exitCode) {
   const finishedAt = new Date();
   const passed = results.filter((item) => item.ok).length;
   const failed = results.filter((item) => !item.ok).length;
   const status = exitCode === 0 ? 'PASS' : 'FAIL';
   const cleanup = assetCleanupSummary();
+  const image = imageVerificationSummary();
   return [
     '# Teable Sync Production Acceptance',
     '',
@@ -80,6 +94,7 @@ function renderReport(exitCode) {
     '- Large sync pressure simulation: first full sync, checkpoint resume, cancel/continue, idempotent replay.',
     '- Configuration migration: sanitized export and import preview are covered by release/API contract checks.',
     '- Alert notification permissions and webhook payload contract are covered by release/API contract checks.',
+    '- Published image verification checks GitHub Actions, GHCR latest manifest, and Docker pull when network access allows.',
     '',
     '## Test Asset Cleanup',
     '',
@@ -92,6 +107,16 @@ function renderReport(exitCode) {
     cleanup?.leftovers?.length
       ? `- Leftovers: ${cleanup.leftovers.map((item) => `${item.type}:${item.name || item.id || 'unknown'}`).join(', ')}`
       : '- Leftovers: none',
+    '',
+    '## Published Image',
+    '',
+    image
+      ? `- Status: ${image.ok ? 'PASS' : 'WARN'}`
+      : '- Status: not run',
+    image?.reportPath
+      ? `- Report: ${image.reportPath}`
+      : '- Report: none',
+    '- Note: image verification is non-blocking in production acceptance; run `IMAGE_VERIFY_STRICT=true npm run verify:image` to make it a hard gate.',
     '',
     '## Details',
     '',
@@ -121,6 +146,7 @@ try {
   runStep('Large sync stress', 'npm', ['run', 'stress:e2e'], {
     env: { ...process.env, STRESS_SIZES: stressSizes },
   });
+  runStep('Image release verification', 'npm', ['run', 'verify:image'], { required: false });
 } catch (err) {
   exitCode = 1;
   results.push({ name: 'Production acceptance', ok: false, required: true, command: '-', durationMs: 0, output: err.message });
