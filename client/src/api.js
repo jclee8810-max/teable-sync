@@ -116,6 +116,7 @@ export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r
 
 // Logs
 export const getLogs = (params = {}) => api.get('/logs', { params }).then(r => r.data)
+export const getSyncHistory = (params = {}) => api.get('/sync-history', { params }).then(r => r.data)
 export const clearLogs = () => api.delete('/logs').then(r => r.data)
 export const getAuditLogs = (params = {}) => api.get('/audit-logs', { params }).then(r => r.data)
 export const getObservability = () => api.get('/observability').then(r => r.data)

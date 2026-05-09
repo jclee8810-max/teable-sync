@@ -5,9 +5,11 @@ import { signToken } from '../src/middleware/auth.js';
 const API_BASE = (process.env.API_CONTRACT_BASE || 'http://127.0.0.1:3101/api').replace(/\/+$/, '');
 const CONFIG_FILE = process.env.API_CONTRACT_CONFIG_FILE || './data/config.json';
 const USERS_FILE = process.env.API_CONTRACT_USERS_FILE || './data/users.json';
+const HISTORY_FILE = process.env.API_CONTRACT_HISTORY_FILE || './data/sync-history.json';
 const backupStamp = Date.now();
 const configBackupFile = `${CONFIG_FILE}.api-contract-${backupStamp}`;
 const usersBackupFile = `${USERS_FILE}.api-contract-${backupStamp}`;
+const historyBackupFile = `${HISTORY_FILE}.api-contract-${backupStamp}`;
 const checks = [];
 
 function record(ok, name, detail = '') {
@@ -86,6 +88,7 @@ const baseTask = {
 try {
   if (existsSync(CONFIG_FILE)) writeFileSync(configBackupFile, readFileSync(CONFIG_FILE));
   if (existsSync(USERS_FILE)) writeFileSync(usersBackupFile, readFileSync(USERS_FILE));
+  if (existsSync(HISTORY_FILE)) writeFileSync(historyBackupFile, readFileSync(HISTORY_FILE));
   writeFileSync(USERS_FILE, JSON.stringify([owner, admin, user, roleTarget], null, 2));
   writeFileSync(CONFIG_FILE, JSON.stringify({
     connections: [readySource, readyTarget, untestedSource, failedSource, untestedTarget],
@@ -95,6 +98,29 @@ try {
     alertNotifications: { enabled: false, webhookUrl: 'https://example.invalid/hook', cooldownMinutes: 10 },
     alertStates: {},
   }, null, 2));
+
+  writeFileSync(HISTORY_FILE, JSON.stringify([{
+    id: 'contract-run-001',
+    runId: 'contract-run-001',
+    taskId: legacyTask.id,
+    taskName: legacyTask.name,
+    sourceTable: legacyTask.sourceTable,
+    targetTableId: legacyTask.targetTableId,
+    trigger: 'manual',
+    startTime: now,
+    endTime: now,
+    status: 'success',
+    mode: 'full',
+    sourceRows: 42,
+    inserted: 40,
+    updated: 2,
+    skipped: 0,
+    deleted: 0,
+    softDeleted: 0,
+    failed: 0,
+    errorMessage: null,
+    durationMs: 1234,
+  }], null, 2));
 
   let res = await request('/auth/users', {}, userToken);
   record(res.status === 403, 'regular user cannot list users');
@@ -138,6 +164,11 @@ try {
   res = await request('/task-templates/tpl-untested/create-task', { method: 'POST', body: JSON.stringify({}) }, ownerToken);
   record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'template create rejects untested connection');
 
+  res = await request('/sync-history?taskId=legacy-task&limit=5', {}, ownerToken);
+  const run = res.data?.[0];
+  record(res.status === 200 && run?.runId === 'contract-run-001', 'sync history exposes run id');
+  record(run?.trigger === 'manual' && run?.sourceRows === 42 && run?.inserted === 40 && run?.updated === 2 && run?.durationMs === 1234, 'sync history exposes run metrics');
+
 
   res = await request('/observability', {}, ownerToken);
   record(res.status === 200 && res.data.summary && Array.isArray(res.data.alerts), 'observability snapshot loads');
@@ -162,4 +193,6 @@ try {
   else if (existsSync(CONFIG_FILE)) unlinkSync(CONFIG_FILE);
   if (existsSync(usersBackupFile)) renameSync(usersBackupFile, USERS_FILE);
   else if (existsSync(USERS_FILE)) unlinkSync(USERS_FILE);
+  if (existsSync(historyBackupFile)) renameSync(historyBackupFile, HISTORY_FILE);
+  else if (existsSync(HISTORY_FILE)) unlinkSync(HISTORY_FILE);
 }

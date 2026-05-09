@@ -215,6 +215,80 @@
             </div>
           </el-tab-pane>
 
+          <el-tab-pane label="运行历史">
+            <div class="detail-section">
+              <div class="detail-section-bar">
+                <div class="detail-section-title">最近运行趋势</div>
+                <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="refreshTaskHistory" :disabled="taskHistoryLoading">
+                  刷新
+                </button>
+              </div>
+              <div class="detail-panel-grid history-metrics">
+                <div class="detail-metric">
+                  <span>最近运行</span>
+                  <strong>{{ taskHistorySummary.total }}</strong>
+                </div>
+                <div class="detail-metric success">
+                  <span>成功</span>
+                  <strong>{{ taskHistorySummary.success }}</strong>
+                </div>
+                <div class="detail-metric danger">
+                  <span>失败/取消</span>
+                  <strong>{{ taskHistorySummary.failed }}</strong>
+                </div>
+                <div class="detail-metric">
+                  <span>平均耗时</span>
+                  <strong>{{ formatDuration(taskHistorySummary.averageDurationMs) }}</strong>
+                </div>
+              </div>
+              <div class="run-trend" v-if="taskHistory.length">
+                <span
+                  v-for="run in taskHistory.slice().reverse()"
+                  :key="run.id"
+                  :class="['run-dot', run.status]"
+                  :title="`${latestStatusLabel(run.status)} · ${triggerLabel(run.trigger)} · ${formatTime(run.endTime || run.startTime)}`"
+                ></span>
+              </div>
+            </div>
+
+            <div class="detail-section">
+              <div class="detail-section-title">运行记录</div>
+              <div v-if="taskHistoryLoading" style="text-align:center;padding:32px">
+                <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+              </div>
+              <el-table v-else :data="taskHistory" size="small" border max-height="420" empty-text="暂无运行历史">
+                <el-table-column label="Run ID" width="110">
+                  <template #default="{ row }">{{ shortRunId(row.runId || row.id) }}</template>
+                </el-table-column>
+                <el-table-column label="触发" width="100">
+                  <template #default="{ row }">{{ triggerLabel(row.trigger) }}</template>
+                </el-table-column>
+                <el-table-column label="状态" width="100">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="runStatusTagType(row.status)">{{ latestStatusLabel(row.status) }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="开始时间" width="170">
+                  <template #default="{ row }">{{ formatTime(row.startTime) }}</template>
+                </el-table-column>
+                <el-table-column label="耗时" width="90">
+                  <template #default="{ row }">{{ formatDuration(row.durationMs) }}</template>
+                </el-table-column>
+                <el-table-column label="处理/新增/更新/跳过/失败" min-width="190">
+                  <template #default="{ row }">
+                    {{ formatNumber(row.sourceRows || 0) }} / {{ formatNumber(row.inserted || 0) }} / {{ formatNumber(row.updated || 0) }} / {{ formatNumber(row.skipped || 0) }} / {{ formatNumber(row.failed || 0) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="删除" width="110">
+                  <template #default="{ row }">{{ formatNumber((row.deleted || 0) + (row.softDeleted || 0)) }}</template>
+                </el-table-column>
+                <el-table-column prop="errorMessage" label="最近错误" min-width="220" show-overflow-tooltip>
+                  <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+
           <el-tab-pane label="配置">
             <div class="detail-kv-grid wide">
               <div><span>源连接</span><strong>{{ connName(detailTask.sourceConnectionId || detailTask.sourceId) }}</strong></div>
@@ -908,7 +982,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs, getSyncHistory } from '../api'
 
 // 当前用户身份
 const currentUser = getStoredUser()
@@ -971,6 +1045,8 @@ const taskDetailDialogVisible = ref(false)
 const detailTask = ref(null)
 const taskDetailLogsLoading = ref(false)
 const taskDetailLogs = ref([])
+const taskHistoryLoading = ref(false)
+const taskHistory = ref([])
 const hydratingTaskForm = ref(false)
 const copyingTaskId = ref(null)
 const templateSavingId = ref(null)
@@ -981,6 +1057,20 @@ let progressTimer = null
 
 const activeMappingCount = computed(() => mappingRows.value.filter(rowShouldSync).length)
 const skippedMappingCount = computed(() => mappingRows.value.filter(row => row.source && row.target && row._typeSafe === false && !row._forceInclude).length)
+
+const taskHistorySummary = computed(() => {
+  const rows = taskHistory.value || []
+  const completed = rows.filter(row => row.status !== 'running')
+  const success = completed.filter(row => row.status === 'success').length
+  const failed = completed.filter(row => ['failed', 'cancelled', 'paused'].includes(row.status)).length
+  const durations = completed.map(row => Number(row.durationMs || 0)).filter(value => value > 0)
+  return {
+    total: rows.length,
+    success,
+    failed,
+    averageDurationMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0,
+  }
+})
 
 // Watermark candidates (fetched from API when source table changes)
 const watermarkCandidates = ref({ pkCol: null, candidates: { timestamp: [], rowversion: [], auto_pk: [] } })
@@ -1158,6 +1248,13 @@ function healthLabel(status) {
 function latestStatusLabel(status) {
   const map = { success: '成功', failed: '失败', cancelled: '取消', paused: '已暂停', running: '运行中', never_run: '未运行' }
   return map[status] || status
+}
+
+function runStatusTagType(status) {
+  if (status === 'success') return 'success'
+  if (['failed', 'cancelled'].includes(status)) return 'danger'
+  if (['paused', 'running'].includes(status)) return 'warning'
+  return 'info'
 }
 
 function triggerLabel(trigger) {
@@ -2138,11 +2235,25 @@ async function refreshTaskDetailLogs() {
   }
 }
 
+async function refreshTaskHistory() {
+  if (!detailTask.value) return
+  taskHistoryLoading.value = true
+  try {
+    taskHistory.value = await getSyncHistory({ taskId: detailTask.value.id, limit: 20 })
+  } catch (err) {
+    ElMessage.error('获取运行历史失败: ' + err.message)
+    taskHistory.value = []
+  } finally {
+    taskHistoryLoading.value = false
+  }
+}
+
 async function openTaskDetail(task) {
   detailTask.value = task
   taskDetailLogs.value = []
+  taskHistory.value = []
   taskDetailDialogVisible.value = true
-  await refreshTaskDetailLogs()
+  await Promise.all([refreshTaskDetailLogs(), refreshTaskHistory()])
 }
 
 async function toggleSync(task) {
@@ -2640,6 +2751,27 @@ onUnmounted(() => {
 .detail-progress {
   margin-top: 12px;
 }
+
+.history-metrics {
+  margin-bottom: 12px;
+}
+.run-trend {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 18px;
+}
+.run-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+}
+.run-dot.success { background: var(--green); }
+.run-dot.failed,
+.run-dot.cancelled { background: var(--red); }
+.run-dot.paused,
+.run-dot.running { background: var(--amber); }
 
 .detail-section {
   margin-top: 14px;
