@@ -12,7 +12,8 @@ const RUN_TIMEOUT_MS = Number(process.env.E2E_RUN_TIMEOUT_MS || 30000);
 const TEST_BASE_NAME_HINT = process.env.E2E_TEABLE_BASE_HINT || 'SyncPilot';
 
 const checks = [];
-const cleanup = { connectionIds: [], taskIds: [] };
+const cleanup = { connectionIds: [], taskIds: [], teableTables: [], userIds: [] };
+const cleanupResults = [];
 
 function logStep(name, detail = '') {
   console.log(`\n== ${name}${detail ? `: ${detail}` : ''}`);
@@ -68,6 +69,7 @@ async function ensureTestUsers() {
   const user = await mkUser(`${PREFIX}-user@test.local`, 'user');
   users.push(admin, user);
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  cleanup.userIds.push(admin.id, user.id);
   return { admin, user };
 }
 
@@ -138,6 +140,7 @@ async function createTeableSmokeTable(conn) {
     method: 'POST',
     body: JSON.stringify({ name: tableName }),
   });
+  cleanup.teableTables.push({ conn, baseId: base.id, tableId: created.id, name: tableName });
   return { base, table: created };
 }
 
@@ -181,11 +184,64 @@ async function waitForRun(taskId, token) {
 
 async function cleanupAssets(userToken) {
   for (const taskId of cleanup.taskIds.reverse()) {
-    await request(`/tasks/${taskId}`, { method: 'DELETE' }, userToken).catch(() => {});
+    try {
+      const res = await request(`/tasks/${taskId}`, { method: 'DELETE' }, userToken);
+      cleanupResults.push({ type: 'task', id: taskId, ok: res.ok || res.status === 404, status: res.status });
+    } catch (err) {
+      cleanupResults.push({ type: 'task', id: taskId, ok: false, error: err.message });
+    }
+  }
+  for (const table of cleanup.teableTables.reverse()) {
+    try {
+      await teableRequest(table.conn, `/api/base/${table.baseId}/table/${table.tableId}`, { method: 'DELETE' });
+      cleanupResults.push({ type: 'teable_table', id: table.tableId, name: table.name, ok: true });
+    } catch (err) {
+      const notFound = /returned 404/.test(err.message || '');
+      cleanupResults.push({ type: 'teable_table', id: table.tableId, name: table.name, ok: notFound, error: notFound ? null : err.message });
+    }
   }
   for (const connectionId of cleanup.connectionIds.reverse()) {
-    await request(`/connections/${connectionId}`, { method: 'DELETE' }, userToken).catch(() => {});
+    try {
+      const res = await request(`/connections/${connectionId}`, { method: 'DELETE' }, userToken);
+      cleanupResults.push({ type: 'connection', id: connectionId, ok: res.ok || res.status === 404, status: res.status });
+    } catch (err) {
+      cleanupResults.push({ type: 'connection', id: connectionId, ok: false, error: err.message });
+    }
   }
+  cleanupTestUsers();
+}
+
+function cleanupTestUsers() {
+  try {
+    if (!fs.existsSync(USERS_FILE) || cleanup.userIds.length === 0) return;
+    const ids = new Set(cleanup.userIds);
+    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+    const remaining = users.filter((item) => !ids.has(item.id));
+    fs.writeFileSync(USERS_FILE, JSON.stringify(remaining, null, 2));
+    cleanupResults.push({ type: 'users', count: users.length - remaining.length, ok: true });
+  } catch (err) {
+    cleanupResults.push({ type: 'users', ok: false, error: err.message });
+  }
+}
+
+function printCleanupSummary() {
+  const failed = cleanupResults.filter((item) => !item.ok);
+  const summary = {
+    ok: failed.length === 0,
+    total: cleanupResults.length,
+    failed: failed.length,
+    leftovers: failed.map((item) => ({ type: item.type, id: item.id || null, name: item.name || null, error: item.error || null })),
+    results: cleanupResults.map((item) => ({
+      type: item.type,
+      id: item.id || null,
+      name: item.name || null,
+      count: item.count || null,
+      ok: item.ok === true,
+      status: item.status || null,
+      error: item.error || null,
+    })),
+  };
+  console.log(`ASSET_CLEANUP ${JSON.stringify(summary)}`);
 }
 
 async function main() {
@@ -267,10 +323,13 @@ async function main() {
     assertCondition(Array.isArray(backups), 'admin can list config backups', `${backups.length}`);
 
     await cleanupAssets(userToken);
-    record(true, 'cleanup completed');
+    const cleanupOk = cleanupResults.every((item) => item.ok);
+    record(cleanupOk, 'cleanup completed', cleanupOk ? `${cleanupResults.length} assets` : JSON.stringify(cleanupResults.filter((item) => !item.ok)));
   } catch (err) {
     await cleanupAssets(userLogin.token).catch(() => {});
     throw err;
+  } finally {
+    printCleanupSummary();
   }
 
   const failed = checks.filter((check) => !check.ok);

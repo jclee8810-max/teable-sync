@@ -42,11 +42,25 @@ function latestReportPath(output) {
   return output.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.endsWith('.md')).pop() || '';
 }
 
+function assetCleanupSummary() {
+  for (const result of results) {
+    const line = result.output.split(/\r?\n/).find((item) => item.startsWith('ASSET_CLEANUP '));
+    if (!line) continue;
+    try {
+      return JSON.parse(line.slice('ASSET_CLEANUP '.length));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function renderReport(exitCode) {
   const finishedAt = new Date();
   const passed = results.filter((item) => item.ok).length;
   const failed = results.filter((item) => !item.ok).length;
   const status = exitCode === 0 ? 'PASS' : 'FAIL';
+  const cleanup = assetCleanupSummary();
   return [
     '# Teable Sync Production Acceptance',
     '',
@@ -66,6 +80,18 @@ function renderReport(exitCode) {
     '- Large sync pressure simulation: first full sync, checkpoint resume, cancel/continue, idempotent replay.',
     '- Configuration migration: sanitized export and import preview are covered by release/API contract checks.',
     '- Alert notification permissions and webhook payload contract are covered by release/API contract checks.',
+    '',
+    '## Test Asset Cleanup',
+    '',
+    cleanup
+      ? `- Status: ${cleanup.ok ? 'PASS' : 'FAIL'}`
+      : '- Status: not reported',
+    cleanup
+      ? `- Assets processed: ${cleanup.total}, failed: ${cleanup.failed}`
+      : '- Assets processed: unknown',
+    cleanup?.leftovers?.length
+      ? `- Leftovers: ${cleanup.leftovers.map((item) => `${item.type}:${item.name || item.id || 'unknown'}`).join(', ')}`
+      : '- Leftovers: none',
     '',
     '## Details',
     '',

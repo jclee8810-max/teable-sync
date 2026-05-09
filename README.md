@@ -396,6 +396,8 @@ npm run acceptance:prod
 
 它会串起发布门禁、真实业务 smoke、10 万行压力模拟，并在 `server/data/reports/` 生成 `production-acceptance_*.md` 报告。默认压力规模是 1 千、1 万、10 万行。
 
+真实业务 smoke 会创建临时测试连接、任务、用户和 Teable 目标表；脚本结束时会自动清理，并在验收报告里写入测试资产清理结果。如果 Teable 表删除失败，报告会列出残留表名，方便手动处理。
+
 只跑较小压力规模：
 
 ```bash
