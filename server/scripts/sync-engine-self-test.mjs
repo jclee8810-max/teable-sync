@@ -45,6 +45,12 @@ try {
     clearTaskSyncState,
   } = await import('../src/services/syncEngine.js');
   const {
+    convertValue,
+    isTypeCompatible,
+    normalizeAttachmentValue,
+    suggestTeableType,
+  } = await import('../src/services/typeConverter.js');
+  const {
     addSyncFailure,
     clearSyncFailures,
     getSyncFailureCounts,
@@ -78,6 +84,12 @@ try {
 
   assert.equal(compareWatermarkValues('2026-05-08T01:00:00.000Z', new Date('2026-05-08T00:59:59.000Z')) > 0, true);
   assert.equal(normalizeTimestampWatermark(new Date('2026-05-08T01:00:00.000Z')), '2026-05-08T01:00:00.000Z');
+  assert.deepEqual(normalizeAttachmentValue('https://example.com/files/a.png'), [{ url: 'https://example.com/files/a.png', name: 'a.png' }]);
+  assert.deepEqual(convertValue('["https://example.com/a.png","https://example.com/b.jpg"]', 'json', 'attachment').map((item) => item.name), ['a.png', 'b.jpg']);
+  assert.equal(convertValue(Buffer.from('raw'), 'blob', 'attachment'), null);
+  assert.equal(isTypeCompatible('teable:attachment', 'attachment').safe, true);
+  assert.match(isTypeCompatible('varchar', 'attachment').warning, /URL/);
+  assert.equal(suggestTeableType('teable:attachment').type, 'attachment');
 
   clearTaskSyncState(TASK_ID);
   const state = JSON.parse(readFileSync(join(STATE_DIR, `${TASK_ID}.json`), 'utf-8'));

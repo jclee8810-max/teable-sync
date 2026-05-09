@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { isAdmin } from './roles.js';
+import { logger } from './logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -51,7 +52,7 @@ export function appendAuditLog(user, action, details = {}) {
     writeAuditLogs(logs);
     return entry;
   } catch (err) {
-    console.warn('Audit log write failed:', err.message);
+    logger.warn('Audit log write failed:', err.message);
     return null;
   }
 }

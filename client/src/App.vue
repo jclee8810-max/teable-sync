@@ -113,14 +113,15 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import ConnectionsPanel from './components/ConnectionsPanel.vue'
-import TasksPanel from './components/TasksPanel.vue'
-import ObservabilityPanel from './components/ObservabilityPanel.vue'
-import LogsPanel from './components/LogsPanel.vue'
-import SystemDoctorPanel from './components/SystemDoctorPanel.vue'
-import AuthPage from './components/AuthPage.vue'
+import { ref, computed, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import { getCurrentUser, clearToken, getToken, getVersionInfo, setStoredUser } from './api.js'
+
+const ConnectionsPanel = defineAsyncComponent(() => import('./components/ConnectionsPanel.vue'))
+const TasksPanel = defineAsyncComponent(() => import('./components/TasksPanel.vue'))
+const ObservabilityPanel = defineAsyncComponent(() => import('./components/ObservabilityPanel.vue'))
+const LogsPanel = defineAsyncComponent(() => import('./components/LogsPanel.vue'))
+const SystemDoctorPanel = defineAsyncComponent(() => import('./components/SystemDoctorPanel.vue'))
+const AuthPage = defineAsyncComponent(() => import('./components/AuthPage.vue'))
 
 const activeTab = ref('tasks')
 const isLoggedIn = ref(false)
@@ -129,6 +130,9 @@ const showUserMenu = ref(false)
 const showProfile = ref(false)
 const versionDialogVisible = ref(false)
 const versionInfo = ref({ version: '1.0.0', commit: 'unknown', buildTime: 'unknown', nodeEnv: '-' })
+const devLog = (...args) => {
+  if (import.meta.env.DEV) console.debug(...args)
+}
 
 const navItems = computed(() => {
   const items = [
@@ -163,7 +167,7 @@ let ws = null
 function connectWS() {
   // 避免重复连接
   if (ws && ws.readyState !== WebSocket.CLOSED) {
-    console.log('[WS] Already connected or connecting, skip')
+    devLog('[WS] Already connected or connecting, skip')
     return
   }
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -177,11 +181,11 @@ function connectWS() {
       if (token && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'auth', token }))
       } else {
-        console.warn('[WS] Cannot send: token=', !!token, 'readyState=', ws.readyState)
+        devLog('[WS] Cannot send: token=', !!token, 'readyState=', ws.readyState)
       }
     }, 50)
   }
-  ws.onerror = (e) => console.error('[WS] Error:', e)
+  ws.onerror = (e) => devLog('[WS] Error:', e)
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data)

@@ -30,6 +30,7 @@ import {
 } from './services/alertNotificationService.js';
 import { clearTaskSyncState } from './services/syncEngine.js';
 import { isAdmin, isOwner } from './services/roles.js';
+import { logger } from './services/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -76,7 +77,7 @@ function saveConfig(config, options = {}) {
     writeFileSync(tmpFile, JSON.stringify(encryptConfigSecrets(config), null, 2), 'utf-8');
     renameSync(tmpFile, CONFIG_FILE);
   }).catch(err => {
-    console.error('❌ Config write error:', err.message);
+    logger.error('Config write error:', err.message);
   });
   return _writeLock;
 }
@@ -222,7 +223,7 @@ function buildTaskConnectionStatus(config, user, task) {
   if (tgtConnRaw && tgtConnRaw.type !== 'teable') issues.push({ field: 'targetConnectionId', level: 'error', message: `目标连接类型错误: ${connectionLabel(tgtConnRaw, targetId)} 不是 Teable` });
   if (task.syncDirection === 'bidirectional') {
     if (srcConnRaw && srcConnRaw.type !== 'teable') issues.push({ field: 'syncDirection', level: 'error', message: '双向同步仅支持 Teable ↔ Teable' });
-    if (task.deletionMode && task.deletionMode !== 'ignore') issues.push({ field: 'deletionMode', level: 'warn', message: '双向同步暂不执行删除同步，请使用单向任务处理删除策略' });
+    if (task.deletionMode && task.deletionMode !== 'ignore') issues.push({ field: 'deletionMode', level: 'warn', message: '双向删除仅根据软删除标记传播，单侧缺失记录不会被直接删除' });
   }
   if (validation.error && issues.length === 0) issues.push({ field: 'connections', level: 'error', message: validation.error });
 
@@ -407,8 +408,8 @@ app.get('/api/version', (req, res) => {
 // --- Protected API routes ---
 app.use('/api', authMiddleware);
 const server = app.listen(PORT, () => {
-  console.log(`🚀 TeableSync Server running on http://localhost:${PORT}`);
-  resumeEnabledTasks().catch((err) => console.warn(`↻ 自动恢复检查失败: ${err.message}`));
+  logger.info(`TeableSync Server running on http://localhost:${PORT}`);
+  resumeEnabledTasks().catch((err) => logger.warn(`自动恢复检查失败: ${err.message}`));
   startAlertNotificationScanner();
 });
 
@@ -689,7 +690,7 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
 
 async function resumeEnabledTasks() {
   if (process.env.AUTO_RESUME_TASKS !== 'true') {
-    console.log('💡 自动恢复已关闭，设置 AUTO_RESUME_TASKS=true 可启用');
+    logger.info('自动恢复已关闭，设置 AUTO_RESUME_TASKS=true 可启用');
     return;
   }
   const config = loadConfig();
@@ -703,10 +704,10 @@ async function resumeEnabledTasks() {
       await startTaskScheduler(task.id, { id: task.userId, role: 'user' }, { audit: false, resume: true, runImmediately });
       restored += 1;
     } catch (err) {
-      console.warn(`↻ 自动恢复失败: ${task.name || task.id}: ${err.message}`);
+      logger.warn(`自动恢复失败: ${task.name || task.id}: ${err.message}`);
     }
   }
-  console.log(`↻ 自动恢复完成: ${restored}/${resumable.length} 个任务`);
+  logger.info(`自动恢复完成: ${restored}/${resumable.length} 个任务`);
 }
 
 let alertNotificationScanRunning = false;
@@ -740,7 +741,7 @@ async function scanAndSendAlertNotifications() {
       lastError: err.message,
     };
     await saveConfig(latest, { backup: false });
-    console.warn(`⚠️ 告警通知发送失败: ${err.message}`);
+    logger.warn(`告警通知发送失败: ${err.message}`);
   } finally {
     alertNotificationScanRunning = false;
   }
@@ -748,7 +749,7 @@ async function scanAndSendAlertNotifications() {
 
 function startAlertNotificationScanner() {
   setInterval(() => {
-    scanAndSendAlertNotifications().catch((err) => console.warn(`⚠️ 告警通知扫描失败: ${err.message}`));
+    scanAndSendAlertNotifications().catch((err) => logger.warn(`告警通知扫描失败: ${err.message}`));
   }, ALERT_NOTIFICATION_SCAN_INTERVAL_MS);
 }
 
@@ -1843,7 +1844,7 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    console.error(`[Reconcile] task ${task.id} failed:`, err);
+    logger.error(`Reconcile task ${task.id} failed:`, err);
     const message = err?.message || '一致性校验失败';
     const status = /connect|timeout|ECONN|ENOTFOUND|EAI_AGAIN|Teable API/i.test(message)
       ? 502
@@ -2111,11 +2112,11 @@ app.get('/api/sync-history/:id', (req, res) => {
 
 // --- Global error handling ---
 process.on('uncaughtException', (err) => {
-  console.error('💥 Uncaught Exception:', err);
+  logger.error('Uncaught Exception:', err);
   broadcastLog({ level: 'error', message: `系统异常: ${err.message}`, ts: new Date().toISOString() });
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('💥 Unhandled Rejection:', reason);
+  logger.error('Unhandled Rejection:', reason);
   broadcastLog({ level: 'error', message: `未处理的Promise异常: ${reason}`, ts: new Date().toISOString() });
 });

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { signToken, authMiddleware } from '../middleware/auth.js';
 import { appendAuditLog } from '../services/auditLog.js';
 import { ROLES, ensureOwner, isAdmin, isOwner, roleLabel } from '../services/roles.js';
+import { logger } from '../services/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -182,7 +183,7 @@ router.get('/teable-login', (req, res) => {
     `scope=${encodeURIComponent('record|read table|read user|email_read')}&` +
     `state=${state}`;
 
-  console.log(`[Auth OAuth] Redirecting to Teable for login, callback=${redirectUri}`);
+  logger.info(`[Auth OAuth] Redirecting to Teable for login, callback=${redirectUri}`);
   res.redirect(authUrl);
 });
 
@@ -193,7 +194,7 @@ router.get('/teable-callback', async (req, res) => {
   const { code, state, error, error_description } = req.query;
 
   if (error) {
-    console.error(`[Auth OAuth] Teable error: ${error} - ${error_description}`);
+    logger.error(`[Auth OAuth] Teable error: ${error} - ${error_description}`);
     return res.redirect(`${FRONTEND_BASE_URL}/?auth_error=${encodeURIComponent(error_description || error)}`);
   }
 
@@ -247,11 +248,11 @@ router.get('/teable-callback', async (req, res) => {
     const meRes = await fetch(meUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    console.log(`[Auth OAuth] User info response: ${meRes.status}`);
+    logger.info(`[Auth OAuth] User info response: ${meRes.status}`);
 
     if (!meRes.ok) {
       const errText = await meRes.text().catch(() => '');
-      console.error(`[Auth OAuth] User info failed: ${meRes.status} - ${errText}`);
+      logger.error(`[Auth OAuth] User info failed: ${meRes.status} - ${errText}`);
       throw new Error(`无法获取 Teable 用户信息（${meRes.status}），请确保 OAuth App 有 user:email_read 权限`);
     }
 
@@ -278,7 +279,7 @@ router.get('/teable-callback', async (req, res) => {
       };
       users.push(user);
       saveUsers(users);
-      console.log(`[Auth OAuth] Auto-created user from Teable login`);
+      logger.info('[Auth OAuth] Auto-created user from Teable login');
     } else {
       const idx = users.findIndex(u => u.id === user.id);
       users[idx].teableOAuthToken = accessToken;
@@ -294,11 +295,11 @@ router.get('/teable-callback', async (req, res) => {
 
     // Redirect with a short-lived one-time code instead of a bearer token.
     const redirectUrl = `${FRONTEND_BASE_URL}/?oauth_code=${loginCode}`;
-    console.log(`[Auth OAuth] Redirecting to frontend after successful login`);
+    logger.info('[Auth OAuth] Redirecting to frontend after successful login');
     res.redirect(redirectUrl);
 
   } catch (err) {
-    console.error(`[Auth OAuth] Error: ${err.message}`);
+    logger.error(`[Auth OAuth] Error: ${err.message}`);
     res.redirect(`${FRONTEND_BASE_URL}/?auth_error=${encodeURIComponent(err.message)}`);
   }
 });

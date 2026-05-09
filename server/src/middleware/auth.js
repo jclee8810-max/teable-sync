@@ -3,14 +3,15 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { ensureOwner } from '../services/roles.js';
+import { logger } from '../services/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const USERS_FILE = join(__dirname, '..', '..', 'data', 'users.json');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
-  console.warn('[Auth] ⚠️ JWT_SECRET not set! Using insecure fallback for development only.');
-  console.warn('[Auth] In production, set JWT_SECRET environment variable.');
+  logger.warn('[Auth] JWT_SECRET not set. Using insecure fallback for development only.');
+  logger.warn('[Auth] In production, set JWT_SECRET environment variable.');
 }
 const _jwtSecret = JWT_SECRET || 'teable-sync-dev-only-secret-CHANGE-ME';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';

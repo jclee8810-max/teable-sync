@@ -201,7 +201,11 @@ function checkTaskSettings(task, srcConn, issues) {
     addIssue(issues, 'error', 'direction.bidirectionalSourceInvalid', '双向同步仅支持 Teable 作为源端');
   }
   if (task.syncDirection === 'bidirectional' && task.deletionMode && task.deletionMode !== 'ignore') {
-    addIssue(issues, 'warn', 'direction.bidirectionalDeletionIgnored', '双向同步暂不执行删除同步，删除策略会被忽略');
+    if (!/^[a-zA-Z0-9_]+$/.test(task.softDeleteField || '')) {
+      addIssue(issues, 'error', 'direction.bidirectionalDeletionFieldInvalid', '双向删除需要配置合法的软删除标记字段');
+    } else {
+      addIssue(issues, 'warn', 'direction.bidirectionalDeletionTombstone', '双向删除只根据软删除标记传播；单侧缺失记录会优先修复，不会直接当作删除');
+    }
   }
   if (task.deletionMode && task.deletionMode !== 'ignore' && task.watermarkType !== 'full_scan') {
     addIssue(issues, 'warn', 'deletion.fullScanRequired', '删除检测需要全量扫描；当前增量策略下会跳过删除同步');
@@ -293,6 +297,13 @@ export async function runTaskPreflight(task, srcConn, tgtConn) {
     }
     const compat = isTypeCompatible(sourceType(srcCol.type, srcConn), tgtField.type);
     if (!compat.safe) addIssue(issues, 'warn', 'mapping.typeRisk', `${src} -> ${tgt}: ${compat.warning || '类型可能不兼容'}`, { source: src, target: tgt });
+  }
+
+  if (task.syncDirection === 'bidirectional' && task.deletionMode && task.deletionMode !== 'ignore') {
+    const fieldName = task.softDeleteField || 'deleted';
+    if (!sourceMap[fieldName] || !targetMap[fieldName]) {
+      addIssue(issues, 'error', 'direction.bidirectionalDeletionFieldMissing', `双向删除需要源表和目标表都存在软删除字段: ${fieldName}`);
+    }
   }
 
   const pkFieldName = mapping[pkCol] || pkCol;

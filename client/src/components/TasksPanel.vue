@@ -725,6 +725,14 @@
         >
           删除检测需要全量扫描。当前增量策略下会跳过删除同步。
         </el-alert>
+        <el-alert
+          v-if="form.syncDirection === 'bidirectional' && form.deletionMode !== 'ignore'"
+          type="warning"
+          :closable="false"
+          style="margin-bottom:12px"
+        >
+          双向删除只根据软删除字段传播；单侧缺失记录会优先修复，不会直接当作删除。
+        </el-alert>
       </el-form>
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="dialogVisible = false">取消</button>
@@ -1613,7 +1621,6 @@ watch(() => form.value.syncDirection, (direction) => {
       ? form.value.conflictStrategy
       : 'source_wins'
     form.value.watermarkType = 'full_scan'
-    form.value.deletionMode = 'ignore'
   } else {
     form.value.conflictStrategy = ['upsert', 'skip', 'insert_only'].includes(form.value.conflictStrategy)
       ? form.value.conflictStrategy
@@ -1854,7 +1861,6 @@ async function saveTask() {
       payload.watermarkType = 'full_scan'
       payload.watermarkColumn = ''
       payload.sourceTimestampColumn = ''
-      payload.deletionMode = 'ignore'
     }
     delete payload._baseId
     // Backward compat: also set sourceTimestampColumn from watermark config

@@ -1,6 +1,8 @@
 // Type converter for SQL → Teable field mapping
 // Provides type compatibility matrix + value converters
 
+import { logger } from './logger.js';
+
 /**
  * SQL type → Teable type compatibility matrix
  * Each entry: { safe: boolean, warning?: string, converter: (value) => convertedValue }
@@ -97,31 +99,38 @@ export const TYPE_COMPATIBILITY = {
     singleLineText: { safe: true, converter: (v) => String(v) },
     longText: { safe: true, converter: (v) => String(v) },
     number: { safe: false, warning: '文本转数字可能失败', converter: tryParseNumber },
+    attachment: { safe: false, warning: '仅支持 URL 文本转附件，非 URL 会被跳过', converter: normalizeAttachmentValue },
   },
   nvarchar: {
     singleLineText: { safe: true, converter: (v) => String(v) },
     longText: { safe: true, converter: (v) => String(v) },
     number: { safe: false, warning: '文本转数字可能失败', converter: tryParseNumber },
+    attachment: { safe: false, warning: '仅支持 URL 文本转附件，非 URL 会被跳过', converter: normalizeAttachmentValue },
   },
   char: {
     singleLineText: { safe: true, converter: (v) => String(v).trim() },
     longText: { safe: true, converter: (v) => String(v).trim() },
+    attachment: { safe: false, warning: '仅支持 URL 文本转附件，非 URL 会被跳过', converter: normalizeAttachmentValue },
   },
   nchar: {
     singleLineText: { safe: true, converter: (v) => String(v).trim() },
     longText: { safe: true, converter: (v) => String(v).trim() },
+    attachment: { safe: false, warning: '仅支持 URL 文本转附件，非 URL 会被跳过', converter: normalizeAttachmentValue },
   },
   text: {
     longText: { safe: true, converter: (v) => String(v) },
     singleLineText: { safe: false, warning: '长文本可能截断', converter: (v) => String(v) },
+    attachment: { safe: false, warning: '仅支持 URL 文本/数组转附件，非 URL 会被跳过', converter: normalizeAttachmentValue },
   },
   ntext: {
     longText: { safe: true, converter: (v) => String(v) },
     singleLineText: { safe: false, warning: '长文本可能截断', converter: (v) => String(v) },
+    attachment: { safe: false, warning: '仅支持 URL 文本/数组转附件，非 URL 会被跳过', converter: normalizeAttachmentValue },
   },
   json: {
     longText: { safe: true, converter: (v) => typeof v === 'object' ? JSON.stringify(v) : String(v) },
     singleLineText: { safe: false, warning: 'JSON转文本', converter: (v) => typeof v === 'object' ? JSON.stringify(v) : String(v) },
+    attachment: { safe: false, warning: '仅支持 JSON URL 数组或 Teable 附件结构', converter: normalizeAttachmentValue },
   },
   xml: {
     longText: { safe: true, converter: (v) => String(v) },
@@ -180,6 +189,21 @@ export function normalizeSqlType(sqlType) {
  * Get best Teable type suggestion for a SQL type
  */
 export function suggestTeableType(sqlType) {
+  if (String(sqlType || '').startsWith('teable:')) {
+    const sourceType = String(sqlType).slice(7);
+    const normalized = normalizeTeableFieldType(sourceType);
+    const directTypes = {
+      singlelinetext: 'singleLineText',
+      longtext: 'longText',
+      number: 'number',
+      date: 'date',
+      checkbox: 'checkbox',
+      attachment: 'attachment',
+      singleselect: 'singleSelect',
+      multipleselect: 'multipleSelect',
+    };
+    return { type: directTypes[normalized] || 'singleLineText', safe: Boolean(directTypes[normalized]), warning: directTypes[normalized] ? null : 'Teable 特殊字段默认转文本' };
+  }
   const norm = normalizeSqlType(sqlType);
   const compat = TYPE_COMPATIBILITY[norm];
   if (!compat) {
@@ -224,6 +248,7 @@ function convertTeableValue(value, sourceType, targetType) {
   const src = normalizeTeableFieldType(sourceType);
   const tgt = normalizeTeableFieldType(targetType);
   if (src === tgt) return value;
+  if (tgt === 'attachment') return normalizeAttachmentValue(value);
   if (['singlelinetext', 'longtext'].includes(tgt)) {
     if (typeof value === 'object') return JSON.stringify(value);
     return String(value);
@@ -251,14 +276,14 @@ export function convertValue(value, sqlType, teableType) {
   const typeInfo = compat[teableType];
   if (!typeInfo) {
     // Target type not in compatibility matrix, try safe conversion
-    console.warn(`No converter for ${norm} → ${teableType}, passing raw value`);
+    logger.warn(`No converter for ${norm} → ${teableType}, passing raw value`);
     return value;
   }
   
   try {
     return typeInfo.converter(value);
   } catch (e) {
-    console.warn(`Conversion failed for ${norm} → ${teableType}: ${e.message}`);
+    logger.warn(`Conversion failed for ${norm} → ${teableType}: ${e.message}`);
     return null;
   }
 }
@@ -279,6 +304,8 @@ export function isTypeCompatible(sqlType, teableType) {
     if (src === 'number' && tgt === 'number') return { safe: true, warning: null };
     if (src === 'date' && tgt === 'date') return { safe: true, warning: null };
     if (src === 'checkbox' && tgt === 'checkbox') return { safe: true, warning: null };
+    if (src === 'attachment' && tgt === 'attachment') return { safe: true, warning: null };
+    if (tgt === 'attachment') return { safe: false, warning: '仅支持 URL 或 Teable 原生附件结构' };
     return { safe: false, warning: '不兼容的目标类型' };
   }
 
@@ -313,4 +340,62 @@ function tryParseNumber(value) {
   if (typeof value === 'number') return value;
   const n = Number(value);
   return isNaN(n) ? value : n; // Return original if can't parse
+}
+
+function isHttpUrl(value) {
+  return /^https?:\/\/[^\s]+$/i.test(String(value || '').trim());
+}
+
+function attachmentNameFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const last = parsed.pathname.split('/').filter(Boolean).pop();
+    return decodeURIComponent(last || parsed.hostname || 'attachment');
+  } catch {
+    return 'attachment';
+  }
+}
+
+function normalizeAttachmentItem(item) {
+  if (!item) return null;
+  if (typeof item === 'string') {
+    const url = item.trim();
+    return isHttpUrl(url) ? { url, name: attachmentNameFromUrl(url) } : null;
+  }
+  if (typeof item === 'object') {
+    const url = item.url || item.presignedUrl || item.downloadUrl || item.href;
+    if (url && isHttpUrl(url)) {
+      return {
+        ...item,
+        url,
+        name: item.name || item.filename || item.fileName || attachmentNameFromUrl(url),
+      };
+    }
+    if (item.id || item.token) return item;
+  }
+  return null;
+}
+
+export function normalizeAttachmentValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (Buffer.isBuffer(value) || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return null;
+
+  let raw = value;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        raw = JSON.parse(trimmed);
+      } catch {
+        raw = trimmed;
+      }
+    } else if (trimmed.includes('\n') || trimmed.includes(',')) {
+      raw = trimmed.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+    }
+  }
+
+  const items = Array.isArray(raw) ? raw : [raw];
+  const attachments = items.map(normalizeAttachmentItem).filter(Boolean);
+  return attachments.length ? attachments : null;
 }

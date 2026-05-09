@@ -1,6 +1,8 @@
 // Database service - unified interface for SQL Server, MySQL, PostgreSQL
 // With connection pool caching and database override
 
+import { logger } from './logger.js';
+
 const DRIVERS = {
   mssql: () => import('mssql'),
   mysql: () => import('mysql2/promise'),
@@ -20,7 +22,7 @@ setInterval(() => {
         else if (entry.type === 'pg') entry.pool.end();
       } catch (e) { /* ignore close errors */ }
       poolCache.delete(key);
-      console.log(`🔌 连接池过期已释放: ${key}`);
+      logger.debug(`连接池过期已释放: ${key}`);
     }
   }
 }, 5 * 60 * 1000); // check every 5 min

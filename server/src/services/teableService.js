@@ -1,5 +1,7 @@
 // Teable API service - corrected API paths
 
+import { logger } from './logger.js';
+
 const DEFAULT_RETRY_COUNT = 3;
 const DEFAULT_RETRY_BASE_MS = 500;
 const DEFAULT_REQUEST_GAP_MS = 120;
@@ -76,7 +78,7 @@ export async function getTeableBases(conn) {
       allBases.push(...bases);
     } catch (e) {
       // Skip spaces we can't read
-      console.warn(`Cannot read space ${space.id}: ${e.message}`);
+      logger.warn(`Cannot read space ${space.id}: ${e.message}`);
     }
   }
   return allBases;
@@ -214,13 +216,13 @@ export async function createTeableField(conn, tableId, fieldName, sqlType) {
 /**
  * Ensure target table has all required fields from source schema.
  * Returns a map of sourceColumnName → targetFieldName (either existing or newly created).
- * Skips attachment fields and already-existing fields.
+ * Creates URL-compatible attachment fields and already-existing fields.
  * P0-2 fix: field creation failure → skip column entirely, do NOT map to non-existent field.
  */
 export async function ensureTeableFields(conn, tableId, sourceSchema, columnMapping, existingFields, log) {
   const existingFieldNames = new Set(existingFields.map(f => f.name));
   const createdFields = [];
-  const skippedAttachmentCols = [];
+  const skippedBinaryAttachmentCols = [];
   const skippedFailedCols = []; // P0-2: track columns that failed to create
   const mapping = {};
 
@@ -234,8 +236,8 @@ export async function ensureTeableFields(conn, tableId, sourceSchema, columnMapp
 
     // Field doesn't exist → try to create it
     const info = sourceTypeToTeable(col.type);
-    if (info.type === 'attachment') {
-      skippedAttachmentCols.push(col.name);
+    if (info.type === 'attachment' && isRawBinaryType(col.type)) {
+      skippedBinaryAttachmentCols.push(col.name);
       continue;
     }
     try {
@@ -251,12 +253,17 @@ export async function ensureTeableFields(conn, tableId, sourceSchema, columnMapp
     }
   }
 
-  if (skippedAttachmentCols.length > 0) {
-    log('warn', `  ⚠️ 跳过附件字段(暂不支持同步): ${skippedAttachmentCols.join(', ')}`);
+  if (skippedBinaryAttachmentCols.length > 0) {
+    log('warn', `  ⚠️ 跳过二进制附件字段(暂不支持直接上传): ${skippedBinaryAttachmentCols.join(', ')}`);
   }
   if (skippedFailedCols.length > 0) {
     log('warn', `  ⚠️ 跳过创建失败的字段(数据不会同步): ${skippedFailedCols.join(', ')}`);
   }
 
-  return { mapping, createdFields, skippedAttachmentCols, skippedFailedCols };
+  return { mapping, createdFields, skippedAttachmentCols: skippedBinaryAttachmentCols, skippedBinaryAttachmentCols, skippedFailedCols };
+}
+
+function isRawBinaryType(type) {
+  const t = String(type || '').toLowerCase();
+  return t.includes('binary') || t.includes('blob') || t.includes('image') || t.includes('bytea');
 }

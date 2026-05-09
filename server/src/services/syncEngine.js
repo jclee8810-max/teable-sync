@@ -14,6 +14,7 @@ import { getTeableFields, getTeableRecords, createTeableRecords, updateTeableRec
 import { createSyncHistory, updateSyncHistory } from './syncHistory.js';
 import { addSyncFailure, clearSyncFailures } from './syncFailures.js';
 import { convertValue } from './typeConverter.js';
+import { logger } from './logger.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -278,6 +279,7 @@ async function flushBidirectionalWrites({
   tableId,
   inserts,
   updates,
+  deletes = [],
   batchSize,
   retryCount,
   log,
@@ -286,6 +288,7 @@ async function flushBidirectionalWrites({
 }) {
   let inserted = 0;
   let updated = 0;
+  let deleted = 0;
   let failed = 0;
 
   for (let i = 0; i < inserts.length; i += batchSize) {
@@ -326,7 +329,28 @@ async function flushBidirectionalWrites({
     }
   }
 
-  return { inserted, updated, failed };
+  for (let i = 0; i < deletes.length; i += batchSize) {
+    const batch = deletes.slice(i, i + batchSize);
+    const ids = batch.map((item) => item.id).filter(Boolean);
+    if (ids.length === 0) continue;
+    try {
+      await withRetry(() => deleteTeableRecords(conn, tableId, ids), retryCount, log, operationLabel + '删除');
+      deleted += ids.length;
+    } catch (err) {
+      failed += ids.length;
+      addSyncFailure({
+        task,
+        operation: 'hard_delete',
+        tableId,
+        recordIds: ids,
+        primaryKeys: batch.map((item) => item.pk).filter(Boolean),
+        error: err,
+      });
+      log('warn', operationLabel + '删除失败: ' + err.message);
+    }
+  }
+
+  return { inserted, updated, deleted, failed };
 }
 
 async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
@@ -336,9 +360,14 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
   }
 
   const strategy = normalizeBidirectionalStrategy(task.conflictStrategy);
+  const deletionMode = task.deletionMode || 'ignore';
+  const softDeleteField = task.softDeleteField || 'deleted';
+  if (deletionMode !== 'ignore' && !isSafeIdentifier(softDeleteField)) {
+    throw new Error('双向删除需要合法的软删除字段名');
+  }
   const historyRec = createSyncHistory(taskId, task.name, task.sourceTable, task.targetTableId);
   historyRec.mode = 'bidirectional';
-  log('info', '双向同步模式: Teable ↔ Teable | 冲突策略: ' + strategy + ' | 分页: ' + pageSize + '/页 | 写入批量: ' + batchSize);
+  log('info', '双向同步模式: Teable ↔ Teable | 冲突策略: ' + strategy + ' | 删除策略: ' + deletionMode + ' | 分页: ' + pageSize + '/页 | 写入批量: ' + batchSize);
   report({ phase: 'preparing', mode: 'bidirectional', pageSize, batchSize, processedRows: 0 });
 
   const [srcFields, tgtFields] = await Promise.all([
@@ -382,6 +411,12 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
   if (!mapping[pkCol]) mapping[pkCol] = pkFieldName;
   if (!srcFieldMap.has(pkCol)) throw new Error('源主键字段不存在: ' + pkCol);
   if (!tgtFieldMap.has(pkFieldName) && !createdFields.find(f => f.fieldName === pkFieldName)) throw new Error('目标主键字段不存在: ' + pkFieldName);
+  const reverseSoftDeleteField = Object.entries(mapping).find(([, tgtField]) => tgtField === softDeleteField)?.[0] || softDeleteField;
+  const sourceHasSoftDelete = srcFieldMap.has(reverseSoftDeleteField);
+  const targetHasSoftDelete = tgtFieldMap.has(softDeleteField) || createdFields.find(f => f.fieldName === softDeleteField);
+  if (deletionMode !== 'ignore' && (!sourceHasSoftDelete || !targetHasSoftDelete)) {
+    throw new Error('双向删除需要源表和目标表都存在软删除字段: ' + softDeleteField);
+  }
 
   const reverseMapping = {};
   for (const [srcCol, tgtField] of Object.entries(mapping)) reverseMapping[tgtField] = srcCol;
@@ -420,27 +455,56 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
   const targetUpdates = [];
   const sourceInserts = [];
   const sourceUpdates = [];
+  const targetDeletes = [];
+  const sourceDeletes = [];
   let skipCount = 0;
   let conflictCount = 0;
+  let softDeleteCount = 0;
 
   for (const key of keys) {
     checkCancelled();
     const source = sourceMap.get(key);
     const target = targetMap.get(key);
     if (source && !target) {
+      if (deletionMode !== 'ignore' && isSoftDeleted(source.fields, reverseSoftDeleteField)) {
+        skipCount++;
+        continue;
+      }
       const fields = createRecordFields(source.fields, mapping, srcTypeMap, tgtTypeMap, log);
       targetInserts.push({ fields });
       continue;
     }
     if (!source && target) {
+      if (deletionMode !== 'ignore' && isSoftDeleted(target.fields, softDeleteField)) {
+        skipCount++;
+        continue;
+      }
       const fields = createRecordFields(target.fields, reverseMapping, tgtTypeMap, srcTypeMap, log);
       sourceInserts.push({ fields });
       continue;
     }
     if (!source || !target) continue;
 
+    const sourceDeleted = deletionMode !== 'ignore' && isSoftDeleted(source.fields, reverseSoftDeleteField);
+    const targetDeleted = deletionMode !== 'ignore' && isSoftDeleted(target.fields, softDeleteField);
+    if (sourceDeleted || targetDeleted) {
+      if (deletionMode === 'hard_delete') {
+        if (sourceDeleted && target.id) targetDeletes.push({ id: target.id, pk: key });
+        if (targetDeleted && source.id) sourceDeletes.push({ id: source.id, pk: key });
+      } else if (deletionMode === 'soft_delete') {
+        if (sourceDeleted && !targetDeleted) targetUpdates.push({ id: target.id, fields: { [softDeleteField]: true } });
+        if (targetDeleted && !sourceDeleted) sourceUpdates.push({ id: source.id, fields: { [reverseSoftDeleteField]: true } });
+      }
+      softDeleteCount++;
+      continue;
+    }
+
     const targetCandidate = createRecordFields(source.fields, mapping, srcTypeMap, tgtTypeMap, log);
     const sourceCandidate = createRecordFields(target.fields, reverseMapping, tgtTypeMap, srcTypeMap, log);
+    if (deletionMode === 'soft_delete') {
+      targetCandidate[softDeleteField] = false;
+      sourceCandidate[reverseSoftDeleteField] = false;
+    }
     const targetDiffers = fieldsDiffer(targetCandidate, target.fields);
     const sourceDiffers = fieldsDiffer(sourceCandidate, source.fields);
     if (!targetDiffers && !sourceDiffers) {
@@ -475,6 +539,7 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
     tableId: task.targetTableId,
     inserts: targetInserts,
     updates: targetUpdates,
+    deletes: targetDeletes,
     batchSize,
     retryCount,
     log,
@@ -487,6 +552,7 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
     tableId: task.sourceTable,
     inserts: sourceInserts,
     updates: sourceUpdates,
+    deletes: sourceDeletes,
     batchSize,
     retryCount,
     log,
@@ -496,6 +562,7 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
 
   const insertCount = targetResult.inserted + sourceResult.inserted;
   const updateCount = targetResult.updated + sourceResult.updated;
+  const deleteCount = targetResult.deleted + sourceResult.deleted;
   const errorCount = targetResult.failed + sourceResult.failed;
   if (errorCount > 0) throw new Error('双向同步存在 ' + errorCount + ' 条失败记录');
 
@@ -508,7 +575,7 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
   });
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  log('info', '双向同步完成: 源 ' + sourceRecords.length + ', 目标 ' + targetRecords.length + ', 新增 ' + insertCount + ', 更新 ' + updateCount + ', 冲突 ' + conflictCount + ', 跳过 ' + skipCount + ', 失败 ' + errorCount + ' | 耗时 ' + elapsed + 's');
+  log('info', '双向同步完成: 源 ' + sourceRecords.length + ', 目标 ' + targetRecords.length + ', 新增 ' + insertCount + ', 更新 ' + updateCount + ', 删除 ' + deleteCount + ', 删除标记 ' + softDeleteCount + ', 冲突 ' + conflictCount + ', 跳过 ' + skipCount + ', 失败 ' + errorCount + ' | 耗时 ' + elapsed + 's');
   report({
     status: 'success',
     phase: 'completed',
@@ -517,6 +584,8 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
     targetRows: targetRecords.length,
     inserted: insertCount,
     updated: updateCount,
+    deleted: deleteCount,
+    softDeleted: softDeleteCount,
     skipped: skipCount,
     failed: errorCount,
     conflicts: conflictCount,
@@ -527,6 +596,8 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
     sourceRows: sourceRecords.length,
     inserted: insertCount,
     updated: updateCount,
+    deleted: deleteCount,
+    softDeleted: softDeleteCount,
     skipped: skipCount,
     failed: errorCount,
     durationMs: Date.now() - startTime,
@@ -539,11 +610,19 @@ async function runBidirectionalTeableSync(task, srcConn, tgtConn, context) {
     targetRows: targetRecords.length,
     inserted: insertCount,
     updated: updateCount,
+    deleted: deleteCount,
+    softDeleted: softDeleteCount,
     skipped: skipCount,
     failed: errorCount,
     conflicts: conflictCount,
     durationMs: Date.now() - startTime,
   };
+}
+
+function isSoftDeleted(fields, fieldName) {
+  if (!fieldName) return false;
+  const value = fields?.[fieldName];
+  return value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true' || String(value).toLowerCase() === 'yes';
 }
 
 function validateTaskConfig(task, pkCol, watermark) {
@@ -1282,7 +1361,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     const cancelled = err.code === 'SYNC_CANCELLED';
     const paused = err.code === 'SYNC_INITIALIZATION_PAUSED';
     log(cancelled || paused ? 'warn' : 'error', cancelled ? '同步已取消' : paused ? err.message : '同步失败: ' + err.message);
-    console.error(err);
+    logger.error(err);
     if (historyRec) updateSyncHistory(historyRec.id, { status: paused ? 'paused' : cancelled ? 'cancelled' : 'failed', errorMessage: err.message, durationMs: Date.now() - startTime });
     report({ status: paused ? 'paused' : cancelled ? 'cancelled' : 'failed', phase: paused ? 'paused' : cancelled ? 'cancelled' : 'failed', errorMessage: err.message });
     throw err;
