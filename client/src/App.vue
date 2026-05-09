@@ -31,7 +31,7 @@
       <div class="sidebar-context">
         <div>
           <span class="context-label">当前身份</span>
-          <strong>{{ currentUser?.role === 'owner' ? '系统所有者' : currentUser?.role === 'super_admin' ? '超级管理员' : '普通用户' }}</strong>
+          <strong>{{ currentUser?.role === 'owner' ? '系统所有者' : currentUser?.role === 'super_admin' ? '管理员' : '普通用户' }}</strong>
         </div>
         <div>
           <span class="context-label">运行版本</span>

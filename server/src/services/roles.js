@@ -14,7 +14,7 @@ export function isAdmin(user) {
 
 export function roleLabel(role) {
   if (role === ROLES.OWNER) return '系统所有者';
-  if (role === ROLES.SUPER_ADMIN) return '超级管理员';
+  if (role === ROLES.SUPER_ADMIN) return '管理员';
   return '普通用户';
 }
 

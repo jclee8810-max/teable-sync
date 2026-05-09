@@ -126,7 +126,7 @@ router.put('/password', authMiddleware, async (req, res) => {
 // GET /api/auth/users
 router.get('/users', authMiddleware, (req, res) => {
   if (!isAdmin(req.user)) {
-    return res.status(403).json({ error: '仅系统所有者或超级管理员可查看用户' });
+    return res.status(403).json({ error: '仅系统所有者或管理员可查看用户' });
   }
   const users = loadUsers();
   res.json(users.map(sanitizeUser));
@@ -317,7 +317,7 @@ router.delete('/users/:id', authMiddleware, (req, res) => {
   const target = users.find(u => u.id === req.params.id);
   if (!target) return res.status(404).json({ error: '用户不存在' });
   if (isAdmin(target)) {
-    return res.status(400).json({ error: '不能删除系统所有者或超级管理员' });
+    return res.status(400).json({ error: '不能删除系统所有者或管理员' });
   }
   users = users.filter(u => u.id !== req.params.id);
   saveUsers(users);
@@ -337,7 +337,7 @@ router.put('/users/:id/role', authMiddleware, (req, res) => {
   }
   const { role } = req.body;
   if (![ROLES.USER, ROLES.SUPER_ADMIN].includes(role)) {
-    return res.status(400).json({ error: '角色只能是普通用户或超级管理员' });
+    return res.status(400).json({ error: '角色只能是普通用户或管理员' });
   }
   if (req.params.id === req.user.id) {
     return res.status(400).json({ error: '不能修改自己的角色' });

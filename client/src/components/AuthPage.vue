@@ -112,7 +112,7 @@
             <el-select v-model="roleFilter" size="small" class="role-filter">
               <el-option label="全部角色" value="" />
               <el-option label="系统所有者" value="owner" />
-              <el-option label="超级管理员" value="super_admin" />
+              <el-option label="管理员" value="super_admin" />
               <el-option label="普通用户" value="user" />
             </el-select>
           </div>
@@ -138,7 +138,7 @@
                   @change="role => doUpdateRole(u, role)"
                 >
                   <el-option label="普通用户" value="user" />
-                  <el-option label="超级管理员" value="super_admin" />
+                  <el-option label="管理员" value="super_admin" />
                 </el-select>
                 <button v-if="u.role === 'user'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
                   {{ deletingId === u.id ? '删除中...' : '删除' }}
@@ -254,7 +254,7 @@ function isAdmin(row) {
 
 function roleLabel(role) {
   if (role === 'owner') return '系统所有者'
-  if (role === 'super_admin') return '超级管理员'
+  if (role === 'super_admin') return '管理员'
   return '普通用户'
 }
 
