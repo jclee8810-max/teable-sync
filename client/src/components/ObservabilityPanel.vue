@@ -18,7 +18,7 @@
     <div class="obs-summary">
       <button class="obs-tile" type="button" @click="alertFilter = ''" :class="{ active: alertFilter === '' }">
         <span>开放告警</span>
-        <strong>{{ summary.openAlerts || 0 }}</strong>
+        <strong>{{ summary.activeAlerts ?? summary.openAlerts ?? 0 }}</strong>
       </button>
       <button class="obs-tile critical" type="button" @click="alertFilter = 'critical'" :class="{ active: alertFilter === 'critical' }">
         <span>严重</span>
@@ -36,10 +36,10 @@
         <span>运行中</span>
         <strong>{{ summary.runningTasks || 0 }}</strong>
       </div>
-      <div class="obs-tile">
-        <span>待处理失败</span>
-        <strong>{{ summary.pendingFailureRows || 0 }}</strong>
-      </div>
+      <button class="obs-tile" type="button" @click="alertFilter = 'acknowledged'" :class="{ active: alertFilter === 'acknowledged' }">
+        <span>已确认/静默</span>
+        <strong>{{ (summary.acknowledgedAlerts || 0) + (summary.mutedAlerts || 0) }}</strong>
+      </button>
     </div>
 
     <div class="obs-grid">
@@ -52,15 +52,22 @@
           <em>{{ filteredAlerts.length }} 条</em>
         </div>
         <div class="alert-list" v-loading="loading">
-          <div v-for="item in filteredAlerts" :key="item.id" class="alert-row" :class="item.severity">
+          <div v-for="item in filteredAlerts" :key="item.id" class="alert-row" :class="[item.severity, item.state]">
             <div class="alert-main">
               <span class="alert-severity">{{ severityLabel(item.severity) }}</span>
               <strong>{{ item.title }}</strong>
               <p>{{ item.message }}</p>
+              <small v-if="item.state !== 'open'" class="alert-state-note">{{ alertStateDetail(item) }}</small>
             </div>
             <div class="alert-meta">
               <span>{{ item.taskName || item.metadata?.connectionName || '系统' }}</span>
               <small>{{ alertTypeLabel(item.type) }}</small>
+              <em :class="['alert-state', item.state]">{{ alertStateLabel(item.state) }}</em>
+              <div class="alert-actions">
+                <button v-if="item.state === 'open'" type="button" @click="ackAlert(item)">确认</button>
+                <button v-if="item.state === 'open'" type="button" @click="muteAlertFor(item)">静默1h</button>
+                <button v-if="item.state !== 'open'" type="button" @click="restoreAlertState(item)">恢复</button>
+              </div>
             </div>
           </div>
           <el-empty v-if="!loading && filteredAlerts.length === 0" description="当前没有匹配告警" :image-size="72" />
@@ -199,8 +206,11 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Bell, Check, Promotion, Refresh } from '@element-plus/icons-vue'
 import {
+  acknowledgeAlert,
   getAlertNotificationSettings,
   getObservability,
+  muteAlert,
+  restoreAlert,
   getStoredUser,
   testAlertNotification,
   updateAlertNotificationSettings,
@@ -231,7 +241,8 @@ const recentLogs = computed(() => snapshot.value?.recentLogs || [])
 const filteredAlerts = computed(() => {
   const alerts = snapshot.value?.alerts || []
   if (!alertFilter.value) return alerts
-  return alerts.filter((item) => item.severity === alertFilter.value)
+  if (alertFilter.value === 'acknowledged') return alerts.filter((item) => item.state !== 'open')
+  return alerts.filter((item) => item.severity === alertFilter.value && item.state === 'open')
 })
 
 async function loadSnapshot() {
@@ -303,6 +314,36 @@ async function sendTestNotification() {
   }
 }
 
+async function ackAlert(item) {
+  try {
+    await acknowledgeAlert(item.id)
+    ElMessage.success('告警已确认')
+    await loadSnapshot()
+  } catch (err) {
+    ElMessage.error('确认告警失败: ' + err.message)
+  }
+}
+
+async function muteAlertFor(item) {
+  try {
+    await muteAlert(item.id, 60)
+    ElMessage.success('告警已静默 1 小时')
+    await loadSnapshot()
+  } catch (err) {
+    ElMessage.error('静默告警失败: ' + err.message)
+  }
+}
+
+async function restoreAlertState(item) {
+  try {
+    await restoreAlert(item.id)
+    ElMessage.success('告警已恢复')
+    await loadSnapshot()
+  } catch (err) {
+    ElMessage.error('恢复告警失败: ' + err.message)
+  }
+}
+
 function formatDateTime(ts) {
   if (!ts) return ''
   return new Date(ts).toLocaleString('zh-CN', { hour12: false })
@@ -333,6 +374,16 @@ function alertTypeLabel(type) {
     schema_snapshot: '字段快照',
     connection_test: '连接测试',
   }[type] || type || '-')
+}
+
+function alertStateLabel(state) {
+  return ({ open: '开放', acknowledged: '已确认', muted: '已静默' }[state] || '开放')
+}
+
+function alertStateDetail(item) {
+  if (item.state === 'muted') return `静默到 ${formatDateTime(item.mutedUntil)}`
+  if (item.state === 'acknowledged') return `确认于 ${formatDateTime(item.acknowledgedAt)}`
+  return ''
 }
 
 function healthLabel(status) {
@@ -505,6 +556,9 @@ button.obs-tile:hover,
 }
 .alert-row.critical { border-left-color: var(--red); }
 .alert-row.warning { border-left-color: var(--amber); }
+.alert-row.acknowledged,
+.alert-row.muted { opacity: 0.68; }
+.alert-row.muted { border-left-style: dashed; }
 
 .alert-main {
   display: grid;
@@ -520,6 +574,10 @@ button.obs-tile:hover,
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+.alert-state-note {
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 .alert-severity {
   justify-self: start;
@@ -551,6 +609,33 @@ button.obs-tile:hover,
   color: var(--text-tertiary);
   font-size: 11px;
 }
+.alert-state {
+  justify-self: end;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-muted);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: normal;
+}
+.alert-state.open { color: var(--red); background: rgba(220,38,38,0.08); }
+.alert-state.acknowledged { color: var(--accent); background: var(--accent-muted); }
+.alert-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.alert-actions button {
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 4px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.alert-actions button:hover { border-color: var(--accent); color: var(--accent); }
 
 .run-metrics {
   display: grid;

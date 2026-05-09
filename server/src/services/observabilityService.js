@@ -28,6 +28,21 @@ function alert(id, severity, type, title, message, task = null, metadata = {}) {
   };
 }
 
+function decorateAlertState(item, alertStates = {}, now = Date.now()) {
+  const state = alertStates?.[item.id] || {};
+  const mutedUntilMs = toTime(state.mutedUntil);
+  const muted = mutedUntilMs && mutedUntilMs > now;
+  const acknowledged = Boolean(state.acknowledgedAt);
+  return {
+    ...item,
+    state: muted ? 'muted' : acknowledged ? 'acknowledged' : 'open',
+    acknowledgedAt: state.acknowledgedAt || null,
+    acknowledgedBy: state.acknowledgedBy || null,
+    mutedUntil: muted ? state.mutedUntil : null,
+    mutedBy: muted ? state.mutedBy || null : null,
+  };
+}
+
 function visibleLogs(config, user) {
   const logs = Array.isArray(config.syncLogs) ? config.syncLogs : [];
   if (isAdmin(user)) return logs;
@@ -172,7 +187,7 @@ function buildTaskAlertSet(task, health, schedulerStatus, runState) {
   return alerts;
 }
 
-export function buildObservabilitySnapshot({ config, user, tasks, schedulerStatus = {}, runStates = {}, version = {} }) {
+export function buildObservabilitySnapshot({ config, user, tasks, schedulerStatus = {}, runStates = {}, version = {}, alertStates = {} }) {
   const now = Date.now();
   const logs = visibleLogs(config, user);
   const recentLogs = logs
@@ -228,11 +243,16 @@ export function buildObservabilitySnapshot({ config, user, tasks, schedulerStatu
     }
   }
 
-  alerts.sort((a, b) => {
+  const decoratedAlerts = alerts.map((item) => decorateAlertState(item, alertStates, now));
+  decoratedAlerts.sort((a, b) => {
+    const stateRank = { open: 0, acknowledged: 1, muted: 2 };
     const rank = { critical: 0, warning: 1, info: 2 };
-    return (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9) || String(a.taskName || '').localeCompare(String(b.taskName || ''));
+    return (stateRank[a.state] ?? 9) - (stateRank[b.state] ?? 9)
+      || (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9)
+      || String(a.taskName || '').localeCompare(String(b.taskName || ''));
   });
 
+  const activeAlerts = decoratedAlerts.filter((item) => item.state === 'open');
   const scheduledTasks = tasks.filter((task) => isAutoSyncMode(task.syncMode)).length;
   const activeSchedules = Object.keys(schedulerStatus).filter((taskId) => tasks.some((task) => task.id === taskId)).length;
   const runningTasks = taskRows.filter((task) => task.running).length;
@@ -250,9 +270,12 @@ export function buildObservabilitySnapshot({ config, user, tasks, schedulerStatu
       activeSchedules,
       runningTasks,
       unhealthyTasks,
-      openAlerts: alerts.length,
-      criticalAlerts: alerts.filter((item) => item.severity === 'critical').length,
-      warningAlerts: alerts.filter((item) => item.severity === 'warning').length,
+      openAlerts: decoratedAlerts.length,
+      activeAlerts: activeAlerts.length,
+      acknowledgedAlerts: decoratedAlerts.filter((item) => item.state === 'acknowledged').length,
+      mutedAlerts: decoratedAlerts.filter((item) => item.state === 'muted').length,
+      criticalAlerts: activeAlerts.filter((item) => item.severity === 'critical').length,
+      warningAlerts: activeAlerts.filter((item) => item.severity === 'warning').length,
       runs24h: recent24h.length,
       successes24h,
       failedRuns24h,
@@ -262,7 +285,7 @@ export function buildObservabilitySnapshot({ config, user, tasks, schedulerStatu
       pendingFailureRows,
       averageDurationMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0,
     },
-    alerts,
+    alerts: decoratedAlerts,
     tasks: taskRows.sort((a, b) => {
       const aTime = toTime(a.lastSyncAt) || 0;
       const bTime = toTime(b.lastSyncAt) || 0;

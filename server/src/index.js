@@ -60,9 +60,10 @@ function loadConfig() {
     const config = decryptConfigSecrets(JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')));
     if (!Array.isArray(config.taskTemplates)) config.taskTemplates = [];
     if (!config.alertNotifications || typeof config.alertNotifications !== 'object') config.alertNotifications = {};
+    if (!config.alertStates || typeof config.alertStates !== 'object') config.alertStates = {};
     return config;
   }
-  const defaults = { connections: [], syncTasks: [], syncLogs: [], taskTemplates: [], alertNotifications: {} };
+  const defaults = { connections: [], syncTasks: [], syncLogs: [], taskTemplates: [], alertNotifications: {}, alertStates: {} };
   saveConfig(defaults);
   return defaults;
 }
@@ -348,6 +349,16 @@ function buildVersionInfo() {
   };
 }
 
+function pruneAlertStates(config, currentAlertIds = []) {
+  const ids = new Set(currentAlertIds);
+  const next = {};
+  for (const [id, state] of Object.entries(config.alertStates || {})) {
+    if (ids.has(id)) next[id] = state;
+    else if (state?.acknowledgedAt || state?.mutedUntil) next[id] = { ...state, resolvedAt: state.resolvedAt || new Date().toISOString() };
+  }
+  config.alertStates = Object.fromEntries(Object.entries(next).slice(-500));
+}
+
 function buildObservabilityForUser(config, user) {
   const tasks = config.syncTasks
     .filter((task) => !task.deletedAt && (isAdmin(user) || task.userId === user.id))
@@ -368,6 +379,7 @@ function buildObservabilityForUser(config, user) {
     schedulerStatus,
     runStates,
     version: buildVersionInfo(),
+    alertStates: config.alertStates || {},
   });
 }
 
@@ -822,8 +834,62 @@ app.post('/api/system/config-import', async (req, res) => {
   }
 });
 
-app.get('/api/observability', (req, res) => {
-  res.json(buildObservabilityForUser(loadConfig(), req.user));
+app.get('/api/observability', async (req, res) => {
+  const config = loadConfig();
+  const snapshot = buildObservabilityForUser(config, req.user);
+  pruneAlertStates(config, snapshot.alerts.map((item) => item.id));
+  await saveConfig(config, { backup: false });
+  res.json(snapshot);
+});
+
+app.post('/api/observability/alerts/:id/ack', async (req, res) => {
+  const config = loadConfig();
+  const snapshot = buildObservabilityForUser(config, req.user);
+  const alert = snapshot.alerts.find((item) => item.id === req.params.id);
+  if (!alert) return res.status(404).json({ error: '告警不存在或无权访问' });
+  config.alertStates = config.alertStates || {};
+  config.alertStates[alert.id] = {
+    ...(config.alertStates[alert.id] || {}),
+    acknowledgedAt: new Date().toISOString(),
+    acknowledgedBy: req.user.id,
+    mutedUntil: null,
+    mutedBy: null,
+    resolvedAt: null,
+  };
+  await saveConfig(config, { backup: false });
+  appendAuditLog(req.user, 'alert.acknowledge', { resourceType: 'alert', resourceId: alert.id, message: `确认告警 ${alert.title}` });
+  res.json({ success: true, alertId: alert.id });
+});
+
+app.post('/api/observability/alerts/:id/mute', async (req, res) => {
+  const config = loadConfig();
+  const snapshot = buildObservabilityForUser(config, req.user);
+  const alert = snapshot.alerts.find((item) => item.id === req.params.id);
+  if (!alert) return res.status(404).json({ error: '告警不存在或无权访问' });
+  const minutes = clampInt(req.body?.minutes, 60, 5, 1440);
+  config.alertStates = config.alertStates || {};
+  config.alertStates[alert.id] = {
+    ...(config.alertStates[alert.id] || {}),
+    mutedUntil: new Date(Date.now() + minutes * 60000).toISOString(),
+    mutedBy: req.user.id,
+    acknowledgedAt: config.alertStates[alert.id]?.acknowledgedAt || new Date().toISOString(),
+    acknowledgedBy: config.alertStates[alert.id]?.acknowledgedBy || req.user.id,
+    resolvedAt: null,
+  };
+  await saveConfig(config, { backup: false });
+  appendAuditLog(req.user, 'alert.mute', { resourceType: 'alert', resourceId: alert.id, message: `静默告警 ${alert.title}`, metadata: { minutes } });
+  res.json({ success: true, alertId: alert.id, mutedUntil: config.alertStates[alert.id].mutedUntil });
+});
+
+app.post('/api/observability/alerts/:id/restore', async (req, res) => {
+  const config = loadConfig();
+  const snapshot = buildObservabilityForUser(config, req.user);
+  const alert = snapshot.alerts.find((item) => item.id === req.params.id) || { id: req.params.id, title: req.params.id };
+  if (!config.alertStates?.[req.params.id]) return res.json({ success: true, alertId: req.params.id });
+  delete config.alertStates[req.params.id];
+  await saveConfig(config, { backup: false });
+  appendAuditLog(req.user, 'alert.restore', { resourceType: 'alert', resourceId: alert.id, message: `恢复告警 ${alert.title}` });
+  res.json({ success: true, alertId: alert.id });
 });
 
 app.get('/api/alert-notifications', (req, res) => {

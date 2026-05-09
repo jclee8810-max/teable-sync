@@ -93,6 +93,7 @@ try {
     taskTemplates: [{ id: 'tpl-untested', name: 'Untested Template', userId: owner.id, config: { ...baseTask, sourceConnectionId: untestedSource.id } }],
     syncLogs: [],
     alertNotifications: { enabled: false, webhookUrl: 'https://example.invalid/hook', cooldownMinutes: 10 },
+    alertStates: {},
   }, null, 2));
 
   let res = await request('/auth/users', {}, userToken);
@@ -136,6 +137,24 @@ try {
   record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'copy rejects untested connection');
   res = await request('/task-templates/tpl-untested/create-task', { method: 'POST', body: JSON.stringify({}) }, ownerToken);
   record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'template create rejects untested connection');
+
+
+  res = await request('/observability', {}, ownerToken);
+  record(res.status === 200 && res.data.summary && Array.isArray(res.data.alerts), 'observability snapshot loads');
+  const targetAlert = res.data.alerts?.[0];
+  record(Boolean(targetAlert?.id), 'observability exposes alert ids');
+  res = await request(`/observability/alerts/${encodeURIComponent(targetAlert.id)}/ack`, { method: 'POST', body: JSON.stringify({}) }, ownerToken);
+  record(res.status === 200, 'alert can be acknowledged');
+  res = await request('/observability', {}, ownerToken);
+  record(res.data.alerts.find((item) => item.id === targetAlert.id)?.state === 'acknowledged', 'acknowledged alert state is visible');
+  res = await request(`/observability/alerts/${encodeURIComponent(targetAlert.id)}/mute`, { method: 'POST', body: JSON.stringify({ minutes: 30 }) }, ownerToken);
+  record(res.status === 200 && res.data.mutedUntil, 'alert can be muted');
+  res = await request('/observability', {}, ownerToken);
+  record(res.data.alerts.find((item) => item.id === targetAlert.id)?.state === 'muted', 'muted alert state is visible');
+  res = await request(`/observability/alerts/${encodeURIComponent(targetAlert.id)}/restore`, { method: 'POST', body: JSON.stringify({}) }, ownerToken);
+  record(res.status === 200, 'alert state can be restored');
+  res = await request('/observability', {}, ownerToken);
+  record(res.data.alerts.find((item) => item.id === targetAlert.id)?.state === 'open', 'restored alert returns to open');
 
   console.log(`\nAPI contract smoke: PASS (${checks.length}/${checks.length})`);
 } finally {

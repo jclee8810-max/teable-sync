@@ -71,6 +71,7 @@ export function cleanAlertNotificationInput(body = {}, current = {}) {
 }
 
 function shouldSendAlert(alert, settings, now = Date.now()) {
+  if (alert.state && alert.state !== 'open') return false;
   const minRank = SEVERITY_RANK[settings.minSeverity] || SEVERITY_RANK.critical;
   if ((SEVERITY_RANK[alert.severity] || 0) < minRank) return false;
   const last = settings.lastSent?.[alert.id] ? new Date(settings.lastSent[alert.id]).getTime() : 0;
