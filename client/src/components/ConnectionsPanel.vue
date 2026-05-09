@@ -247,7 +247,7 @@ function typeLabel(type) {
 // 当前用户身份
 const currentUser = getStoredUser()
 const currentUserId = currentUser?.id || null
-const isSuperAdmin = currentUser?.role === 'super_admin'
+const isSuperAdmin = ['owner', 'super_admin'].includes(currentUser?.role)
 
 function isOwner(conn) {
   return conn && (conn.ownerId === currentUserId || isSuperAdmin)

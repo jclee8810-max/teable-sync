@@ -26,14 +26,16 @@ function saveHistory(history) {
 }
 
 // Create a new sync history record when sync starts
-export function createSyncHistory(taskId, taskName, sourceTable, targetTableId) {
+export function createSyncHistory(taskId, taskName, sourceTable, targetTableId, options = {}) {
   const history = loadHistory();
   const record = {
-    id: `${taskId}_${Date.now()}`,
+    id: options.runId || `${taskId}_${Date.now()}`,
+    runId: options.runId || null,
     taskId,
     taskName,
     sourceTable,
     targetTableId,
+    trigger: options.trigger || 'unknown',
     startTime: new Date().toISOString(),
     endTime: null,
     status: 'running', // running, success, failed
@@ -62,6 +64,8 @@ export function updateSyncHistory(recordId, stats) {
   const record = history[index];
   record.endTime = new Date().toISOString();
   record.status = stats.status; // success, failed
+  record.runId = stats.runId || record.runId || record.id;
+  record.trigger = stats.trigger || record.trigger || 'unknown';
   record.mode = stats.mode || record.mode;
   record.sourceRows = stats.sourceRows || 0;
   record.inserted = stats.inserted || 0;

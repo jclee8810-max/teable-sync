@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { isAdmin } from './roles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -57,7 +58,7 @@ export function appendAuditLog(user, action, details = {}) {
 
 export function getAuditLogs({ user, limit = 200, action, resourceType } = {}) {
   let logs = readAuditLogs();
-  if (user?.role !== 'super_admin') {
+  if (!isAdmin(user)) {
     logs = logs.filter((entry) => entry.userId === user?.id);
   }
   if (action) logs = logs.filter((entry) => entry.action === action);

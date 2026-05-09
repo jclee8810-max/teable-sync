@@ -66,6 +66,12 @@
             <button v-if="isTaskRunning(task)" class="fs-btn fs-btn-danger" @click="cancelRunningTask(task)" style="padding:8px 16px;font-size:13px">
               取消
             </button>
+            <button class="fs-btn fs-btn-ghost" @click="restartFullSync(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
+              重跑全量
+            </button>
+            <button class="fs-btn fs-btn-ghost" @click="continueInitialization(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok" style="padding:8px 16px;font-size:13px">
+              继续初始化
+            </button>
             <button class="fs-btn fs-btn-ghost" @click="handlePreview(task.id)" style="padding:8px 16px;font-size:13px">
               <el-icon><View /></el-icon>预览
             </button>
@@ -252,6 +258,8 @@
                 <div><span>平均耗时</span><strong>{{ formatDuration(taskHealth[detailTask.id].averageDurationMs) }}</strong></div>
                 <div><span>最近状态</span><strong>{{ latestStatusLabel(taskHealth[detailTask.id].latestStatus) }}</strong></div>
                 <div><span>最近运行</span><strong>{{ taskHealth[detailTask.id].latestRunAt ? formatTime(taskHealth[detailTask.id].latestRunAt) : '-' }}</strong></div>
+                <div><span>最近触发</span><strong>{{ triggerLabel(taskHealth[detailTask.id].latestTrigger) }}</strong></div>
+                <div><span>最近 Run ID</span><strong>{{ shortRunId(taskHealth[detailTask.id].latestRunId) }}</strong></div>
               </div>
               <div v-else class="detail-empty-line">暂无健康数据</div>
               <div v-if="taskHealth[detailTask.id]?.latestError" class="detail-error-line">{{ taskHealth[detailTask.id].latestError }}</div>
@@ -351,6 +359,8 @@
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="taskDetailDialogVisible = false">关闭</button>
         <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="openDialog(detailTask)" :disabled="!isOwner(detailTask)">编辑配置</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">重跑全量</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="continueInitialization(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">继续初始化</button>
         <button v-if="detailTask" class="fs-btn fs-btn-primary" @click="manualRun(detailTask)" :disabled="detailTask._running || detailTask.status === 'running' || !detailTask.connectionStatus?.ok">立即同步</button>
       </template>
     </el-dialog>
@@ -579,6 +589,24 @@
               <div class="form-help">首次全量同步预估超过该行数会被后端阻断，避免大表误启动。</div>
             </el-form-item>
           </el-col>
+          <el-col :span="8">
+            <el-form-item label="初始化读页/分钟">
+              <el-input-number v-model="form.initialReadPagesPerMinute" :min="0" :max="100000" :step="10" style="width:100%" />
+              <div class="form-help">0 表示不限速；用于大表首次初始化分段读取。</div>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="初始化写批/分钟">
+              <el-input-number v-model="form.initialWriteBatchesPerMinute" :min="0" :max="100000" :step="10" style="width:100%" />
+              <div class="form-help">0 表示不限速；用于控制 Teable 写入压力。</div>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="单次初始化分钟">
+              <el-input-number v-model="form.initialMaxRunMinutes" :min="0" :max="1440" :step="10" style="width:100%" />
+              <div class="form-help">0 表示不自动暂停；到时会保留断点，可继续初始化。</div>
+            </el-form-item>
+          </el-col>
         </el-row>
 
         <!-- Watermark Strategy -->
@@ -719,6 +747,12 @@
         <el-table :data="taskFailures" size="small" border max-height="420" style="width:100%">
           <el-table-column prop="operation" label="操作" width="110" />
           <el-table-column prop="count" label="数量" width="80" />
+          <el-table-column prop="batchNo" label="源批次" width="90" />
+          <el-table-column label="源范围" width="120">
+            <template #default="{ row }">
+              {{ row.sourceRange ? `${row.sourceRange.start}-${row.sourceRange.end}` : '-' }}
+            </template>
+          </el-table-column>
           <el-table-column prop="retryCount" label="重试" width="80" />
           <el-table-column prop="createdAt" label="时间" width="170">
             <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
@@ -745,8 +779,13 @@
           <div><span class="detail-label">源表行数</span><strong>{{ formatNumber(preflightResult.initialFullSync.sourceRows) }}{{ preflightResult.initialFullSync.exact ? '' : '+' }}</strong></div>
           <div><span class="detail-label">预计分页</span><strong>{{ formatNumber(preflightResult.initialFullSync.estimatedPages) }}</strong></div>
           <div><span class="detail-label">预计写入批次</span><strong>{{ formatNumber(preflightResult.initialFullSync.estimatedWriteBatches) }}</strong></div>
+          <div><span class="detail-label">预计请求数</span><strong>{{ formatNumber(preflightResult.initialFullSync.estimatedTeableRequests) }}</strong></div>
+          <div><span class="detail-label">预计耗时</span><strong>{{ preflightDurationLabel(preflightResult.initialFullSync) }}</strong></div>
           <div><span class="detail-label">保护上限</span><strong>{{ formatNumber(preflightResult.initialFullSync.maxRows) }} 行</strong></div>
         </div>
+        <el-alert v-if="preflightResult.initialFullSync?.suggestions?.length" type="info" :closable="false" style="margin-bottom:12px">
+          {{ preflightResult.initialFullSync.suggestions.join('；') }}
+        </el-alert>
         <el-alert v-if="preflightResult.status === 'pass'" type="success" :closable="false" style="margin-bottom:12px">
           预检通过，可以运行同步。
         </el-alert>
@@ -914,12 +953,12 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
-import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs } from '../api'
+import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getFailureCounts, getTaskFailures, retryTaskFailures, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs } from '../api'
 
 // 当前用户身份
 const currentUser = getStoredUser()
 const currentUserId = currentUser?.id || null
-const isSuperAdmin = currentUser?.role === 'super_admin'
+const isSuperAdmin = ['owner', 'super_admin'].includes(currentUser?.role)
 
 function isOwner(task) {
   return task && (task.userId === currentUserId || isSuperAdmin)
@@ -1000,6 +1039,7 @@ const defaultForm = {
   sourcePrimaryKey: '', watermarkType: '', watermarkColumn: '',
   syncMode: 'manual', syncInterval: 300,
   pageSize: 1000, batchSize: 500, retryCount: 3, maxInitialRows: 100000,
+  initialReadPagesPerMinute: 0, initialWriteBatchesPerMinute: 0, initialMaxRunMinutes: 0,
   deletionMode: 'ignore', softDeleteField: 'deleted',
 }
 const form = ref({ ...defaultForm })
@@ -1141,8 +1181,26 @@ function healthLabel(status) {
   return map[status] || status
 }
 function latestStatusLabel(status) {
-  const map = { success: '成功', failed: '失败', cancelled: '取消', running: '运行中', never_run: '未运行' }
+  const map = { success: '成功', failed: '失败', cancelled: '取消', paused: '已暂停', running: '运行中', never_run: '未运行' }
   return map[status] || status
+}
+
+function triggerLabel(trigger) {
+  const map = {
+    manual: '手动',
+    manual_reset: '重跑全量',
+    initialization: '初始化',
+    scheduled: '定时',
+    realtime: '准实时',
+    incremental: '增量',
+    codex_validation: '验收',
+    codex_initialization_validation: '初始化验收',
+  }
+  return map[trigger] || trigger || '-'
+}
+
+function shortRunId(id) {
+  return id ? String(id).slice(0, 8) : '-'
 }
 function healthRate(health) {
   return health.successRate === null || health.successRate === undefined ? '-' : `${health.successRate}%`
@@ -1825,6 +1883,50 @@ async function manualRun(task) {
   }
 }
 
+async function restartFullSync(task) {
+  try {
+    await ElMessageBox.confirm('确定清理该任务的断点和增量水位，并重新开始全量同步？目标端已有数据会按主键更新或跳过，不会自动清空。', '重新开始全量同步', { type: 'warning' })
+    task._running = true
+    await runTask(task.id, { resetState: true })
+    ElMessage.info('已重新开始全量同步，请在进度和日志中查看状态')
+    taskProgress.value[task.id] = { taskId: task.id, status: 'running', phase: 'starting', processedRows: 0 }
+    startProgressPolling()
+    setTimeout(loadAll, 2000)
+  } catch (err) {
+    if (err === 'cancel' || err?.message === 'cancel') return
+    if (err.preflight) {
+      preflightResult.value = err.preflight
+      preflightDialogVisible.value = true
+      ElMessage.error('预检未通过，已阻止重跑全量')
+    } else {
+      ElMessage.error('重跑全量失败: ' + (err.message || err))
+    }
+  } finally {
+    task._running = false
+  }
+}
+
+async function continueInitialization(task) {
+  try {
+    task._running = true
+    await continueInitialSync(task.id)
+    ElMessage.info('已继续初始化同步，请在进度和日志中查看状态')
+    taskProgress.value[task.id] = { taskId: task.id, status: 'running', phase: 'starting', processedRows: 0 }
+    startProgressPolling()
+    setTimeout(loadAll, 2000)
+  } catch (err) {
+    if (err.preflight) {
+      preflightResult.value = err.preflight
+      preflightDialogVisible.value = true
+      ElMessage.error('预检未通过，已阻止继续初始化')
+    } else {
+      ElMessage.error('继续初始化失败: ' + (err.message || err))
+    }
+  } finally {
+    task._running = false
+  }
+}
+
 async function cancelRunningTask(task) {
   try {
     await ElMessageBox.confirm('确定取消当前正在执行的同步？已写入的数据会保留，本次不会推进增量水位。', '取消同步', { type: 'warning' })
@@ -1849,6 +1951,12 @@ function preflightIssueTagType(level) {
   if (level === 'error') return 'danger'
   if (level === 'warn') return 'warning'
   return 'info'
+}
+
+function preflightDurationLabel(estimate) {
+  if (!estimate?.estimatedDurationMinutes) return '未限速'
+  const { min, max } = estimate.estimatedDurationMinutes
+  return `${formatNumber(min)}-${formatNumber(max)} 分钟`
 }
 
 function schemaDriftStatusLabel(status) {

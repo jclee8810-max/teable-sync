@@ -1,11 +1,13 @@
+import { isAdmin } from './roles.js';
+
 export function canReadConnection(user, conn) {
   if (!user || !conn || conn.deletedAt) return false;
-  return user.role === 'super_admin' || conn.ownerId === user.id || conn.shared === true;
+  return isAdmin(user) || conn.ownerId === user.id || conn.shared === true;
 }
 
 export function canWriteConnection(user, conn) {
   if (!user || !conn || conn.deletedAt) return false;
-  return user.role === 'super_admin' || conn.ownerId === user.id;
+  return isAdmin(user) || conn.ownerId === user.id;
 }
 
 export function findReadableConnection(config, user, id) {

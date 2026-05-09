@@ -1,6 +1,7 @@
 import { getSyncFailureCounts } from './syncFailures.js';
 import { getSyncHistory } from './syncHistory.js';
 import { getTaskHealth } from './taskHealth.js';
+import { isAdmin } from './roles.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -29,7 +30,7 @@ function alert(id, severity, type, title, message, task = null, metadata = {}) {
 
 function visibleLogs(config, user) {
   const logs = Array.isArray(config.syncLogs) ? config.syncLogs : [];
-  if (user.role === 'super_admin') return logs;
+  if (isAdmin(user)) return logs;
   return logs.filter((log) => !log.userId || log.userId === user.id);
 }
 
@@ -41,7 +42,7 @@ function visibleConnections(config, user, tasks) {
   }
   return (config.connections || []).filter((conn) => {
     if (conn.deletedAt) return false;
-    return user.role === 'super_admin' || conn.ownerId === user.id || conn.shared === true || ids.has(conn.id);
+    return isAdmin(user) || conn.ownerId === user.id || conn.shared === true || ids.has(conn.id);
   });
 }
 

@@ -31,7 +31,7 @@
       <div class="sidebar-context">
         <div>
           <span class="context-label">当前身份</span>
-          <strong>{{ currentUser?.role === 'super_admin' ? '管理员' : '普通用户' }}</strong>
+          <strong>{{ currentUser?.role === 'owner' ? '系统所有者' : currentUser?.role === 'super_admin' ? '超级管理员' : '普通用户' }}</strong>
         </div>
         <div>
           <span class="context-label">运行版本</span>
@@ -137,7 +137,7 @@ const navItems = computed(() => {
     { key: 'observability', icon: 'DataAnalysis', label: '观测告警', badge: null },
     { key: 'logs', icon: 'Document', label: '日志', badge: null },
   ]
-  if (currentUser.value?.role === 'super_admin') {
+  if (['owner', 'super_admin'].includes(currentUser.value?.role)) {
     items.push({ key: 'doctor', icon: 'FirstAidKit', label: '系统检查', badge: null })
   }
   return items

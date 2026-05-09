@@ -17,6 +17,7 @@ import { convertValue } from './typeConverter.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(dirname(dirname(__dirname)), 'data', 'sync-state');
@@ -43,6 +44,12 @@ function placeholder(type, index) {
 function toPositiveInt(value, fallback, max = 5000) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), max);
+}
+
+function toNonNegativeInt(value, fallback, max = 10000) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
   return Math.min(Math.floor(n), max);
 }
 
@@ -131,6 +138,42 @@ async function withRetry(fn, attempts, log, label) {
     }
   }
   throw lastErr;
+}
+
+async function waitWithCancel(ms, checkCancelled) {
+  const stepMs = 500;
+  let remaining = ms;
+  while (remaining > 0) {
+    checkRunControl();
+    const waitMs = Math.min(stepMs, remaining);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    remaining -= waitMs;
+  }
+}
+
+function createPerMinuteLimiter(limitPerMinute, label, log, checkCancelled) {
+  const limit = toNonNegativeInt(limitPerMinute, 0, 100000);
+  if (!limit) return async () => {};
+  let windowStartedAt = Date.now();
+  let used = 0;
+  return async () => {
+    checkCancelled();
+    const now = Date.now();
+    if (now - windowStartedAt >= 60000) {
+      windowStartedAt = now;
+      used = 0;
+    }
+    if (used >= limit) {
+      const waitMs = Math.max(0, 60000 - (now - windowStartedAt));
+      if (waitMs > 0) {
+        log('info', `初始化限速: ${label} 已达到 ${limit}/分钟，等待 ${Math.ceil(waitMs / 1000)} 秒`);
+        await waitWithCancel(waitMs, checkCancelled);
+      }
+      windowStartedAt = Date.now();
+      used = 0;
+    }
+    used++;
+  };
 }
 
 function createRecordFields(row, mapping, srcTypeMap, tgtTypeMap, log) {
@@ -525,8 +568,65 @@ function getSyncState(taskId) {
 function saveSyncState(taskId, state) {
   const file = join(STATE_DIR, `${taskId}.json`);
   const tmpFile = `${file}.tmp`;
-  writeFileSync(tmpFile, JSON.stringify(state), 'utf-8');
+  writeFileSync(tmpFile, JSON.stringify(state, null, 2), 'utf-8');
   renameSync(tmpFile, file);
+}
+
+export function clearTaskSyncState(taskId) {
+  saveSyncState(taskId, { lastSyncAt: null, watermark: null, syncedIds: [], checkpoint: null, checkpoints: [] });
+}
+
+function compactCheckpoints(checkpoints = [], max = 80) {
+  return checkpoints.slice(-max);
+}
+
+function saveRunCheckpoint(taskId, state, checkpoint) {
+  const latest = getSyncState(taskId);
+  const nextState = {
+    ...latest,
+    checkpoint,
+    checkpoints: compactCheckpoints([...(latest.checkpoints || state.checkpoints || []), checkpoint]),
+  };
+  saveSyncState(taskId, nextState);
+  return nextState;
+}
+
+function buildCheckpoint({
+  runId,
+  task,
+  mode,
+  watermark,
+  batchNo,
+  sourceKind,
+  sourceOffset,
+  sourceCursor,
+  sourceRowsCount,
+  sourceBatchSize,
+  totals,
+}) {
+  return {
+    runId,
+    taskId: task.id,
+    taskName: task.name,
+    mode,
+    watermarkType: watermark.type,
+    watermarkColumn: watermark.col,
+    batchNo,
+    sourceKind,
+    sourceOffset,
+    sourceCursor,
+    sourceRange: {
+      start: Math.max(1, sourceRowsCount - sourceBatchSize + 1),
+      end: sourceRowsCount,
+      count: sourceBatchSize,
+    },
+    processedRows: sourceRowsCount,
+    inserted: totals.inserted,
+    updated: totals.updated,
+    skipped: totals.skipped,
+    failed: totals.failed,
+    savedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -691,6 +791,7 @@ export async function runSync(task, srcConn, tgtConn, broadcastLog) {
 
 export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, control = {}) {
   const taskId = task.id;
+  const runId = control.runId || crypto.randomUUID();
   const startTime = Date.now();
   const db = task.sourceDatabase || null;
   const pageSize = toPositiveInt(task.pageSize, 1000, 5000);
@@ -698,6 +799,9 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
   const retryCount = toPositiveInt(task.retryCount, 3, 8);
   const deletionMode = task.deletionMode || 'ignore';
   const softDeleteField = task.softDeleteField || 'deleted';
+  const initializationMode = control.initializationMode === true;
+  const initMaxRunMs = initializationMode ? toNonNegativeInt(task.initialMaxRunMinutes, 0, 24 * 60) * 60000 : 0;
+  const initStartedAt = Date.now();
 
   const log = (level, msg) => {
     const entry = { taskId, level, message: msg, ts: new Date().toISOString() };
@@ -707,6 +811,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     if (typeof control.onProgress === 'function') {
       control.onProgress({
         taskId,
+        runId,
         taskName: task.name,
         startedAt: new Date(startTime).toISOString(),
         updatedAt: new Date().toISOString(),
@@ -722,6 +827,14 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       throw err;
     }
   };
+  const checkRunControl = () => {
+    checkCancelled();
+    if (initMaxRunMs > 0 && Date.now() - initStartedAt >= initMaxRunMs) {
+      const err = new Error('初始化运行达到单次最大运行时间，已自动暂停，可稍后继续');
+      err.code = 'SYNC_INITIALIZATION_PAUSED';
+      throw err;
+    }
+  };
 
   if (syncLocks.has(taskId)) {
     log('warn', '任务正在执行中，忽略本次请求');
@@ -733,7 +846,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
 
   let historyRec = null;
   try {
-    checkCancelled();
+    checkRunControl();
     if (isBidirectionalTask(task)) {
       return await runBidirectionalTeableSync(task, srcConn, tgtConn, {
         taskId,
@@ -751,7 +864,13 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     const pkCol = task.sourcePrimaryKey || autoPkCol;
     const watermark = resolveWatermark(task, pkCol, candidates);
     validateTaskConfig(task, pkCol, watermark);
-    const state = getSyncState(taskId);
+    const state = control.resetState ? { lastSyncAt: null, watermark: null, syncedIds: [], checkpoint: null, checkpoints: [] } : getSyncState(taskId);
+    if (control.resetState) {
+      saveSyncState(taskId, state);
+      log('warn', '已清理该任务断点和增量水位，本次将重新开始全量同步');
+    } else if (state.checkpoint?.processedRows) {
+      log('info', '检测到上次断点: 已处理 ' + state.checkpoint.processedRows + ' 行，最近批次 ' + state.checkpoint.batchNo + '，本次按增量水位继续');
+    }
     const sourceKind = isTeableSource(srcConn) ? 'teable' : 'sql';
     const table = sourceKind === 'sql' ? quoteIdentifier(srcConn.type, task.sourceTable) : null;
     const pkIdentifier = sourceKind === 'sql' ? quoteIdentifier(srcConn.type, pkCol) : null;
@@ -794,12 +913,20 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     }
 
     const mode = isIncremental ? 'incremental' : 'full';
-    historyRec = createSyncHistory(taskId, task.name, task.sourceTable, task.targetTableId);
+    const resumeCheckpoint = !control.resetState
+      && state.checkpoint
+      && state.checkpoint.watermarkType === watermark.type
+      && state.checkpoint.watermarkColumn === watermark.col
+      && state.checkpoint.mode === mode
+      ? state.checkpoint
+      : null;
+    const resumePartialFullScan = Boolean(resumeCheckpoint && mode === 'full' && resumeCheckpoint.processedRows > 0);
+    historyRec = createSyncHistory(taskId, task.name, task.sourceTable, task.targetTableId, { runId, trigger: control.trigger || 'manual' });
     historyRec.mode = mode;
     log('info', '主键列: ' + pkCol + ' | 增量策略: ' + watermark.description + ' | 分页: ' + pageSize + '/页 | 写入批量: ' + batchSize);
-    report({ phase: 'preparing', mode, pageSize, batchSize, watermark: watermark.type, processedRows: 0 });
+    report({ phase: 'preparing', mode, pageSize, batchSize, watermark: watermark.type, initializationMode, processedRows: 0 });
 
-    checkCancelled();
+    checkRunControl();
     const fields = await getTeableFields(tgtConn, task.targetTableId);
     const columnMapping = task.columnMapping || {};
     const sourceSchema = sourceKind === 'teable'
@@ -835,12 +962,13 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     const pkFieldName = mapping[pkCol] || pkCol;
     log('info', '字段映射: ' + Object.entries(mapping).map(([k, v]) => k + '->' + v).join(', '));
 
-    let sourceRowsCount = 0, insertCount = 0, updateCount = 0, skipCount = 0, deleteCount = 0, softDeleteCount = 0, errorCount = 0;
+    let sourceRowsCount = resumeCheckpoint?.processedRows || 0;
+    let insertCount = 0, updateCount = 0, skipCount = 0, deleteCount = 0, softDeleteCount = 0, errorCount = 0;
     const existingRecords = [];
     let targetOffset = 0;
     const targetPageSize = 1000;
     while (true) {
-      checkCancelled();
+      checkRunControl();
       report({ phase: 'loading_target', targetRows: existingRecords.length, processedRows: sourceRowsCount || 0 });
       const result = await withRetry(() => getTeableRecords(tgtConn, task.targetTableId, { skip: targetOffset, take: targetPageSize }), retryCount, log, '读取 Teable 记录');
       let page;
@@ -866,11 +994,16 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     const rowversionValues = [];
     const pkValues = [];
     const timestampValues = [];
+    const throttleSourcePage = createPerMinuteLimiter(initializationMode ? task.initialReadPagesPerMinute : 0, '源读取页数', log, checkCancelled);
+    const throttleWriteBatch = createPerMinuteLimiter(initializationMode ? task.initialWriteBatchesPerMinute : 0, 'Teable 写入批次', log, checkCancelled);
 
-    async function flushWrites(toInsert, toUpdate) {
+    async function flushWrites(toInsert, toUpdate, batchMeta = {}) {
+      let writeBatchNo = 0;
       for (let i = 0; i < toInsert.length; i += batchSize) {
+        writeBatchNo++;
         const batch = toInsert.slice(i, i + batchSize);
         try {
+          await throttleWriteBatch();
           await withRetry(() => createTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '批量插入');
           insertCount += batch.length;
         } catch (err) {
@@ -881,14 +1014,24 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
             tableId: task.targetTableId,
             records: batch,
             primaryKeys: extractBatchPrimaryKeys(batch, pkFieldName),
+            runId,
+            batchNo: batchMeta.batchNo,
+            writeBatchNo,
+            sourceRange: batchMeta.sourceRange,
+            sourceOffset: batchMeta.sourceOffset,
+            sourceCursorBefore: batchMeta.sourceCursorBefore,
+            sourceCursorAfter: batchMeta.sourceCursorAfter,
+            pkFieldName,
             error: err,
           });
           log('warn', '批量插入失败: ' + err.message);
         }
       }
       for (let i = 0; i < toUpdate.length; i += batchSize) {
+        writeBatchNo++;
         const batch = toUpdate.slice(i, i + batchSize);
         try {
+          await throttleWriteBatch();
           await withRetry(() => updateTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '批量更新');
           updateCount += batch.length;
         } catch (err) {
@@ -899,6 +1042,14 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
             tableId: task.targetTableId,
             records: batch,
             primaryKeys: extractBatchPrimaryKeys(batch, pkFieldName),
+            runId,
+            batchNo: batchMeta.batchNo,
+            writeBatchNo,
+            sourceRange: batchMeta.sourceRange,
+            sourceOffset: batchMeta.sourceOffset,
+            sourceCursorBefore: batchMeta.sourceCursorBefore,
+            sourceCursorAfter: batchMeta.sourceCursorAfter,
+            pkFieldName,
             error: err,
           });
           log('warn', '批量更新失败: ' + err.message);
@@ -906,11 +1057,17 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       }
     }
 
-    let sourceOffset = 0;
-    let sourceCursor = null;
+    let sourceOffset = Number(resumeCheckpoint?.sourceOffset || 0);
+    let sourceCursor = resumeCheckpoint?.sourceCursor ?? null;
+    let batchNo = Number(resumeCheckpoint?.batchNo || 0);
     const useKeysetPaging = sourceKind === 'sql' && watermark.type !== 'rowversion';
+    if (resumeCheckpoint) {
+      log('info', '从断点继续: 批次 ' + batchNo + ', 已处理 ' + sourceRowsCount + ' 行');
+    }
     while (true) {
-      checkCancelled();
+      checkRunControl();
+      await throttleSourcePage();
+      const sourceCursorBefore = sourceCursor;
       let sourceRows;
       if (sourceKind === 'teable') {
         const result = await withRetry(() => getTeableRecords(srcConn, task.sourceTable, { skip: sourceOffset, take: pageSize }), retryCount, log, '读取 Teable 源记录');
@@ -923,11 +1080,13 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       }
       if (sourceRows.length === 0) break;
 
+      batchNo++;
       sourceRowsCount += sourceRows.length;
+      const sourceRange = { start: sourceRowsCount - sourceRows.length + 1, end: sourceRowsCount, count: sourceRows.length };
       const toInsert = [];
       const toUpdate = [];
       for (const row of sourceRows) {
-        checkCancelled();
+        checkRunControl();
         try {
           const pkValRaw = row[pkCol];
           if (pkValRaw === undefined || pkValRaw === null || pkValRaw === '') {
@@ -959,7 +1118,33 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
           log('warn', '行处理失败 (PK=' + row[pkCol] + '): ' + err.message);
         }
       }
-      await flushWrites(toInsert, toUpdate);
+      const nextSourceOffset = sourceKind === 'teable' ? sourceOffset + pageSize : sourceOffset + pageSize;
+      const nextSourceCursor = sourceKind === 'sql' && useKeysetPaging ? sourceRows[sourceRows.length - 1][pkCol] : sourceCursor;
+      const errorCountBeforeFlush = errorCount;
+      await flushWrites(toInsert, toUpdate, {
+        batchNo,
+        sourceRange,
+        sourceOffset,
+        sourceCursorBefore,
+        sourceCursorAfter: nextSourceCursor,
+      });
+      if (errorCount > errorCountBeforeFlush) {
+        log('warn', '批次 ' + batchNo + ' 存在写入失败，已保留上一成功断点，修复失败批次后可继续运行');
+        break;
+      }
+      saveRunCheckpoint(taskId, state, buildCheckpoint({
+        runId,
+        task,
+        mode,
+        watermark,
+        batchNo,
+        sourceKind,
+        sourceOffset: sourceKind === 'teable' || !useKeysetPaging ? nextSourceOffset : sourceOffset,
+        sourceCursor: nextSourceCursor,
+        sourceRowsCount,
+        sourceBatchSize: sourceRows.length,
+        totals: { inserted: insertCount, updated: updateCount, skipped: skipCount, failed: errorCount },
+      }));
       log('info', '已处理源数据 ' + sourceRowsCount + ' 行');
       report({
         phase: 'syncing_source',
@@ -980,7 +1165,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
 
     if (sourceRowsCount === 0) log('info', '没有需要同步的记录');
 
-    if (deletionMode !== 'ignore' && watermark.type === 'full_scan' && errorCount === 0) {
+    if (deletionMode !== 'ignore' && watermark.type === 'full_scan' && errorCount === 0 && !resumePartialFullScan) {
       report({ phase: 'detecting_deletes', processedRows: sourceRowsCount, targetRows: existingRecords.length });
       const missing = [];
       for (const [pkVal, existing] of existingMap.entries()) {
@@ -989,7 +1174,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       if (missing.length > 0) log('info', '检测到目标表 ' + missing.length + ' 条记录源端已不存在，删除策略: ' + deletionMode);
       if (deletionMode === 'soft_delete') {
         for (let i = 0; i < missing.length; i += batchSize) {
-          checkCancelled();
+          checkRunControl();
           const batch = missing.slice(i, i + batchSize).map((rec) => ({ id: rec.id, fields: { [softDeleteField]: true } }));
           try {
             await withRetry(() => updateTeableRecords(tgtConn, task.targetTableId, batch), retryCount, log, '软删除标记');
@@ -1000,16 +1185,19 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
             addSyncFailure({
               task,
               operation: 'soft_delete',
-              tableId: task.targetTableId,
-              records: batch,
-              error: err,
-            });
+            tableId: task.targetTableId,
+            records: batch,
+            runId,
+            batchNo: 'delete-' + Math.floor(i / batchSize + 1),
+            sourceRange: { start: i + 1, end: Math.min(i + batchSize, missing.length), count: batch.length },
+            error: err,
+          });
             log('warn', '软删除标记失败: ' + err.message);
           }
         }
       } else if (deletionMode === 'hard_delete') {
         for (let i = 0; i < missing.length; i += batchSize) {
-          checkCancelled();
+          checkRunControl();
           const ids = missing.slice(i, i + batchSize).map((rec) => rec.id);
           try {
             await withRetry(() => deleteTeableRecords(tgtConn, task.targetTableId, ids), retryCount, log, '物理删除');
@@ -1019,22 +1207,27 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
             errorCount += ids.length;
             addSyncFailure({
               task,
-              operation: 'hard_delete',
-              tableId: task.targetTableId,
-              recordIds: ids,
-              error: err,
-            });
+            operation: 'hard_delete',
+            tableId: task.targetTableId,
+            recordIds: ids,
+            runId,
+            batchNo: 'delete-' + Math.floor(i / batchSize + 1),
+            sourceRange: { start: i + 1, end: Math.min(i + batchSize, missing.length), count: ids.length },
+            error: err,
+          });
             log('warn', '物理删除失败: ' + err.message);
           }
         }
       }
     } else if (deletionMode !== 'ignore' && watermark.type !== 'full_scan') {
       log('warn', '删除同步仅在全量扫描策略下执行，当前增量策略已跳过删除检测');
+    } else if (deletionMode !== 'ignore' && resumePartialFullScan) {
+      log('warn', '本次从全量断点继续，为避免误删未重新扫描的前半段数据，已跳过删除检测');
     }
 
     if (errorCount > 0) throw new Error('同步存在 ' + errorCount + ' 条失败记录，未推进增量水位');
 
-    const newState = { ...state, lastRunAt: new Date().toISOString(), watermarkType: watermark.type, watermarkColumn: watermark.col };
+    const newState = { ...getSyncState(taskId), lastRunAt: new Date().toISOString(), watermarkType: watermark.type, watermarkColumn: watermark.col, checkpoint: null };
     if (watermark.type === 'timestamp' && timestampValues.length > 0) {
       const maxTs = timestampValues.reduce((max, value) => (compareWatermarkValues(value, max) > 0 ? value : max), timestampValues[0]);
       newState.lastSyncAt = normalizeTimestampWatermark(maxTs);
@@ -1057,6 +1250,7 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     log('info', '同步完成: 源 ' + sourceRowsCount + ', 新增 ' + insertCount + ', 更新 ' + updateCount + ', 跳过 ' + skipCount + ', 软删 ' + softDeleteCount + ', 删除 ' + deleteCount + ', 失败 ' + errorCount + ' | 耗时 ' + elapsed + 's');
     report({
       status: 'success',
+      runId,
       phase: 'completed',
       processedRows: sourceRowsCount,
       inserted: insertCount,
@@ -1067,12 +1261,13 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
       failed: errorCount,
     });
     updateSyncHistory(historyRec.id, {
-      status: 'success', mode, sourceRows: sourceRowsCount, inserted: insertCount, updated: updateCount,
+      status: 'success', runId, mode, sourceRows: sourceRowsCount, inserted: insertCount, updated: updateCount,
       skipped: skipCount, deleted: deleteCount, softDeleted: softDeleteCount, failed: errorCount, durationMs: Date.now() - startTime,
     });
     clearSyncFailures(taskId);
     return {
       status: 'success',
+      runId,
       mode,
       sourceRows: sourceRowsCount,
       inserted: insertCount,
@@ -1085,10 +1280,11 @@ export async function runSyncWithControl(task, srcConn, tgtConn, broadcastLog, c
     };
   } catch (err) {
     const cancelled = err.code === 'SYNC_CANCELLED';
-    log(cancelled ? 'warn' : 'error', cancelled ? '同步已取消' : '同步失败: ' + err.message);
+    const paused = err.code === 'SYNC_INITIALIZATION_PAUSED';
+    log(cancelled || paused ? 'warn' : 'error', cancelled ? '同步已取消' : paused ? err.message : '同步失败: ' + err.message);
     console.error(err);
-    if (historyRec) updateSyncHistory(historyRec.id, { status: cancelled ? 'cancelled' : 'failed', errorMessage: err.message, durationMs: Date.now() - startTime });
-    report({ status: cancelled ? 'cancelled' : 'failed', phase: cancelled ? 'cancelled' : 'failed', errorMessage: err.message });
+    if (historyRec) updateSyncHistory(historyRec.id, { status: paused ? 'paused' : cancelled ? 'cancelled' : 'failed', errorMessage: err.message, durationMs: Date.now() - startTime });
+    report({ status: paused ? 'paused' : cancelled ? 'cancelled' : 'failed', phase: paused ? 'paused' : cancelled ? 'cancelled' : 'failed', errorMessage: err.message });
     throw err;
   } finally {
     syncLocks.delete(taskId);

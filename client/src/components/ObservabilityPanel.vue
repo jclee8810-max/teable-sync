@@ -224,7 +224,7 @@ const notificationForm = ref({
 let refreshTimer = null
 
 const currentUser = computed(() => getStoredUser() || {})
-const isAdmin = computed(() => currentUser.value.role === 'super_admin')
+const isAdmin = computed(() => ['owner', 'super_admin'].includes(currentUser.value.role))
 const summary = computed(() => snapshot.value?.summary || {})
 const taskRows = computed(() => snapshot.value?.tasks || [])
 const recentLogs = computed(() => snapshot.value?.recentLogs || [])

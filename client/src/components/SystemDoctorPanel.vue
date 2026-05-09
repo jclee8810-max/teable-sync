@@ -57,7 +57,7 @@
       <div class="section-header">
         <div>
           <div class="section-title">环境迁移</div>
-          <div class="section-desc">用于测试环境和正式环境之间迁移连接、任务、模板和告警通知配置，仅超级管理员可操作。</div>
+          <div class="section-desc">用于测试环境和正式环境之间迁移连接、任务、模板和告警通知配置，仅系统所有者可操作。</div>
         </div>
       </div>
       <div class="migration-actions">
@@ -66,7 +66,7 @@
         <button class="fs-btn fs-btn-ghost" @click="openImportDialog">导入迁移包</button>
       </div>
       <div class="migration-note">
-        默认迁移包不含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。含密钥包只适合可信内网或离线迁移；导入后自动任务默认停用，需要确认连接测试通过后再手动启动。
+        默认迁移包不含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。含密钥包仅系统所有者可导出，只适合可信内网或离线迁移；导入后自动任务默认停用，需要确认连接测试通过后再手动启动。
       </div>
     </div>
 

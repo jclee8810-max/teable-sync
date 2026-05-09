@@ -90,6 +90,8 @@ export function buildAlertWebhookPayload({ alert, snapshot, appUrl = null, test 
     alertId: alert.id,
     taskId: alert.taskId,
     taskName: alert.taskName,
+    runId: alert.metadata?.runId || alert.metadata?.latestRunId || null,
+    suggestedAction: alert.metadata?.suggestedAction || defaultSuggestedAction(alert),
     appUrl,
     metadata: alert.metadata || {},
     summary: snapshot?.summary ? clone(snapshot.summary) : null,
@@ -99,6 +101,15 @@ export function buildAlertWebhookPayload({ alert, snapshot, appUrl = null, test 
       severity: alert.severity,
     },
   };
+}
+
+function defaultSuggestedAction(alert) {
+  if (alert.type === 'sync_failure') return '打开任务失败批次，重试或清理失败记录';
+  if (alert.type === 'recent_failed') return '打开任务详情查看最近日志和运行历史';
+  if (alert.type === 'connection') return '重新测试数据源连接';
+  if (alert.type === 'scheduler_missing') return '停止并重新启动该自动任务';
+  if (alert.type === 'stale_task') return '检查调度器状态和最近运行日志';
+  return '打开 Teable Sync 观测告警页面查看详情';
 }
 
 async function postWebhook(url, payload) {

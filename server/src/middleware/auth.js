@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { ensureOwner } from '../services/roles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const USERS_FILE = join(__dirname, '..', '..', 'data', 'users.json');
@@ -29,10 +30,21 @@ export function verifyToken(token) {
   }
 }
 
+function saveUsers(users) {
+  const tmpFile = `${USERS_FILE}.tmp`;
+  writeFileSync(tmpFile, JSON.stringify(users, null, 2), 'utf-8');
+  renameSync(tmpFile, USERS_FILE);
+}
+
 function loadCurrentUser(decoded) {
   if (!decoded?.id || !existsSync(USERS_FILE)) return decoded;
   try {
-    const users = JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
+    const rawUsers = JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
+    const hadOwner = rawUsers.some((user) => user.role === 'owner');
+    const users = ensureOwner(rawUsers);
+    if (!hadOwner && users.some((user) => user.role === 'owner')) {
+      saveUsers(users);
+    }
     const current = users.find((user) => user.id === decoded.id);
     if (!current) return null;
     return {

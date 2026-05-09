@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+import { existsSync, writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { spawnSync } from 'child_process';
+
+const startedAt = new Date();
+const results = [];
+
+function runStep(name, command, args, options = {}) {
+  const result = spawnSync(command, args, { stdio: 'pipe', encoding: 'utf8', ...options });
+  const ok = result.status === 0;
+  results.push({
+    name,
+    ok,
+    command: [command, ...args].join(' '),
+    output: `${result.stdout || ''}${result.stderr || ''}`.trim().slice(-4000),
+  });
+  if (!ok && options.required !== false) {
+    throw new Error(`${name} failed`);
+  }
+  return result;
+}
+
+function findDocker() {
+  const candidates = [
+    process.env.DOCKER_BIN,
+    'docker',
+    '/Applications/Docker.app/Contents/Resources/bin/docker',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (candidate.includes('/') && !existsSync(candidate)) continue;
+    const result = spawnSync(candidate, ['version'], { stdio: 'ignore' });
+    if (result.status === 0) return candidate;
+  }
+  return null;
+}
+
+let exitCode = 0;
+try {
+  runStep('Git diff whitespace check', 'git', ['diff', '--check']);
+  runStep('Server entry syntax check', 'node', ['--check', 'server/src/index.js']);
+  runStep('Sync engine syntax check', 'node', ['--check', 'server/src/services/syncEngine.js']);
+  runStep('Frontend build', 'npm', ['run', 'build']);
+
+  const docker = findDocker();
+  if (!docker) throw new Error('Docker CLI not found');
+  runStep('Docker compose config', docker, ['compose', 'config', '--quiet']);
+  runStep('Docker service status', docker, ['compose', 'ps']);
+  runStep('API health', 'curl', ['-fsS', 'http://127.0.0.1:3101/health']);
+  runStep('API version', 'curl', ['-fsS', 'http://127.0.0.1:3101/api/version']);
+  runStep('Auto resume log check', docker, ['compose', 'logs', '--tail=80', 'teable-sync'], { required: false });
+  runStep('GitHub Actions workflow exists', 'test', ['-f', '.github/workflows/docker-publish.yml']);
+} catch (err) {
+  exitCode = 1;
+  results.push({ name: 'Pre-release check', ok: false, command: '-', output: err.message });
+}
+
+const reportDir = join(process.cwd(), 'server', 'data', 'reports');
+mkdirSync(reportDir, { recursive: true });
+const stamp = startedAt.toISOString().replace(/[:.]/g, '-');
+const reportPath = join(reportDir, `pre-release-check_${stamp}.md`);
+const lines = [
+  '# Teable Sync Pre-release Check',
+  '',
+  `- Started: ${startedAt.toISOString()}`,
+  `- Finished: ${new Date().toISOString()}`,
+  `- Status: ${exitCode === 0 ? 'PASS' : 'FAIL'}`,
+  '',
+  '| Step | Status | Command |',
+  '| --- | --- | --- |',
+  ...results.map((item) => `| ${item.name} | ${item.ok ? 'PASS' : 'FAIL'} | \`${item.command.replace(/`/g, '')}\` |`),
+  '',
+  '## Details',
+  '',
+  ...results.flatMap((item) => [
+    `### ${item.name}`,
+    '',
+    `Status: ${item.ok ? 'PASS' : 'FAIL'}`,
+    '',
+    '```text',
+    item.output || '(no output)',
+    '```',
+    '',
+  ]),
+];
+writeFileSync(reportPath, lines.join('\n'), 'utf8');
+console.log(reportPath);
+process.exit(exitCode);

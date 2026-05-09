@@ -12,7 +12,7 @@ import { authMiddleware, verifyToken } from './middleware/auth.js';
 import { canReadConnection, validateTaskConnections } from './services/accessControl.js';
 import { decryptConfigSecrets, encryptConfigSecrets } from './services/secretStore.js';
 import { getSyncFailures, getSyncFailureCounts, clearSyncFailures, removeSyncFailures, markSyncFailureRetried } from './services/syncFailures.js';
-import { createTeableRecords, updateTeableRecords, deleteTeableRecords } from './services/teableService.js';
+import { createTeableRecords, updateTeableRecords, deleteTeableRecords, getTeableRecords, normalizeTeableRecordsResponse } from './services/teableService.js';
 import { runSystemDoctor } from './services/systemDoctor.js';
 import { getTaskHealth, getTaskHealthMap } from './services/taskHealth.js';
 import { reconcileTask } from './services/reconcileService.js';
@@ -28,6 +28,8 @@ import {
   sendAlertNotifications,
   sendTestAlertNotification,
 } from './services/alertNotificationService.js';
+import { clearTaskSyncState } from './services/syncEngine.js';
+import { isAdmin, isOwner } from './services/roles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -144,6 +146,9 @@ function cleanTaskInput(body = {}) {
   cleaned.batchSize = clampInt(cleaned.batchSize, 500, 10, 1000);
   cleaned.retryCount = clampInt(cleaned.retryCount, 3, 1, 8);
   cleaned.maxInitialRows = clampInt(cleaned.maxInitialRows, 100000, 1000, 10000000);
+  cleaned.initialReadPagesPerMinute = clampInt(cleaned.initialReadPagesPerMinute, 0, 0, 100000);
+  cleaned.initialWriteBatchesPerMinute = clampInt(cleaned.initialWriteBatchesPerMinute, 0, 0, 100000);
+  cleaned.initialMaxRunMinutes = clampInt(cleaned.initialMaxRunMinutes, 0, 0, 1440);
   if ('syncMode' in cleaned && !['manual', 'scheduled', 'realtime', 'incremental'].includes(cleaned.syncMode)) cleaned.syncMode = 'manual';
   if ('syncDirection' in cleaned && !['one_way', 'bidirectional'].includes(cleaned.syncDirection)) cleaned.syncDirection = 'one_way';
   if ('conflictStrategy' in cleaned && !['upsert', 'skip', 'insert_only', 'source_wins', 'target_wins', 'latest_wins', 'skip_conflict'].includes(cleaned.conflictStrategy)) cleaned.conflictStrategy = 'upsert';
@@ -181,7 +186,7 @@ function buildCopiedTask(sourceTask, overrides = {}) {
 }
 
 function canUseTemplate(user, template) {
-  return template && !template.deletedAt && (user.role === 'super_admin' || template.userId === user.id || template.shared === true);
+  return template && !template.deletedAt && (isAdmin(user) || template.userId === user.id || template.shared === true);
 }
 
 async function attachSchemaSnapshot(task, srcConn, tgtConn) {
@@ -357,7 +362,7 @@ function buildVersionInfo() {
 
 function buildObservabilityForUser(config, user) {
   const tasks = config.syncTasks
-    .filter((task) => !task.deletedAt && (user.role === 'super_admin' || task.userId === user.id))
+    .filter((task) => !task.deletedAt && (isAdmin(user) || task.userId === user.id))
     .map((task) => taskDto(config, user, task));
   const visibleTaskIds = new Set(tasks.map((task) => task.id));
   const schedulerStatus = {};
@@ -493,6 +498,48 @@ function preflightError(result) {
   return err;
 }
 
+function teableFormulaString(value) {
+  return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function findExistingTeableRecordByPk(conn, tableId, pkFieldName, pkValue) {
+  if (!pkFieldName || pkValue === undefined || pkValue === null || pkValue === '') return null;
+  const formula = `{${pkFieldName}} = "${teableFormulaString(pkValue)}"`;
+  const result = await getTeableRecords(conn, tableId, { take: 1, filter: { conjunction: 'and', filterSet: [{ fieldId: pkFieldName, operator: 'is', value: String(pkValue) }], formula } });
+  const records = normalizeTeableRecordsResponse(result);
+  return records[0] || null;
+}
+
+async function replayFailureBatch(tgtConn, task, failure) {
+  const tableId = failure.tableId || task.targetTableId;
+  const records = failure.records || [];
+  if (failure.operation === 'insert') {
+    const safeInserts = [];
+    const safeUpdates = [];
+    for (const record of records) {
+      const pk = failure.pkFieldName ? record.fields?.[failure.pkFieldName] : null;
+      const existing = await findExistingTeableRecordByPk(tgtConn, tableId, failure.pkFieldName, pk).catch(() => null);
+      if (existing?.id || existing?.recordId) {
+        safeUpdates.push({ id: existing.id || existing.recordId, fields: record.fields || {} });
+      } else {
+        safeInserts.push(record);
+      }
+    }
+    if (safeInserts.length) await createTeableRecords(tgtConn, tableId, safeInserts);
+    if (safeUpdates.length) await updateTeableRecords(tgtConn, tableId, safeUpdates);
+    return { inserted: safeInserts.length, updated: safeUpdates.length };
+  }
+  if (failure.operation === 'update' || failure.operation === 'soft_delete') {
+    await updateTeableRecords(tgtConn, tableId, records);
+    return { updated: records.length };
+  }
+  if (failure.operation === 'hard_delete') {
+    await deleteTeableRecords(tgtConn, tableId, failure.recordIds || []);
+    return { deleted: failure.recordIds?.length || 0 };
+  }
+  throw new Error('Unsupported failure operation: ' + failure.operation);
+}
+
 async function runScheduledTask(taskId, trigger, mode, intervalSec) {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === taskId);
@@ -583,7 +630,7 @@ async function startTaskScheduler(taskId, actorUser, options = {}) {
   const taskIdx = config.syncTasks.findIndex((t) => t.id === taskId);
   if (taskIdx === -1) throw Object.assign(new Error('Not found'), { status: 404 });
   const task = config.syncTasks[taskIdx];
-  if (actorUser.role !== 'super_admin' && task.userId !== actorUser.id) {
+  if (!isAdmin(actorUser) && task.userId !== actorUser.id) {
     throw Object.assign(new Error('无权操作此任务'), { status: 403 });
   }
 
@@ -710,7 +757,7 @@ function startAlertNotificationScanner() {
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 app.get('/api/system/doctor', (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可执行系统检查' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可执行系统检查' });
   try {
     appendAuditLog(req.user, 'system.doctor', {
       resourceType: 'system',
@@ -728,13 +775,16 @@ app.get('/api/system/doctor', (req, res) => {
 });
 
 app.get('/api/system/config-backups', (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可查看配置备份' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可查看配置备份' });
   res.json(getConfigBackups(CONFIG_FILE, req.query.limit));
 });
 
 app.get('/api/system/config-export', (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可导出配置' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可导出配置' });
   const includeSecrets = req.query.includeSecrets === 'true';
+  if (includeSecrets && !isOwner(req.user)) {
+    return res.status(403).json({ error: '仅系统所有者可导出含密钥迁移包' });
+  }
   const includeLogs = req.query.includeLogs === 'true';
   const payload = buildConfigExport(loadConfig(), {
     includeSecrets,
@@ -752,7 +802,7 @@ app.get('/api/system/config-export', (req, res) => {
 });
 
 app.post('/api/system/config-import/preview', (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可导入配置' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可导入配置' });
   try {
     res.json(previewConfigImport(req.body, loadConfig()));
   } catch (err) {
@@ -761,7 +811,7 @@ app.post('/api/system/config-import/preview', (req, res) => {
 });
 
 app.post('/api/system/config-import', async (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可导入配置' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可导入配置' });
   try {
     const mode = req.query.mode === 'replace' ? 'replace' : 'merge';
     const includeLogs = req.query.includeLogs === 'true';
@@ -789,13 +839,13 @@ app.get('/api/observability', (req, res) => {
 });
 
 app.get('/api/alert-notifications', (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可配置告警通知' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可配置告警通知' });
   const config = loadConfig();
   res.json(sanitizeAlertNotificationSettings(config.alertNotifications || {}));
 });
 
 app.put('/api/alert-notifications', async (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可配置告警通知' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可配置告警通知' });
   try {
     const config = loadConfig();
     config.alertNotifications = cleanAlertNotificationInput(req.body, config.alertNotifications || {});
@@ -817,7 +867,7 @@ app.put('/api/alert-notifications', async (req, res) => {
 });
 
 app.post('/api/alert-notifications/test', async (req, res) => {
-  if (req.user.role !== 'super_admin') return res.status(403).json({ error: '仅管理员可测试告警通知' });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可测试告警通知' });
   const config = loadConfig();
   try {
     const result = await sendTestAlertNotification({ settings: config.alertNotifications || {}, appUrl: getAppUrl() });
@@ -855,7 +905,7 @@ app.get('/api/connections', (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
   const visible = config.connections.filter((c) => {
     if (!includeDeleted && c.deletedAt) return false;
-    return role === 'super_admin' || c.ownerId === userId || c.shared === true;
+    return isAdmin({ role }) || c.ownerId === userId || c.shared === true;
   });
   res.json(visible.map(sanitizeConnection));
 });
@@ -888,7 +938,7 @@ app.put('/api/connections/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const conn = config.connections[idx];
   if (conn.deletedAt) return res.status(400).json({ error: '该连接已删除，请先恢复' });
-  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+  if (!isAdmin(req.user) && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此连接' });
   }
   const updates = cleanConnectionInput(req.body);
@@ -908,7 +958,7 @@ app.delete('/api/connections/:id', (req, res) => {
   const config = loadConfig();
   const conn = config.connections.find((c) => c.id === req.params.id);
   if (!conn) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+  if (!isAdmin(req.user) && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权删除此连接' });
   }
   // 软删除：标记 deletedAt，不物理删除
@@ -929,7 +979,7 @@ app.put('/api/connections/:id/share', (req, res) => {
   const idx = config.connections.findIndex((c) => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const conn = config.connections[idx];
-  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+  if (!isAdmin(req.user) && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此连接' });
   }
   const { shared } = req.body;
@@ -954,7 +1004,7 @@ app.post('/api/connections/:id/restore', (req, res) => {
   const idx = config.connections.findIndex((c) => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const conn = config.connections[idx];
-  if (req.user.role !== 'super_admin' && conn.ownerId !== req.user.id) {
+  if (!isAdmin(req.user) && conn.ownerId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此连接' });
   }
   if (!conn.deletedAt) return res.status(400).json({ error: '该连接未被删除' });
@@ -1215,7 +1265,7 @@ app.get('/api/tasks', (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
   const visible = config.syncTasks.filter((t) => {
     if (!includeDeleted && t.deletedAt) return false;
-    return role === 'super_admin' || t.userId === userId;
+    return isAdmin({ role }) || t.userId === userId;
   });
   res.json(visible.map((task) => taskDto(config, req.user, task)));
 });
@@ -1254,7 +1304,7 @@ app.post('/api/tasks/:id/copy', async (req, res) => {
   const config = loadConfig();
   const source = config.syncTasks.find((t) => t.id === req.params.id);
   if (!source || source.deletedAt) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && source.userId !== req.user.id) {
+  if (!isAdmin(req.user) && source.userId !== req.user.id) {
     return res.status(403).json({ error: '无权复制此任务' });
   }
   const overrides = cleanTaskInput(req.body || {});
@@ -1290,14 +1340,14 @@ app.post('/api/task-templates', (req, res) => {
   const source = sourceTaskId ? config.syncTasks.find((t) => t.id === sourceTaskId) : null;
   if (sourceTaskId) {
     if (!source || source.deletedAt) return res.status(404).json({ error: '源任务不存在' });
-    if (req.user.role !== 'super_admin' && source.userId !== req.user.id) return res.status(403).json({ error: '无权保存此任务为模板' });
+    if (!isAdmin(req.user) && source.userId !== req.user.id) return res.status(403).json({ error: '无权保存此任务为模板' });
   }
   const rawConfig = source ? taskConfigSnapshot(source) : cleanTaskInput(req.body?.config || req.body || {});
   const template = {
     id: crypto.randomUUID(),
     name: (req.body?.name || rawConfig.name || '同步任务模板').trim(),
     description: (req.body?.description || '').trim(),
-    shared: req.user.role === 'super_admin' && req.body?.shared === true,
+    shared: isAdmin(req.user) && req.body?.shared === true,
     config: {
       ...rawConfig,
       name: rawConfig.name || req.body?.name || '同步任务',
@@ -1351,7 +1401,7 @@ app.delete('/api/task-templates/:id', (req, res) => {
   const config = loadConfig();
   const template = (config.taskTemplates || []).find((item) => item.id === req.params.id);
   if (!template || template.deletedAt) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && template.userId !== req.user.id) return res.status(403).json({ error: '无权删除此模板' });
+  if (!isAdmin(req.user) && template.userId !== req.user.id) return res.status(403).json({ error: '无权删除此模板' });
   template.deletedAt = new Date().toISOString();
   template.updatedAt = template.deletedAt;
   saveConfig(config);
@@ -1370,7 +1420,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[idx];
   if (task.deletedAt) return res.status(400).json({ error: '该任务已删除，请先恢复' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权编辑此任务' });
   }
   const updates = cleanTaskInput(req.body);
@@ -1403,7 +1453,7 @@ app.delete('/api/tasks/:id', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权删除此任务' });
   }
   if (syncScheduler.has(req.params.id)) {
@@ -1428,7 +1478,7 @@ app.post('/api/tasks/:id/restore', (req, res) => {
   const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[idx];
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
   if (!task.deletedAt) return res.status(400).json({ error: '该任务未被删除' });
@@ -1448,7 +1498,7 @@ app.get('/api/tasks/:id/preview', async (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   
@@ -1546,7 +1596,7 @@ app.post('/api/tasks/:id/stop', async (req, res) => {
   const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[taskIdx];
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
 
@@ -1579,7 +1629,7 @@ app.get('/api/tasks/:id/progress', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   res.json(getRunState(req.params.id));
@@ -1589,7 +1639,7 @@ app.post('/api/tasks/:id/cancel', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
   const run = syncRuns.get(req.params.id);
@@ -1613,7 +1663,7 @@ app.get('/api/tasks/:id/failures', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   res.json(getSyncFailures(req.params.id).map((f) => ({
@@ -1627,7 +1677,7 @@ app.get('/api/tasks/:id/failures', (req, res) => {
 app.get('/api/sync-failures/counts', (req, res) => {
   const config = loadConfig();
   const counts = getSyncFailureCounts();
-  if (req.user.role === 'super_admin') return res.json(counts);
+  if (isAdmin(req.user)) return res.json(counts);
   const allowedTaskIds = new Set(config.syncTasks.filter((t) => t.userId === req.user.id).map((t) => t.id));
   const filtered = {};
   for (const [taskId, count] of Object.entries(counts)) {
@@ -1640,7 +1690,7 @@ app.delete('/api/tasks/:id/failures', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
   const removed = clearSyncFailures(req.params.id);
@@ -1658,7 +1708,7 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
   const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
@@ -1667,17 +1717,13 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
   const failures = getSyncFailures(req.params.id);
   const retried = [];
   const stillFailed = [];
+  const replayStats = { inserted: 0, updated: 0, deleted: 0 };
   for (const failure of failures) {
     try {
-      if (failure.operation === 'insert') {
-        await createTeableRecords(tgtConn, failure.tableId || task.targetTableId, failure.records || []);
-      } else if (failure.operation === 'update' || failure.operation === 'soft_delete') {
-        await updateTeableRecords(tgtConn, failure.tableId || task.targetTableId, failure.records || []);
-      } else if (failure.operation === 'hard_delete') {
-        await deleteTeableRecords(tgtConn, failure.tableId || task.targetTableId, failure.recordIds || []);
-      } else {
-        throw new Error('Unsupported failure operation: ' + failure.operation);
-      }
+      const stats = await replayFailureBatch(tgtConn, task, failure);
+      replayStats.inserted += stats.inserted || 0;
+      replayStats.updated += stats.updated || 0;
+      replayStats.deleted += stats.deleted || 0;
       retried.push(failure.id);
     } catch (err) {
       markSyncFailureRetried(failure.id, err);
@@ -1690,16 +1736,16 @@ app.post('/api/tasks/:id/retry-failures', async (req, res) => {
     resourceId: task.id,
     resourceName: task.name,
     message: `重试任务失败记录 ${task.name || task.id}`,
-    metadata: { retried: retried.length, failed: stillFailed.length },
+    metadata: { retried: retried.length, failed: stillFailed.length, ...replayStats },
   });
-  res.json({ retried: retried.length, failed: stillFailed.length, errors: stillFailed });
+  res.json({ retried: retried.length, failed: stillFailed.length, errors: stillFailed, ...replayStats });
 });
 
 app.get('/api/tasks/:id/health', (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   res.json(getTaskHealth(task));
@@ -1710,7 +1756,7 @@ app.get('/api/tasks-health', (req, res) => {
   const { role, id: userId } = req.user;
   const tasks = config.syncTasks.filter((task) => {
     if (task.deletedAt) return false;
-    return role === 'super_admin' || task.userId === userId;
+    return isAdmin({ role }) || task.userId === userId;
   });
   res.json(getTaskHealthMap(tasks));
 });
@@ -1719,7 +1765,7 @@ app.post('/api/tasks/:id/reconcile', async (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   const validation = validateTaskRunnable(config, req.user, task);
@@ -1759,7 +1805,7 @@ app.post('/api/tasks/:id/preflight', async (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   const validation = validateTaskRunnable(config, req.user, task);
@@ -1786,7 +1832,7 @@ app.get('/api/tasks/:id/schema-drift', async (req, res) => {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === req.params.id);
   if (!task || task.deletedAt) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权访问此任务' });
   }
   const validation = validateTaskRunnable(config, req.user, task);
@@ -1804,7 +1850,7 @@ app.post('/api/tasks/:id/schema-snapshot', async (req, res) => {
   const idx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (idx === -1 || config.syncTasks[idx].deletedAt) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[idx];
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
   const validation = validateTaskRunnable(config, req.user, task);
@@ -1829,7 +1875,7 @@ app.post('/api/tasks/:id/schema-snapshot', async (req, res) => {
 app.get('/api/scheduler/status', (req, res) => {
   const config = loadConfig();
   const visibleTaskIds = new Set(config.syncTasks
-    .filter((task) => !task.deletedAt && (req.user.role === 'super_admin' || task.userId === req.user.id))
+    .filter((task) => !task.deletedAt && (isAdmin(req.user) || task.userId === req.user.id))
     .map((task) => task.id));
   const status = {};
   for (const [taskId, info] of syncScheduler) {
@@ -1846,7 +1892,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   const taskIdx = config.syncTasks.findIndex((t) => t.id === req.params.id);
   if (taskIdx === -1) return res.status(404).json({ error: 'Not found' });
   const task = config.syncTasks[taskIdx];
-  if (req.user.role !== 'super_admin' && task.userId !== req.user.id) {
+  if (!isAdmin(req.user) && task.userId !== req.user.id) {
     return res.status(403).json({ error: '无权操作此任务' });
   }
 
@@ -1867,8 +1913,11 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     return res.status(400).json({ error: `同步前预检失败: ${err.message}` });
   }
 
+  const resetState = req.body?.resetState === true;
+  const initializationMode = req.body?.initializationMode === true || resetState;
+  if (resetState) clearTaskSyncState(task.id);
   const { runSyncWithControl } = await import('./services/syncEngine.js');
-  const runControl = startTrackedRun(task, 'manual');
+  const runControl = startTrackedRun(task, initializationMode ? 'initialization' : 'manual');
   if (!runControl.owned) return res.status(409).json({ error: '任务正在执行' });
 
   const cfg0 = loadConfig();
@@ -1883,7 +1932,8 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     resourceType: 'task',
     resourceId: task.id,
     resourceName: task.name,
-    message: `手动运行任务 ${task.name || task.id}`,
+    message: `${resetState ? '重新开始全量同步' : initializationMode ? '继续初始化同步' : '手动运行任务'} ${task.name || task.id}`,
+    metadata: { resetState, initializationMode },
   });
 
   // Run async — persist logs and update task status
@@ -1900,10 +1950,15 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
     let result;
     try {
-      result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, runControl);
+      result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, { ...runControl, resetState, initializationMode, trigger: resetState ? 'manual_reset' : initializationMode ? 'initialization' : 'manual' });
       runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
     } catch (err) {
-      runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
+      runControl.finish({
+        status: err.code === 'SYNC_INITIALIZATION_PAUSED' ? 'paused' : err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed',
+        phase: err.code === 'SYNC_INITIALIZATION_PAUSED' ? 'paused' : err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed',
+        errorMessage: err.message,
+        cancellable: false,
+      });
       throw err;
     }
     if (result?.status === 'skipped') {
@@ -1924,12 +1979,13 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     }
   } catch (err) {
     const cancelled = err.code === 'SYNC_CANCELLED';
-    const entry = { taskId: task.id, level: cancelled ? 'warn' : 'error', message: err.message, ts: new Date().toISOString(), userId: task.userId };
+    const paused = err.code === 'SYNC_INITIALIZATION_PAUSED';
+    const entry = { taskId: task.id, level: cancelled || paused ? 'warn' : 'error', message: err.message, ts: new Date().toISOString(), userId: task.userId };
     broadcastLogUser(entry, task.userId);
     const cfg = loadConfig();
     cfg.syncLogs.push(entry);
     const idx = cfg.syncTasks.findIndex((x) => x.id === task.id);
-    if (idx !== -1) cfg.syncTasks[idx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled ? 'idle' : 'error');
+    if (idx !== -1) cfg.syncTasks[idx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled || paused ? 'idle' : 'error');
     await saveConfig(cfg, { backup: false });
   }
 });
@@ -1942,7 +1998,7 @@ app.get('/api/logs', (req, res) => {
   const level = req.query.level;
   const taskId = req.query.taskId;
   // Super admin sees all logs; regular users only see their own task logs
-  const filtered = role === 'super_admin'
+  const filtered = isAdmin({ role })
     ? config.syncLogs
     : config.syncLogs.filter((l) => !l.userId || l.userId === userId);
   let logs = level ? filtered.filter((l) => l.level === level) : filtered;
@@ -1952,7 +2008,7 @@ app.get('/api/logs', (req, res) => {
 
 app.delete('/api/logs', (req, res) => {
   const config = loadConfig();
-  if (req.user.role === 'super_admin') {
+  if (isAdmin(req.user)) {
     config.syncLogs = [];
   } else {
     config.syncLogs = config.syncLogs.filter((log) => log.userId && log.userId !== req.user.id);
@@ -1970,7 +2026,7 @@ app.get('/api/sync-history', (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   // Regular users only see their own task history
   let history;
-  if (role === 'super_admin') {
+  if (isAdmin({ role })) {
     history = getSyncHistory(taskId, limit);
   } else {
     // Filter by userId - only show tasks created by this user
@@ -1993,7 +2049,7 @@ app.get('/api/sync-history/:id', (req, res) => {
   const { role, id: userId } = req.user;
   const config = loadConfig();
   const task = config.syncTasks.find(t => t.id === record.taskId);
-  if (role !== 'super_admin' && task?.userId !== userId) {
+  if (!isAdmin({ role }) && task?.userId !== userId) {
     return res.status(403).json({ error: '无权访问' });
   }
   res.json(record);

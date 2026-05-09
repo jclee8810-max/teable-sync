@@ -101,21 +101,40 @@ async function estimateSourceRows(srcConn, task, stopAfterRows = DEFAULT_INITIAL
 function addInitialFullSyncEstimate({ task, srcConn, issues, rowEstimate }) {
   const pageSize = Number(task.pageSize || 1000);
   const batchSize = Number(task.batchSize || 500);
+  const readLimit = Number(task.initialReadPagesPerMinute || 0);
+  const writeLimit = Number(task.initialWriteBatchesPerMinute || 0);
+  const maxRunMinutes = Number(task.initialMaxRunMinutes || 0);
   const maxRows = normalizeInitialFullSyncMaxRows(task.maxInitialRows);
   const warnRows = Math.min(maxRows, Number(task.initialFullSyncWarnRows || DEFAULT_INITIAL_FULL_SYNC_WARN_ROWS));
   const estimatedRows = Number(rowEstimate?.estimated || 0);
+  const estimatedPages = Math.ceil(estimatedRows / Math.max(1, pageSize));
+  const estimatedWriteBatches = Math.ceil(estimatedRows / Math.max(1, batchSize));
+  const readMinutes = readLimit > 0 ? estimatedPages / readLimit : 0;
+  const writeMinutes = writeLimit > 0 ? estimatedWriteBatches / writeLimit : 0;
+  const throttledMinutes = Math.max(readMinutes, writeMinutes);
+  const estimatedDurationMinutes = throttledMinutes > 0
+    ? { min: Math.max(1, Math.floor(throttledMinutes)), max: Math.max(1, Math.ceil(throttledMinutes * 1.3)) }
+    : null;
   const estimate = {
     sourceRows: estimatedRows,
     exact: rowEstimate?.exact !== false,
     method: rowEstimate?.method || 'unknown',
     pageSize,
     batchSize,
-    estimatedPages: Math.ceil(estimatedRows / Math.max(1, pageSize)),
-    estimatedWriteBatches: Math.ceil(estimatedRows / Math.max(1, batchSize)),
+    estimatedPages,
+    estimatedWriteBatches,
+    estimatedTeableRequests: estimatedWriteBatches + Math.ceil(estimatedRows / 1000),
+    estimatedDurationMinutes,
+    initialReadPagesPerMinute: readLimit,
+    initialWriteBatchesPerMinute: writeLimit,
+    initialMaxRunMinutes: maxRunMinutes,
     warnRows,
     maxRows,
     fullScan: true,
     initialRun: true,
+    suggestions: estimatedRows > maxRows
+      ? ['调高任务的初始全量上限', '低峰期执行初始化', '拆分源表或增加源端过滤条件']
+      : ['建议低峰期执行初始化', '必要时设置初始化读页/分钟和写批/分钟', '单次运行时间可设置为分段暂停'],
   };
   if (estimatedRows > maxRows) {
     addIssue(issues, 'error', 'initialFullSync.tooLarge', `首次全量同步预计 ${estimatedRows.toLocaleString('zh-CN')} 行，超过当前保护阈值 ${maxRows.toLocaleString('zh-CN')} 行。请调高任务的初始全量上限，或先拆分/过滤源表后再运行。`, { estimate });

@@ -54,7 +54,7 @@
         </div>
         <div v-if="error" class="auth-error">{{ error }}</div>
         <button type="submit" class="auth-submit" :disabled="loading">{{ loading ? '注册中...' : '创建账号' }}</button>
-        <p class="register-note">第一个注册的将成为系统管理员</p>
+        <p class="register-note">第一个注册的将成为系统所有者</p>
         <p class="auth-hint">已有账号？<button type="button" class="text-btn" @click="mode = 'login'">直接登录</button></p>
       </form>
 
@@ -64,14 +64,14 @@
           <div class="user-avatar-lg">{{ user?.email?.[0]?.toUpperCase() }}</div>
           <div>
             <div class="user-email">{{ user?.email }}</div>
-            <div class="user-role-tag">{{ user?.role === 'super_admin' ? '管理员' : '普通用户' }}</div>
+            <div class="user-role-tag">{{ roleLabel(user?.role) }}</div>
           </div>
         </div>
 
         <!-- Profile sub-tabs -->
         <div class="profile-tabs">
           <button class="profile-tab" :class="{ active: profileTab === 'password' }" @click="profileTab = 'password'; error = ''; success = ''">修改密码</button>
-          <button v-if="user?.role === 'super_admin'" class="profile-tab" :class="{ active: profileTab === 'users' }" @click="profileTab = 'users'; error = ''; success = ''">用户管理</button>
+          <button v-if="isAdmin(user)" class="profile-tab" :class="{ active: profileTab === 'users' }" @click="profileTab = 'users'; error = ''; success = ''">用户管理</button>
         </div>
 
         <!-- 修改密码 -->
@@ -111,7 +111,8 @@
             />
             <el-select v-model="roleFilter" size="small" class="role-filter">
               <el-option label="全部角色" value="" />
-              <el-option label="管理员" value="super_admin" />
+              <el-option label="系统所有者" value="owner" />
+              <el-option label="超级管理员" value="super_admin" />
               <el-option label="普通用户" value="user" />
             </el-select>
           </div>
@@ -123,12 +124,12 @@
                 <div>
                   <div class="user-row-email">{{ u.email }}</div>
                   <div class="user-row-role">
-                    <span>{{ u.role === 'super_admin' ? '管理员' : '普通用户' }}</span>
+                    <span>{{ roleLabel(u.role) }}</span>
                     <span v-if="u.id === user?.id">当前账号</span>
                   </div>
                 </div>
               </div>
-              <div v-if="u.id !== user?.id" class="user-actions">
+              <div v-if="u.id !== user?.id && isOwner(user) && u.role !== 'owner'" class="user-actions">
                 <el-select
                   :model-value="u.role"
                   size="small"
@@ -137,9 +138,9 @@
                   @change="role => doUpdateRole(u, role)"
                 >
                   <el-option label="普通用户" value="user" />
-                  <el-option label="管理员" value="super_admin" />
+                  <el-option label="超级管理员" value="super_admin" />
                 </el-select>
-                <button v-if="u.role !== 'super_admin'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
+                <button v-if="u.role === 'user'" class="del-btn" @click="doDeleteUser(u.id)" :disabled="deletingId === u.id">
                   {{ deletingId === u.id ? '删除中...' : '删除' }}
                 </button>
               </div>
@@ -183,7 +184,7 @@ const tabs = [
   { key: 'register', label: '注册' },
 ]
 
-const adminCount = computed(() => users.value.filter((u) => u.role === 'super_admin').length)
+const adminCount = computed(() => users.value.filter((u) => isAdmin(u)).length)
 const filteredUsers = computed(() => {
   const keyword = userSearch.value.trim().toLowerCase()
   return users.value.filter((u) => {
@@ -229,7 +230,7 @@ async function loadProfile() {
   try {
     user.value = await getCurrentUser()
     setStoredUser(user.value)
-    if (user.value.role === 'super_admin') {
+    if (isAdmin(user.value)) {
       usersLoading.value = true
       try {
         users.value = await getUsers()
@@ -241,6 +242,20 @@ async function loadProfile() {
     clearToken()
     mode.value = 'login'
   }
+}
+
+function isOwner(row) {
+  return row?.role === 'owner'
+}
+
+function isAdmin(row) {
+  return row?.role === 'owner' || row?.role === 'super_admin'
+}
+
+function roleLabel(role) {
+  if (role === 'owner') return '系统所有者'
+  if (role === 'super_admin') return '超级管理员'
+  return '普通用户'
 }
 
 async function handleLogin() {

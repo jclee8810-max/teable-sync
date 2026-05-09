@@ -25,17 +25,41 @@ function saveFailures(failures) {
   renameSync(tmpFile, FAILURES_FILE);
 }
 
-export function addSyncFailure({ task, operation, tableId, records, recordIds, error, primaryKeys = [] }) {
+export function addSyncFailure({
+  task,
+  operation,
+  tableId,
+  records,
+  recordIds,
+  error,
+  primaryKeys = [],
+  runId = null,
+  batchNo = null,
+  writeBatchNo = null,
+  sourceRange = null,
+  sourceOffset = null,
+  sourceCursorBefore = null,
+  sourceCursorAfter = null,
+  pkFieldName = null,
+}) {
   const failures = loadFailures();
   const failure = {
     id: crypto.randomUUID(),
     taskId: task.id,
     taskName: task.name,
+    runId,
+    batchNo,
+    writeBatchNo,
     operation,
     tableId,
     records: records || null,
     recordIds: recordIds || null,
     primaryKeys,
+    pkFieldName,
+    sourceRange,
+    sourceOffset,
+    sourceCursorBefore,
+    sourceCursorAfter,
     count: records?.length || recordIds?.length || 0,
     errorMessage: error?.message || String(error || ''),
     createdAt: new Date().toISOString(),

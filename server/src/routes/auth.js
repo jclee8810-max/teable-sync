@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { signToken, authMiddleware } from '../middleware/auth.js';
 import { appendAuditLog } from '../services/auditLog.js';
+import { ROLES, ensureOwner, isAdmin, isOwner, roleLabel } from '../services/roles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -17,7 +18,13 @@ function loadUsers() {
   if (!existsSync(USERS_FILE)) {
     writeFileSync(USERS_FILE, JSON.stringify([], 'utf-8'));
   }
-  return JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
+  const rawUsers = JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
+  const hadOwner = rawUsers.some((user) => user.role === ROLES.OWNER);
+  const users = ensureOwner(rawUsers);
+  if (!hadOwner && users.some((user) => user.role === ROLES.OWNER)) {
+    saveUsers(users);
+  }
+  return users;
 }
 
 function saveUsers(users) {
@@ -64,7 +71,7 @@ router.post('/register', async (req, res) => {
     id: crypto.randomUUID(),
     email,
     passwordHash,
-    role: isFirst ? 'super_admin' : 'user',
+    role: isFirst ? ROLES.OWNER : ROLES.USER,
     createdAt: new Date().toISOString(),
   };
   users.push(user);
@@ -118,8 +125,8 @@ router.put('/password', authMiddleware, async (req, res) => {
 
 // GET /api/auth/users
 router.get('/users', authMiddleware, (req, res) => {
-  if (req.user.role !== 'super_admin') {
-    return res.status(403).json({ error: '仅超级管理员可操作' });
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: '仅系统所有者或超级管理员可查看用户' });
   }
   const users = loadUsers();
   res.json(users.map(sanitizeUser));
@@ -265,7 +272,7 @@ router.get('/teable-callback', async (req, res) => {
         id: crypto.randomUUID(),
         email,
         passwordHash: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10),
-        role: isFirst ? 'super_admin' : 'user',
+        role: isFirst ? ROLES.OWNER : ROLES.USER,
         teableOAuthToken: accessToken,
         createdAt: new Date().toISOString(),
       };
@@ -300,8 +307,8 @@ router.get('/teable-callback', async (req, res) => {
 
 // DELETE /api/auth/users/:id
 router.delete('/users/:id', authMiddleware, (req, res) => {
-  if (req.user.role !== 'super_admin') {
-    return res.status(403).json({ error: '仅超级管理员可操作' });
+  if (!isOwner(req.user)) {
+    return res.status(403).json({ error: '仅系统所有者可操作' });
   }
   if (req.params.id === req.user.id) {
     return res.status(400).json({ error: '不能删除自己' });
@@ -309,8 +316,8 @@ router.delete('/users/:id', authMiddleware, (req, res) => {
   let users = loadUsers();
   const target = users.find(u => u.id === req.params.id);
   if (!target) return res.status(404).json({ error: '用户不存在' });
-  if (target.role === 'super_admin') {
-    return res.status(400).json({ error: '不能删除其他超级管理员' });
+  if (isAdmin(target)) {
+    return res.status(400).json({ error: '不能删除系统所有者或超级管理员' });
   }
   users = users.filter(u => u.id !== req.params.id);
   saveUsers(users);
@@ -323,14 +330,14 @@ router.delete('/users/:id', authMiddleware, (req, res) => {
   res.json({ ok: true });
 });
 
-// PUT /api/auth/users/:id/role — 分配管理员权限（仅 super_admin）
+// PUT /api/auth/users/:id/role — 分配角色（仅 owner）
 router.put('/users/:id/role', authMiddleware, (req, res) => {
-  if (req.user.role !== 'super_admin') {
-    return res.status(403).json({ error: '仅超级管理员可操作' });
+  if (!isOwner(req.user)) {
+    return res.status(403).json({ error: '仅系统所有者可调整角色' });
   }
   const { role } = req.body;
-  if (!['user', 'super_admin'].includes(role)) {
-    return res.status(400).json({ error: '角色只能是 user 或 super_admin' });
+  if (![ROLES.USER, ROLES.SUPER_ADMIN].includes(role)) {
+    return res.status(400).json({ error: '角色只能是普通用户或超级管理员' });
   }
   if (req.params.id === req.user.id) {
     return res.status(400).json({ error: '不能修改自己的角色' });
@@ -338,6 +345,9 @@ router.put('/users/:id/role', authMiddleware, (req, res) => {
   const users = loadUsers();
   const idx = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: '用户不存在' });
+  if (users[idx].role === ROLES.OWNER) {
+    return res.status(400).json({ error: '不能修改系统所有者角色' });
+  }
   const previousRole = users[idx].role;
   users[idx].role = role;
   saveUsers(users);
@@ -345,7 +355,7 @@ router.put('/users/:id/role', authMiddleware, (req, res) => {
     resourceType: 'user',
     resourceId: users[idx].id,
     resourceName: users[idx].email,
-    message: `更新用户角色 ${users[idx].email}`,
+    message: `更新用户角色 ${users[idx].email}: ${roleLabel(previousRole)} -> ${roleLabel(role)}`,
     metadata: { previousRole, role },
   });
   res.json(sanitizeUser(users[idx]));
