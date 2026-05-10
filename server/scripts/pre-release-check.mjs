@@ -43,6 +43,7 @@ try {
   runStep('Sync reliability self-test', 'npm', ['run', 'test:reliability']);
   runStep('Task UI state self-test', 'npm', ['run', 'test:ui-state']);
   runStep('Connection health self-test', 'npm', ['run', 'test:connection-health']);
+  runStep('Error guidance self-test', 'npm', ['run', 'test:error-guidance']);
   runStep('Runtime store self-test', 'npm', ['run', 'test:runtime-store']);
   runStep('Large initial sync readiness', 'npm', ['run', 'stress:readiness']);
   runStep('Frontend build', 'npm', ['run', 'build']);

@@ -11,6 +11,7 @@ import {
   migrateRuntimeJsonOnce,
   updateSyncHistoryRecord,
 } from './runtimeStore.js';
+import { classifySyncError } from './errorGuidance.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.RUNTIME_STORE_DATA_DIR || join(dirname(dirname(__dirname)), 'data');
@@ -70,6 +71,10 @@ function buildSyncHistoryRecord(taskId, taskName, sourceTable, targetTableId, op
     softDeleted: 0,
     failed: 0,
     errorMessage: null,
+    errorType: null,
+    errorSummary: null,
+    suggestedAction: null,
+    actionTarget: null,
     durationMs: 0,
   };
 }
@@ -106,23 +111,55 @@ function applySyncHistoryStats(record, stats) {
   record.softDeleted = stats.softDeleted ?? record.softDeleted ?? 0;
   record.failed = stats.failed ?? record.failed ?? 0;
   record.errorMessage = stats.errorMessage ?? record.errorMessage ?? null;
+  if (record.errorMessage) {
+    const guidance = stats.errorGuidance || classifySyncError(record.errorMessage, {
+      status: record.status,
+      trigger: record.trigger,
+      taskName: record.taskName,
+    });
+    record.errorType = stats.errorType ?? guidance.errorType ?? record.errorType ?? null;
+    record.errorSummary = stats.errorSummary ?? guidance.summary ?? record.errorSummary ?? null;
+    record.suggestedAction = stats.suggestedAction ?? guidance.suggestedAction ?? record.suggestedAction ?? null;
+    record.actionTarget = stats.actionTarget ?? guidance.actionTarget ?? record.actionTarget ?? null;
+  } else if (['success', 'noop'].includes(record.status)) {
+    record.errorType = null;
+    record.errorSummary = null;
+    record.suggestedAction = null;
+    record.actionTarget = null;
+  }
   record.durationMs = stats.durationMs ?? record.durationMs ?? 0;
   return record;
 }
 
+function decorateHistoryGuidance(record) {
+  if (!record?.errorMessage || record.suggestedAction) return record;
+  const guidance = classifySyncError(record.errorMessage, {
+    status: record.status,
+    trigger: record.trigger,
+    taskName: record.taskName,
+  });
+  return {
+    ...record,
+    errorType: record.errorType || guidance.errorType,
+    errorSummary: record.errorSummary || guidance.summary,
+    suggestedAction: record.suggestedAction || guidance.suggestedAction,
+    actionTarget: record.actionTarget || guidance.actionTarget,
+  };
+}
+
 // Get sync history (all or filtered by taskId)
 export function getSyncHistory(taskId = null, limit = 50) {
-  if (isRuntimeSqliteEnabled()) return getSyncHistoryFromStore(taskId, limit);
+  if (isRuntimeSqliteEnabled()) return getSyncHistoryFromStore(taskId, limit).map(decorateHistoryGuidance);
   const history = loadHistory();
   if (taskId) {
-    return history.filter(r => r.taskId === taskId).slice(0, limit);
+    return history.filter(r => r.taskId === taskId).slice(0, limit).map(decorateHistoryGuidance);
   }
-  return history.slice(0, limit);
+  return history.slice(0, limit).map(decorateHistoryGuidance);
 }
 
 // Get a single history record
 export function getSyncHistoryRecord(recordId) {
-  if (isRuntimeSqliteEnabled()) return getSyncHistoryRecordFromStore(recordId);
+  if (isRuntimeSqliteEnabled()) return decorateHistoryGuidance(getSyncHistoryRecordFromStore(recordId));
   const history = loadHistory();
-  return history.find(r => r.id === recordId) || null;
+  return decorateHistoryGuidance(history.find(r => r.id === recordId) || null);
 }

@@ -81,7 +81,12 @@ function buildTaskAlertSet(task, health, schedulerStatus, runState) {
         '连接状态异常',
         issue.message,
         task,
-        { field: issue.field },
+        {
+          field: issue.field,
+          errorType: 'connection',
+          suggestedAction: '前往数据源页面重新测试连接；如果失败，请修复地址、账号、密码或 Token。',
+          actionTarget: 'connections',
+        },
       ));
     }
   }
@@ -94,7 +99,12 @@ function buildTaskAlertSet(task, health, schedulerStatus, runState) {
       '存在待处理失败批次',
       `还有 ${pendingFailures} 个失败批次未重试或清理`,
       task,
-      { pendingFailures },
+      {
+        pendingFailures,
+        errorType: 'failure_batch',
+        suggestedAction: '打开失败批次页面，先重试单批；确认无效数据后再清理记录。',
+        actionTarget: 'task_failures',
+      },
     ));
   }
 
@@ -106,6 +116,13 @@ function buildTaskAlertSet(task, health, schedulerStatus, runState) {
       '最近一次同步失败',
       health.latestError || '最近一次同步失败，请查看任务日志',
       task,
+      {
+        latestRunId: health.latestRunId,
+        errorType: health.latestErrorType,
+        errorSummary: health.latestErrorSummary,
+        suggestedAction: health.latestSuggestedAction,
+        actionTarget: health.latestActionTarget,
+      },
     ));
   }
 
@@ -238,7 +255,13 @@ export function buildObservabilitySnapshot({ config, user, tasks, schedulerStatu
         '连接最近测试失败',
         `${conn.name || conn.id}: ${conn.lastTest.error || '未知错误'}`,
         null,
-        { connectionId: conn.id, connectionName: conn.name || conn.id },
+        {
+          connectionId: conn.id,
+          connectionName: conn.name || conn.id,
+          errorType: 'connection',
+          suggestedAction: '前往数据源页面重新测试连接；如果失败，请修复地址、账号、密码或 Token。',
+          actionTarget: 'connections',
+        },
       ));
     }
   }

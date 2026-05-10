@@ -80,6 +80,7 @@ function shouldSendAlert(alert, settings, now = Date.now()) {
 }
 
 export function buildAlertWebhookPayload({ alert, snapshot, appUrl = null, test = false }) {
+  const suggestedAction = alert.metadata?.suggestedAction || defaultSuggestedAction(alert);
   return {
     source: 'teable-sync',
     event: test ? 'alert.test' : 'alert.open',
@@ -92,13 +93,15 @@ export function buildAlertWebhookPayload({ alert, snapshot, appUrl = null, test 
     taskId: alert.taskId,
     taskName: alert.taskName,
     runId: alert.metadata?.runId || alert.metadata?.latestRunId || null,
-    suggestedAction: alert.metadata?.suggestedAction || defaultSuggestedAction(alert),
+    errorType: alert.metadata?.errorType || null,
+    actionTarget: alert.metadata?.actionTarget || null,
+    suggestedAction,
     appUrl,
     metadata: alert.metadata || {},
     summary: snapshot?.summary ? clone(snapshot.summary) : null,
     teable: {
       title: `[Teable Sync] ${alert.title}`,
-      content: `${alert.message}${alert.taskName ? `\n任务：${alert.taskName}` : ''}`,
+      content: `${alert.message}${alert.taskName ? `\n任务：${alert.taskName}` : ''}${suggestedAction ? `\n建议：${suggestedAction}` : ''}`,
       severity: alert.severity,
     },
   };

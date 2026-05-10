@@ -110,7 +110,8 @@
             </span>
           </div>
           <div v-if="taskHealth[task.id]?.latestError || task.schemaSnapshotError" class="task-warning-line">
-            <span v-if="taskHealth[task.id]?.latestError" :title="taskHealth[task.id].latestError">最近错误：{{ taskHealth[task.id].latestError }}</span>
+            <span v-if="taskHealth[task.id]?.latestError" :title="taskHealth[task.id].latestError">最近错误：{{ latestErrorLabel(task) }}</span>
+            <span v-if="latestSuggestedAction(task)" class="task-suggestion-line" :title="latestSuggestedAction(task)">建议：{{ latestSuggestedAction(task) }}</span>
             <span v-if="task.schemaSnapshotError" :title="task.schemaSnapshotError">字段快照失败：{{ task.schemaSnapshotError }}</span>
           </div>
           <div v-if="taskProgress[task.id] && taskProgress[task.id].status !== 'idle'" class="progress-panel">
@@ -225,7 +226,10 @@
                 <div><span>最近 Run ID</span><strong>{{ shortRunId(taskHealth[detailTask.id].latestRunId) }}</strong></div>
               </div>
               <div v-else class="detail-empty-line">暂无健康数据</div>
-              <div v-if="taskHealth[detailTask.id]?.latestError" class="detail-error-line">{{ taskHealth[detailTask.id].latestError }}</div>
+              <div v-if="taskHealth[detailTask.id]?.latestError" class="detail-error-line">
+                <div>{{ latestErrorLabel(detailTask) }}</div>
+                <div v-if="latestSuggestedAction(detailTask)" class="detail-suggestion-line">建议：{{ latestSuggestedAction(detailTask) }}</div>
+              </div>
             </div>
 
             <div class="detail-section">
@@ -310,8 +314,14 @@
                 <el-table-column label="删除" width="110">
                   <template #default="{ row }">{{ formatNumber((row.deleted || 0) + (row.softDeleted || 0)) }}</template>
                 </el-table-column>
-                <el-table-column prop="errorMessage" label="最近错误" min-width="220" show-overflow-tooltip>
-                  <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
+                <el-table-column prop="errorMessage" label="最近错误 / 建议" min-width="260" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <div v-if="row.errorMessage" class="history-error-cell">
+                      <div>{{ historyErrorLabel(row) }}</div>
+                      <div v-if="row.suggestedAction" class="history-suggestion-line">建议：{{ row.suggestedAction }}</div>
+                    </div>
+                    <span v-else>-</span>
+                  </template>
                 </el-table-column>
               </el-table>
               <div class="history-hint">“无变更”表示任务正常执行，但本轮源端没有可写入或更新的数据。</div>
@@ -1303,6 +1313,40 @@ function healthLabel(status) {
 function latestStatusLabel(status) {
   const map = { success: '成功', failed: '失败', cancelled: '取消', paused: '已暂停', running: '运行中', never_run: '未运行' }
   return map[status] || status
+}
+
+function errorTypeLabel(type) {
+  const map = {
+    connection: '连接异常',
+    connection_expired: '连接测试过期',
+    field_mapping: '字段映射',
+    schema_drift: '字段变更',
+    rate_limit: '接口限流',
+    timeout: '网络超时',
+    permission: '权限不足',
+    data_type: '类型转换',
+    initialization_paused: '初始化暂停',
+    cancelled: '已取消',
+    failure_batch: '失败批次',
+    preflight: '预检阻断',
+    unknown: '待排查',
+  }
+  return map[type] || type || '待排查'
+}
+
+function latestSuggestedAction(task) {
+  return taskHealth.value[task.id]?.latestSuggestedAction || ''
+}
+
+function latestErrorLabel(task) {
+  const health = taskHealth.value[task.id] || {}
+  const prefix = health.latestErrorType ? `${errorTypeLabel(health.latestErrorType)}：` : ''
+  return `${prefix}${health.latestError || '-'}`
+}
+
+function historyErrorLabel(row = {}) {
+  const prefix = row.errorType ? `${errorTypeLabel(row.errorType)}：` : ''
+  return `${prefix}${row.errorMessage || '-'}`
 }
 
 function runChangedCount(row = {}) {
@@ -2784,6 +2828,10 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.task-warning-line .task-suggestion-line {
+  color: var(--amber);
+}
 .health-error {
   max-width: 420px;
   overflow: hidden;
@@ -3093,6 +3141,17 @@ onUnmounted(() => {
   background: rgba(220,38,38,0.08);
   color: var(--red);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.detail-suggestion-line,
+.history-suggestion-line {
+  margin-top: 4px;
+  color: var(--amber);
+}
+
+.history-error-cell {
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
