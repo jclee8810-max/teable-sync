@@ -51,9 +51,15 @@ try {
   runStep('API health', 'curl', ['-fsS', 'http://127.0.0.1:3101/health']);
   runStep('API version', 'curl', ['-fsS', 'http://127.0.0.1:3101/api/version']);
   runStep('API contract smoke', 'npm', ['run', 'e2e:contract']);
+  runStep('Security audit', 'npm', ['run', 'audit:security']);
+  runStep('Backup restore rehearsal', 'npm', ['run', 'backup:rehearse']);
+  runStep('SQLite shadow migration', 'npm', ['run', 'storage:sqlite:shadow']);
+  runStep('Onboarding path check', 'npm', ['run', 'check:onboarding']);
   runStep('Production acceptance script syntax', 'node', ['--check', 'server/scripts/production-acceptance.mjs']);
   runStep('Fault injection acceptance syntax', 'node', ['--check', 'server/scripts/fault-injection-acceptance.mjs']);
   runStep('Image verification script syntax', 'node', ['--check', 'server/scripts/verify-image-release.mjs']);
+  runStep('Image fallback script syntax', 'node', ['--check', 'server/scripts/image-pull-fallback.mjs']);
+  runStep('Longrun script syntax', 'node', ['--check', 'server/scripts/longrun-reliability.mjs']);
   runStep('Auto resume log check', docker, ['compose', 'logs', '--tail=80', 'teable-sync'], { required: false });
   runStep('GitHub Actions workflow exists', 'test', ['-f', '.github/workflows/docker-publish.yml']);
 } catch (err) {

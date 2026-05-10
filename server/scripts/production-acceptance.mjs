@@ -93,6 +93,7 @@ function renderReport(exitCode) {
     '- Real business smoke: users, permissions, shared connection sanitization, private data source creation/test, task creation, preview, run, reconciliation, audit and backup visibility.',
     '- Large sync pressure simulation: first full sync, checkpoint resume, cancel/continue, idempotent replay.',
     '- Fault injection acceptance: 1k/10k/100k cancellation checkpoint, failed batch replay, run history consistency, alert consistency, optional Docker restart probe.',
+    '- Operational hardening: security audit, backup restore rehearsal, SQLite shadow migration, and onboarding path checks.',
     '- Configuration migration: sanitized export and import preview are covered by release/API contract checks.',
     '- Alert notification permissions and webhook payload contract are covered by release/API contract checks.',
     '- Published image verification checks GitHub Actions, GHCR latest manifest, and Docker pull when network access allows.',
@@ -143,6 +144,10 @@ try {
   runStep('API health', 'curl', ['-fsS', 'http://127.0.0.1:3101/health']);
   runStep('Release gate', 'npm', ['run', 'check:release']);
   runStep('Real business smoke', 'npm', ['run', 'e2e:smoke']);
+  runStep('Security audit', 'npm', ['run', 'audit:security']);
+  runStep('Backup restore rehearsal', 'npm', ['run', 'backup:rehearse']);
+  runStep('SQLite shadow migration', 'npm', ['run', 'storage:sqlite:shadow']);
+  runStep('Onboarding path check', 'npm', ['run', 'check:onboarding']);
   const stressSizes = process.env.ACCEPTANCE_STRESS_SIZES || '1000,10000,100000';
   runStep('Large sync stress', 'npm', ['run', 'stress:e2e'], {
     env: { ...process.env, STRESS_SIZES: stressSizes },
