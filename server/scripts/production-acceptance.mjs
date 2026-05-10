@@ -92,6 +92,7 @@ function renderReport(exitCode) {
     '- Release gate: syntax, reliability self-test, readiness estimate, frontend build, Docker status, health, API contract.',
     '- Real business smoke: users, permissions, shared connection sanitization, private data source creation/test, task creation, preview, run, reconciliation, audit and backup visibility.',
     '- Large sync pressure simulation: first full sync, checkpoint resume, cancel/continue, idempotent replay.',
+    '- Fault injection acceptance: 1k/10k/100k cancellation checkpoint, failed batch replay, run history consistency, alert consistency, optional Docker restart probe.',
     '- Configuration migration: sanitized export and import preview are covered by release/API contract checks.',
     '- Alert notification permissions and webhook payload contract are covered by release/API contract checks.',
     '- Published image verification checks GitHub Actions, GHCR latest manifest, and Docker pull when network access allows.',
@@ -145,6 +146,9 @@ try {
   const stressSizes = process.env.ACCEPTANCE_STRESS_SIZES || '1000,10000,100000';
   runStep('Large sync stress', 'npm', ['run', 'stress:e2e'], {
     env: { ...process.env, STRESS_SIZES: stressSizes },
+  });
+  runStep('Fault injection acceptance', 'npm', ['run', 'acceptance:fault'], {
+    env: { ...process.env, FAULT_DOCKER_RESTART: process.env.ACCEPTANCE_FAULT_DOCKER_RESTART || 'false' },
   });
   runStep('Image release verification', 'npm', ['run', 'verify:image'], { required: false });
 } catch (err) {

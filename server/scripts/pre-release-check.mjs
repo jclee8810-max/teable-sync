@@ -52,6 +52,7 @@ try {
   runStep('API version', 'curl', ['-fsS', 'http://127.0.0.1:3101/api/version']);
   runStep('API contract smoke', 'npm', ['run', 'e2e:contract']);
   runStep('Production acceptance script syntax', 'node', ['--check', 'server/scripts/production-acceptance.mjs']);
+  runStep('Fault injection acceptance syntax', 'node', ['--check', 'server/scripts/fault-injection-acceptance.mjs']);
   runStep('Image verification script syntax', 'node', ['--check', 'server/scripts/verify-image-release.mjs']);
   runStep('Auto resume log check', docker, ['compose', 'logs', '--tail=80', 'teable-sync'], { required: false });
   runStep('GitHub Actions workflow exists', 'test', ['-f', '.github/workflows/docker-publish.yml']);
