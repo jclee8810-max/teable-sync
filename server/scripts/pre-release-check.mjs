@@ -41,6 +41,7 @@ try {
   runStep('Server entry syntax check', 'node', ['--check', 'server/src/index.js']);
   runStep('Sync engine syntax check', 'node', ['--check', 'server/src/services/syncEngine.js']);
   runStep('Sync reliability self-test', 'npm', ['run', 'test:reliability']);
+  runStep('Task UI state self-test', 'npm', ['run', 'test:ui-state']);
   runStep('Runtime store self-test', 'npm', ['run', 'test:runtime-store']);
   runStep('Large initial sync readiness', 'npm', ['run', 'stress:readiness']);
   runStep('Frontend build', 'npm', ['run', 'build']);

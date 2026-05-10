@@ -1031,6 +1031,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
 import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getTaskInitialization, getFailureCounts, getTaskFailures, retryTaskFailures, retryTaskFailure, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs, getSyncHistory } from '../api'
+import { buildTaskUiState, isActionBusy, isAutoSyncMode, setActionBusy } from '../utils/taskUiState'
 
 // 当前用户身份
 const currentUser = getStoredUser()
@@ -1355,76 +1356,50 @@ function shortRunId(id) {
 function healthRate(health) {
   return health.successRate === null || health.successRate === undefined ? '-' : `${health.successRate}%`
 }
-function isAutoSyncMode(mode) {
-  return ['scheduled', 'realtime', 'incremental'].includes(mode || 'manual')
-}
-function isRealtimeTask(task) {
-  return (task?.syncMode || 'manual') === 'realtime'
-}
-function idOf(entity) {
-  return typeof entity === 'object' ? entity?.id : entity
-}
-function actionKey(entity, action) {
-  const id = idOf(entity)
-  return id ? `${id}:${action}` : ''
+function taskUiState(task) {
+  return buildTaskUiState(task, {
+    progressByTask: taskProgress.value,
+    schedulerStatus: schedulerStatus.value,
+    actionLocks: taskActionLocks.value,
+    detailTask: detailTask.value,
+    initializationState: taskInitialization.value,
+  })
 }
 function isTaskActionBusy(taskOrId, action) {
-  return Boolean(taskActionLocks.value[actionKey(taskOrId, action)])
+  return isActionBusy(taskActionLocks.value, taskOrId, action)
 }
 function setTaskActionBusy(taskOrId, action, busy) {
-  const key = actionKey(taskOrId, action)
-  if (!key) return
-  const next = { ...taskActionLocks.value }
-  if (busy) next[key] = true
-  else delete next[key]
-  taskActionLocks.value = next
+  taskActionLocks.value = setActionBusy(taskActionLocks.value, taskOrId, action, busy)
 }
 function isTemplateActionBusy(templateOrId, action) {
-  return Boolean(templateActionLocks.value[actionKey(templateOrId, action)])
+  return isActionBusy(templateActionLocks.value, templateOrId, action)
 }
 function setTemplateActionBusy(templateOrId, action, busy) {
-  const key = actionKey(templateOrId, action)
-  if (!key) return
-  const next = { ...templateActionLocks.value }
-  if (busy) next[key] = true
-  else delete next[key]
-  templateActionLocks.value = next
+  templateActionLocks.value = setActionBusy(templateActionLocks.value, templateOrId, action, busy)
 }
 function isRunActionPending(task) {
-  return ['manualRun', 'restartFullSync', 'continueInitialization'].some(action => isTaskActionBusy(task, action))
-}
-function isDetailTask(task) {
-  return Boolean(task?.id && detailTask.value?.id === task.id)
-}
-function hasKnownInitializationCheckpoint(task) {
-  return !isDetailTask(task) || taskInitialization.value?.hasCheckpoint === true
+  return taskUiState(task).runActionPending
 }
 function isManualRunDisabled(task) {
-  return isRealtimeTask(task) || isRunActionPending(task) || isTaskRunning(task) || !task?.connectionStatus?.ok
+  return taskUiState(task).manualRunDisabled
 }
 function manualRunTitle(task) {
-  if (isRealtimeTask(task)) return '准实时同步任务由启动/停止调度控制，不支持手动同步'
-  if (!task?.connectionStatus?.ok) return '连接异常，需先修复数据源后再同步'
-  if (isRunActionPending(task)) return '同步启动请求处理中'
-  if (isTaskRunning(task)) return '任务正在同步或排队中'
-  return '立即执行一次同步'
+  return taskUiState(task).manualRunTitle
 }
 function isTaskRunning(task) {
-  if (!task?.id) return false
-  const p = taskProgress.value[task.id]
-  return ['running', 'queued'].includes(task.status) || task._running || ['running', 'queued', 'cancelling'].includes(p?.status)
+  return taskUiState(task).running
 }
 function isRestartFullSyncDisabled(task) {
-  return !task?.connectionStatus?.ok || isTaskRunning(task) || isRunActionPending(task)
+  return taskUiState(task).restartFullSyncDisabled
 }
 function isContinueInitializationDisabled(task) {
-  return !task?.connectionStatus?.ok || !hasKnownInitializationCheckpoint(task) || isTaskRunning(task) || isRunActionPending(task)
+  return taskUiState(task).continueInitializationDisabled
 }
 function isScheduleActionDisabled(task) {
-  return isTaskActionBusy(task, 'schedule') || isTaskRunning(task) || !task?.connectionStatus?.ok
+  return taskUiState(task).scheduleActionDisabled
 }
 function isCancellingTask(task) {
-  return taskProgress.value[task?.id]?.status === 'cancelling'
+  return taskUiState(task).cancelling
 }
 function runStateLabel(task) {
   const progress = taskProgress.value[task.id]
@@ -2135,8 +2110,9 @@ async function removeTemplate(template) {
 }
 
 async function manualRun(task) {
-  if (!task?.id || isManualRunDisabled(task)) return
-  if (isRealtimeTask(task)) {
+  const uiState = taskUiState(task)
+  if (!task?.id || uiState.manualRunDisabled) return
+  if (uiState.realtime) {
     ElMessage.warning('准实时同步任务由启动/停止调度控制，无需手动同步')
     return
   }
