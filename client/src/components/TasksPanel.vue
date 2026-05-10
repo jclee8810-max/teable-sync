@@ -135,9 +135,10 @@
     <el-dialog
       v-model="taskDetailDialogVisible"
       :title="detailTask ? `任务详情 · ${detailTask.name}` : '任务详情'"
-      width="920px"
+      width="min(1120px, 92vw)"
       top="5vh"
       destroy-on-close
+      class="task-detail-dialog"
     >
       <div v-if="detailTask" class="task-detail-shell">
         <div class="detail-hero">
@@ -255,6 +256,10 @@
                   <span>成功</span>
                   <strong>{{ taskHistorySummary.success }}</strong>
                 </div>
+                <div class="detail-metric neutral">
+                  <span>无变更</span>
+                  <strong>{{ taskHistorySummary.noop }}</strong>
+                </div>
                 <div class="detail-metric danger">
                   <span>失败/取消</span>
                   <strong>{{ taskHistorySummary.failed }}</strong>
@@ -268,8 +273,8 @@
                 <span
                   v-for="run in taskHistory.slice().reverse()"
                   :key="run.id"
-                  :class="['run-dot', run.status]"
-                  :title="`${latestStatusLabel(run.status)} · ${triggerLabel(run.trigger)} · ${formatTime(run.endTime || run.startTime)}`"
+                  :class="['run-dot', normalizedRunStatus(run)]"
+                  :title="`${runStatusLabel(run)} · ${triggerLabel(run.trigger)} · ${formatTime(run.endTime || run.startTime)}`"
                 ></span>
               </div>
             </div>
@@ -288,7 +293,7 @@
                 </el-table-column>
                 <el-table-column label="状态" width="100">
                   <template #default="{ row }">
-                    <el-tag size="small" :type="runStatusTagType(row.status)">{{ latestStatusLabel(row.status) }}</el-tag>
+                    <el-tag size="small" :type="runStatusTagType(row)">{{ runStatusLabel(row) }}</el-tag>
                   </template>
                 </el-table-column>
                 <el-table-column label="开始时间" width="170">
@@ -309,6 +314,7 @@
                   <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
                 </el-table-column>
               </el-table>
+              <div class="history-hint">“无变更”表示任务正常执行，但本轮源端没有可写入或更新的数据。</div>
             </div>
           </el-tab-pane>
 
@@ -1102,12 +1108,14 @@ const skippedMappingCount = computed(() => mappingRows.value.filter(row => row.s
 const taskHistorySummary = computed(() => {
   const rows = taskHistory.value || []
   const completed = rows.filter(row => row.status !== 'running')
-  const success = completed.filter(row => row.status === 'success').length
+  const noop = completed.filter(row => normalizedRunStatus(row) === 'noop').length
+  const success = completed.filter(row => normalizedRunStatus(row) === 'success').length
   const failed = completed.filter(row => ['failed', 'cancelled', 'paused'].includes(row.status)).length
   const durations = completed.map(row => Number(row.durationMs || 0)).filter(value => value > 0)
   return {
     total: rows.length,
     success,
+    noop,
     failed,
     averageDurationMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0,
   }
@@ -1291,8 +1299,31 @@ function latestStatusLabel(status) {
   return map[status] || status
 }
 
-function runStatusTagType(status) {
+function runChangedCount(row = {}) {
+  return Number(row.inserted || 0)
+    + Number(row.updated || 0)
+    + Number(row.deleted || 0)
+    + Number(row.softDeleted || 0)
+}
+
+function runSourceCount(row = {}) {
+  return Number(row.sourceRows || 0)
+}
+
+function normalizedRunStatus(row = {}) {
+  if (row.status === 'success' && runSourceCount(row) === 0 && runChangedCount(row) === 0 && Number(row.failed || 0) === 0) return 'noop'
+  return row.status
+}
+
+function runStatusLabel(row = {}) {
+  if (normalizedRunStatus(row) === 'noop') return '无变更'
+  return latestStatusLabel(row.status)
+}
+
+function runStatusTagType(rowOrStatus) {
+  const status = typeof rowOrStatus === 'string' ? rowOrStatus : normalizedRunStatus(rowOrStatus)
   if (status === 'success') return 'success'
+  if (status === 'noop') return 'info'
   if (['failed', 'cancelled'].includes(status)) return 'danger'
   if (['paused', 'running'].includes(status)) return 'warning'
   return 'info'
@@ -2761,6 +2792,9 @@ onUnmounted(() => {
 .task-detail-shell {
   display: grid;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .detail-hero {
@@ -2816,6 +2850,10 @@ onUnmounted(() => {
   background: var(--bg-elevated);
 }
 
+.detail-metric.neutral {
+  background: rgba(100,116,139,0.08);
+}
+
 .detail-metric span,
 .detail-kv-grid span {
   color: var(--text-tertiary);
@@ -2835,10 +2873,31 @@ onUnmounted(() => {
 }
 
 .history-metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-bottom: 12px;
+}
+
+.task-detail-shell :deep(.el-table) {
+  max-width: 100%;
+}
+
+.task-detail-shell :deep(.el-table__body-wrapper),
+.task-detail-shell :deep(.el-table__header-wrapper) {
+  overflow-x: auto;
+}
+
+.history-hint {
+  margin-top: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.run-dot.noop {
+  background: var(--text-tertiary);
 }
 .run-trend {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
   min-height: 18px;
@@ -2854,6 +2913,28 @@ onUnmounted(() => {
 .run-dot.cancelled { background: var(--red); }
 .run-dot.paused,
 .run-dot.running { background: var(--amber); }
+
+@media (max-width: 900px) {
+  .detail-panel-grid,
+  .history-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .detail-hero {
+    flex-direction: column;
+  }
+
+  .detail-hero-badges {
+    justify-content: flex-start;
+  }
+
+  .detail-panel-grid,
+  .history-metrics {
+    grid-template-columns: 1fr;
+  }
+}
 
 .detail-section {
   margin-top: 14px;
