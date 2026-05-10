@@ -481,7 +481,7 @@ npm run check:onboarding
 
 - `audit:security` 检查 Git remote 是否泄露 PAT、密钥是否加密保存、密钥导出是否有管理员边界、连接 DTO 是否脱敏等。
 - `backup:rehearse` 把 `server/data` 中的配置、用户、历史、失败批次、checkpoint、审计日志复制到隔离目录，再按 hash 和 JSON 解析验证恢复包，不会覆盖当前运行数据。
-- `storage:sqlite:shadow` 会把现有 JSON 数据生成一份 SQLite 影子库并校验行数。这一步只做迁移验证和容量规划，当前服务仍继续使用 JSON 存储；等长跑稳定后，再单独安排运行时存储切换。
+- `storage:sqlite:shadow` 会把现有 JSON 数据生成一份 SQLite 影子库并校验行数，用于迁移验收和排查。当前 Docker 部署默认已把运行历史、失败批次和审计日志写入 `runtime.sqlite`。
 - `check:onboarding` 检查 README 是否覆盖局域网部署、环境变量、数据源、任务、预检、观测告警、导入导出和验收命令。
 
 真实长跑测试：
@@ -494,6 +494,17 @@ npm run longrun:reliability
 ```
 
 长跑会先跑发布门禁和带 Docker 重启的故障注入，然后在指定时长内循环采样健康检查、Docker 资源占用和大表压力模拟，最后再跑 API 合约和故障注入验收。报告输出到 `server/data/reports/longrun-reliability_*.md`。
+
+真实业务链路长跑：
+
+```bash
+REALRUN_MINUTES=60 \
+REALRUN_INTERVAL_SECONDS=120 \
+REALRUN_E2E_TIMEOUT_MS=60000 \
+npm run realrun:reliability
+```
+
+真实链路长跑会循环执行 `e2e:smoke`：使用当前共享 SQL 数据源和 Teable 连接，创建临时私有数据源、临时 Teable 表、同步任务，执行预览、同步、一致性校验、审计检查和清理；同时采样健康检查、Docker 资源和 SQLite `runtime.sqlite` 完整性。它会真实调用 SQL 和 Teable API，不默认并入发布门禁。
 
 ## 本地开发
 
@@ -536,4 +547,5 @@ npm run verify:image:fallback
 npm run e2e:smoke
 npm run stress:e2e
 npm run longrun:reliability
+npm run realrun:reliability
 ```
