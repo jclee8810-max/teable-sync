@@ -10,6 +10,7 @@
     "build": "cd client && npm run build",
     "start": "cd server && node src/index.js",
     "test:reliability": "node server/scripts/sync-engine-self-test.mjs",
+    "test:runtime-store": "node server/scripts/runtime-store-self-test.mjs",
     "e2e:smoke": "node server/scripts/run-e2e-smoke.mjs",
     "e2e:contract": "node server/scripts/run-api-contract-smoke.mjs",
     "check:release": "node server/scripts/pre-release-check.mjs",

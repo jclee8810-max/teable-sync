@@ -3,15 +3,24 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { isAdmin } from './roles.js';
 import { logger } from './logger.js';
+import {
+  getAuditLogsFromStore,
+  insertAuditLogRecord,
+  isRuntimeSqliteEnabled,
+  migrateRuntimeJsonOnce,
+} from './runtimeStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', '..', 'data');
+const DATA_DIR = process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
 const AUDIT_FILE = join(DATA_DIR, 'audit-logs.json');
+const HISTORY_FILE = join(DATA_DIR, 'sync-history.json');
+const FAILURES_FILE = join(DATA_DIR, 'sync-failures.json');
 const MAX_AUDIT_LOGS = 2000;
 
 function ensureDataDir() {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 }
+migrateRuntimeJsonOnce({ historyFile: HISTORY_FILE, failuresFile: FAILURES_FILE, auditFile: AUDIT_FILE });
 
 function readAuditLogs() {
   ensureDataDir();
@@ -48,6 +57,7 @@ export function appendAuditLog(user, action, details = {}) {
       message: details.message || '',
       metadata: details.metadata || {},
     };
+    if (isRuntimeSqliteEnabled()) return insertAuditLogRecord(entry);
     logs.push(entry);
     writeAuditLogs(logs);
     return entry;
@@ -58,6 +68,14 @@ export function appendAuditLog(user, action, details = {}) {
 }
 
 export function getAuditLogs({ user, limit = 200, action, resourceType } = {}) {
+  if (isRuntimeSqliteEnabled()) {
+    return getAuditLogsFromStore({
+      limit,
+      action,
+      resourceType,
+      userId: isAdmin(user) ? null : user?.id,
+    });
+  }
   let logs = readAuditLogs();
   if (!isAdmin(user)) {
     logs = logs.filter((entry) => entry.userId === user?.id);

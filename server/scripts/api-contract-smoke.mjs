@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { signToken } from '../src/middleware/auth.js';
 
 const API_BASE = (process.env.API_CONTRACT_BASE || 'http://127.0.0.1:3101/api').replace(/\/+$/, '');
@@ -16,6 +17,38 @@ const historyBackupFile = `${HISTORY_FILE}.api-contract-${backupStamp}`;
 const failuresBackupFile = `${FAILURES_FILE}.api-contract-${backupStamp}`;
 const stateBackupFile = `${STATE_FILE}.api-contract-${backupStamp}`;
 const checks = [];
+
+function sqlString(value) {
+  if (value === null || value === undefined) return 'NULL';
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function jsonString(value) {
+  return sqlString(JSON.stringify(value ?? null));
+}
+
+function seedRuntimeSqlite(history, failures) {
+  const dbFile = process.env.RUNTIME_SQLITE_FILE || './data/runtime.sqlite';
+  if (!existsSync(dbFile)) return;
+  const statements = [
+    'BEGIN;',
+    "DELETE FROM sync_history WHERE id LIKE 'contract-%' OR task_id = 'legacy-task';",
+    "DELETE FROM sync_failures WHERE id LIKE 'contract-%' OR task_id = 'legacy-task';",
+  ];
+  for (const record of history) {
+    statements.push(`INSERT INTO sync_history (id, run_id, task_id, status, start_time, end_time, payload_json)
+VALUES (${sqlString(record.id)}, ${sqlString(record.runId)}, ${sqlString(record.taskId)}, ${sqlString(record.status)}, ${sqlString(record.startTime)}, ${sqlString(record.endTime)}, ${jsonString(record)})
+ON CONFLICT(id) DO UPDATE SET run_id = excluded.run_id, task_id = excluded.task_id, status = excluded.status, start_time = excluded.start_time, end_time = excluded.end_time, payload_json = excluded.payload_json;`);
+  }
+  for (const failure of failures) {
+    statements.push(`INSERT INTO sync_failures (id, task_id, run_id, count, retry_count, created_at, payload_json)
+VALUES (${sqlString(failure.id)}, ${sqlString(failure.taskId)}, ${sqlString(failure.runId)}, ${Number(failure.count || 0)}, ${Number(failure.retryCount || 0)}, ${sqlString(failure.createdAt)}, ${jsonString(failure)})
+ON CONFLICT(id) DO UPDATE SET task_id = excluded.task_id, run_id = excluded.run_id, count = excluded.count, retry_count = excluded.retry_count, created_at = excluded.created_at, payload_json = excluded.payload_json;`);
+  }
+  statements.push('COMMIT;');
+  const result = spawnSync(process.env.SQLITE_BIN || 'sqlite3', [dbFile], { input: `${statements.join('\n')}\n`, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`Failed to seed runtime sqlite: ${result.stderr || result.stdout}`);
+}
 
 function record(ok, name, detail = '') {
   checks.push({ ok, name, detail });
@@ -107,7 +140,7 @@ try {
     alertStates: {},
   }, null, 2));
 
-  writeFileSync(HISTORY_FILE, JSON.stringify([{
+  const historySeed = [{
     id: 'contract-run-001',
     runId: 'contract-run-001',
     taskId: legacyTask.id,
@@ -128,8 +161,8 @@ try {
     failed: 0,
     errorMessage: null,
     durationMs: 1234,
-  }], null, 2));
-  writeFileSync(FAILURES_FILE, JSON.stringify([{
+  }];
+  const failuresSeed = [{
     id: 'contract-failure-001',
     taskId: legacyTask.id,
     taskName: legacyTask.name,
@@ -151,7 +184,10 @@ try {
     createdAt: now,
     retryCount: 0,
     lastRetryAt: null,
-  }], null, 2));
+  }];
+  writeFileSync(HISTORY_FILE, JSON.stringify(historySeed, null, 2));
+  writeFileSync(FAILURES_FILE, JSON.stringify(failuresSeed, null, 2));
+  seedRuntimeSqlite(historySeed, failuresSeed);
   writeFileSync(STATE_FILE, JSON.stringify({
     lastSyncAt: null,
     watermark: null,

@@ -238,6 +238,9 @@ http://192.168.10.2:3101
 | `AUTO_RESUME_RUN_IMMEDIATELY` | `false` | 否 | 希望服务启动后立刻补跑一次时 | `false` 只恢复定时器；`true` 会在恢复后马上执行一次同步。数据量大时建议保持 `false`。 |
 | `TEABLE_RATE_LIMIT_MS` | `120` | 否 | Teable 出现限流或网络抖动时 | Teable API 写入请求之间的等待时间，单位毫秒。值越大越稳但越慢。 |
 | `LOG_LEVEL` | `info` | 否 | 需要排查问题或减少日志时 | 服务端日志级别，可选 `debug`、`info`、`warn`、`error`、`silent`。结构化日志会脱敏 token、password、secret、Authorization、Cookie 等字段。 |
+| `TEABLE_SYNC_RUNTIME_STORE` | `sqlite` | 否 | 希望临时回退到旧 JSON 运行数据时 | 增长型运行数据存储方式。`sqlite` 会把运行历史、失败批次、审计日志写入 `runtime.sqlite`；配置、用户和密钥仍保存在 JSON。可临时设为 `json` 回退。 |
+| `RUNTIME_STORE_DATA_DIR` | `/app/server/data` | 否 | 需要自定义运行数据目录时 | 运行历史、失败批次、审计日志旧 JSON 迁移源目录。Docker 部署保持默认即可。 |
+| `RUNTIME_SQLITE_FILE` | `/app/server/data/runtime.sqlite` | 否 | 需要自定义 SQLite 文件位置时 | 运行时 SQLite 文件路径。Docker 部署保持默认即可，文件会落在持久化数据卷里。 |
 | `INITIAL_FULL_SYNC_MAX_ROWS` | `100000` | 否 | 首次全量同步源表很大时 | 同步前预检的默认保护阈值。任务未单独配置时，首次全量预估超过该行数会阻断启动或立即同步。 |
 | `INITIAL_FULL_SYNC_WARN_ROWS` | `50000` | 否 | 想更早提示大表风险时 | 同步前预检的默认提醒阈值。超过该行数但未超过上限时会提示预计分页和写入批次。 |
 | `INITIALIZATION_CONCURRENCY` | `1` | 否 | 同时有多个大表首次全量同步时 | 初始化队列的并发上限。小型 Mac mini 部署建议保持 `1`，避免多个大表同时压住 Teable 和源库。旧变量名 `INITIALIZATION_QUEUE_CONCURRENCY` 仍兼容，但新部署建议使用这个变量。 |

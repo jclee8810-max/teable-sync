@@ -21,6 +21,9 @@ ENV APP_VERSION=$APP_VERSION
 ENV GIT_COMMIT=$GIT_COMMIT
 ENV BUILD_TIME=$BUILD_TIME
 
+# Runtime SQLite is used for growing operational data such as history, failures, and audit logs.
+RUN apk add --no-cache sqlite
+
 # 安装生产依赖（只装 server 的）
 COPY server/ ./server/
 RUN cd server && npm install --omit=dev
