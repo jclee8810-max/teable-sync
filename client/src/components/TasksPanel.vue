@@ -112,6 +112,9 @@
           <div v-if="taskHealth[task.id]?.latestError || task.schemaSnapshotError" class="task-warning-line">
             <span v-if="taskHealth[task.id]?.latestError" :title="taskHealth[task.id].latestError">最近错误：{{ latestErrorLabel(task) }}</span>
             <span v-if="latestSuggestedAction(task)" class="task-suggestion-line" :title="latestSuggestedAction(task)">建议：{{ latestSuggestedAction(task) }}</span>
+            <button v-if="latestSuggestedAction(task)" class="inline-action-btn" type="button" @click="resolveTaskGuidance(task)">
+              {{ guidanceActionLabel(latestActionTarget(task)) }}
+            </button>
             <span v-if="task.schemaSnapshotError" :title="task.schemaSnapshotError">字段快照失败：{{ task.schemaSnapshotError }}</span>
           </div>
           <div v-if="taskProgress[task.id] && taskProgress[task.id].status !== 'idle'" class="progress-panel">
@@ -228,7 +231,12 @@
               <div v-else class="detail-empty-line">暂无健康数据</div>
               <div v-if="taskHealth[detailTask.id]?.latestError" class="detail-error-line">
                 <div>{{ latestErrorLabel(detailTask) }}</div>
-                <div v-if="latestSuggestedAction(detailTask)" class="detail-suggestion-line">建议：{{ latestSuggestedAction(detailTask) }}</div>
+                <div v-if="latestSuggestedAction(detailTask)" class="detail-suggestion-line">
+                  <span>建议：{{ latestSuggestedAction(detailTask) }}</span>
+                  <button class="inline-action-btn" type="button" @click="resolveTaskGuidance(detailTask)">
+                    {{ guidanceActionLabel(latestActionTarget(detailTask)) }}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1044,6 +1052,11 @@ import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplate
 import { buildTaskUiState, isActionBusy, isAutoSyncMode, setActionBusy } from '../utils/taskUiState'
 import { getConnectionHealth, isConnectionReady } from '../utils/connectionHealth'
 
+const props = defineProps({
+  focusAction: { type: Object, default: null },
+})
+const emit = defineEmits(['resolve-action'])
+
 // 当前用户身份
 const currentUser = getStoredUser()
 const currentUserId = currentUser?.id || null
@@ -1338,6 +1351,10 @@ function latestSuggestedAction(task) {
   return taskHealth.value[task.id]?.latestSuggestedAction || ''
 }
 
+function latestActionTarget(task) {
+  return taskHealth.value[task.id]?.latestActionTarget || 'task_detail'
+}
+
 function latestErrorLabel(task) {
   const health = taskHealth.value[task.id] || {}
   const prefix = health.latestErrorType ? `${errorTypeLabel(health.latestErrorType)}：` : ''
@@ -1347,6 +1364,28 @@ function latestErrorLabel(task) {
 function historyErrorLabel(row = {}) {
   const prefix = row.errorType ? `${errorTypeLabel(row.errorType)}：` : ''
   return `${prefix}${row.errorMessage || '-'}`
+}
+
+function guidanceActionLabel(target) {
+  const map = {
+    connections: '去数据源',
+    task_mapping: '检查映射',
+    task_preflight: '运行预检',
+    task_failures: '打开失败批次',
+    task_detail: '查看详情',
+    task_settings: '编辑设置',
+    observability: '查看告警',
+  }
+  return map[target || 'task_detail'] || '去处理'
+}
+
+async function resolveTaskGuidance(task) {
+  const actionTarget = latestActionTarget(task)
+  if (['connections', 'observability'].includes(actionTarget)) {
+    emit('resolve-action', { taskId: task.id, actionTarget })
+    return
+  }
+  await handleFocusAction({ taskId: task.id, actionTarget })
 }
 
 function runChangedCount(row = {}) {
@@ -2491,6 +2530,32 @@ async function openTaskDetail(task) {
   await Promise.all([refreshTaskDetailLogs(), refreshTaskHistory(), refreshTaskInitialization()])
 }
 
+async function handleFocusAction(action = {}) {
+  if (!action?.taskId && action.actionTarget !== 'connections') return
+  if (action.actionTarget === 'connections') {
+    emit('resolve-action', action)
+    return
+  }
+  if (!tasks.value.length) await loadAll()
+  const task = tasks.value.find((item) => item.id === action.taskId)
+  if (!task) {
+    ElMessage.warning('未找到对应任务，可能已被删除或无权查看')
+    return
+  }
+  taskFilter.value = 'all'
+  taskSearch.value = ''
+  const target = action.actionTarget || 'task_detail'
+  if (target === 'task_failures') {
+    await openFailures(task)
+  } else if (target === 'task_preflight') {
+    await runPreflight(task)
+  } else if (['task_mapping', 'task_settings'].includes(target)) {
+    await openDialog(task)
+  } else {
+    await openTaskDetail(task)
+  }
+}
+
 async function toggleSync(task) {
   if (!task?.id || isScheduleActionDisabled(task)) return
   setTaskActionBusy(task, 'schedule', true)
@@ -2535,6 +2600,10 @@ onMounted(async () => {
   await loadAll()
   startProgressPolling()
 })
+
+watch(() => props.focusAction, (action) => {
+  if (action) handleFocusAction(action)
+}, { immediate: true })
 
 onUnmounted(() => {
   if (progressTimer) window.clearInterval(progressTimer)
@@ -2831,6 +2900,26 @@ onUnmounted(() => {
 
 .task-warning-line .task-suggestion-line {
   color: var(--amber);
+}
+
+.inline-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inline-action-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-muted);
 }
 .health-error {
   max-width: 420px;
@@ -3148,6 +3237,13 @@ onUnmounted(() => {
 .history-suggestion-line {
   margin-top: 4px;
   color: var(--amber);
+}
+
+.detail-suggestion-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .history-error-cell {

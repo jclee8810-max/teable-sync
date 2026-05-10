@@ -57,6 +57,7 @@
               <span class="alert-severity">{{ severityLabel(item.severity) }}</span>
               <strong>{{ item.title }}</strong>
               <p>{{ item.message }}</p>
+              <small v-if="alertSuggestedAction(item)" class="alert-suggestion">建议：{{ alertSuggestedAction(item) }}</small>
               <small v-if="item.state !== 'open'" class="alert-state-note">{{ alertStateDetail(item) }}</small>
             </div>
             <div class="alert-meta">
@@ -64,6 +65,7 @@
               <small>{{ alertTypeLabel(item.type) }}</small>
               <em :class="['alert-state', item.state]">{{ alertStateLabel(item.state) }}</em>
               <div class="alert-actions">
+                <button type="button" class="primary-action" @click="resolveAlert(item)">{{ actionLabel(item.metadata?.actionTarget || defaultActionTarget(item)) }}</button>
                 <button v-if="item.state === 'open'" type="button" @click="ackAlert(item)">确认</button>
                 <button v-if="item.state === 'open'" type="button" @click="muteAlertFor(item)">静默1h</button>
                 <button v-if="item.state !== 'open'" type="button" @click="restoreAlertState(item)">恢复</button>
@@ -124,8 +126,21 @@
         <el-table-column label="上次同步" width="170">
           <template #default="{ row }">{{ row.lastSyncAt ? formatDateTime(row.lastSyncAt) : '-' }}</template>
         </el-table-column>
-        <el-table-column label="最近错误" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.health?.latestError || '-' }}</template>
+        <el-table-column label="最近错误 / 建议" min-width="260" show-overflow-tooltip>
+          <template #default="{ row }">
+            <div v-if="row.health?.latestError" class="obs-error-cell">
+              <div>{{ row.health.latestError }}</div>
+              <div v-if="row.health.latestSuggestedAction" class="obs-suggestion-line">建议：{{ row.health.latestSuggestedAction }}</div>
+            </div>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="处理" width="110" fixed="right">
+          <template #default="{ row }">
+            <button class="table-action-btn" type="button" @click="resolveTaskRow(row)" :disabled="!row.id">
+              {{ actionLabel(row.health?.latestActionTarget || (row.pendingFailures ? 'task_failures' : 'task_detail')) }}
+            </button>
+          </template>
         </el-table-column>
       </el-table>
     </section>
@@ -215,6 +230,8 @@ import {
   testAlertNotification,
   updateAlertNotificationSettings,
 } from '../api'
+
+const emit = defineEmits(['resolve-action'])
 
 const loading = ref(false)
 const snapshot = ref(null)
@@ -384,6 +401,49 @@ function alertStateDetail(item) {
   if (item.state === 'muted') return `静默到 ${formatDateTime(item.mutedUntil)}`
   if (item.state === 'acknowledged') return `确认于 ${formatDateTime(item.acknowledgedAt)}`
   return ''
+}
+
+function alertSuggestedAction(item) {
+  return item.metadata?.suggestedAction || ''
+}
+
+function defaultActionTarget(item) {
+  if (item.metadata?.actionTarget) return item.metadata.actionTarget
+  if (['connection', 'connection_test'].includes(item.type)) return 'connections'
+  if (item.type === 'sync_failure') return 'task_failures'
+  if (item.type === 'scheduler_missing') return 'task_settings'
+  if (item.type === 'schema_snapshot') return 'task_mapping'
+  if (item.type === 'recent_failed') return 'task_detail'
+  return item.taskId ? 'task_detail' : 'observability'
+}
+
+function actionLabel(target) {
+  const map = {
+    connections: '去数据源',
+    task_mapping: '检查映射',
+    task_preflight: '运行预检',
+    task_failures: '失败批次',
+    task_detail: '任务详情',
+    task_settings: '编辑设置',
+    observability: '查看告警',
+  }
+  return map[target || 'task_detail'] || '去处理'
+}
+
+function resolveAlert(item) {
+  emit('resolve-action', {
+    taskId: item.taskId,
+    connectionId: item.metadata?.connectionId || null,
+    alertId: item.id,
+    actionTarget: defaultActionTarget(item),
+  })
+}
+
+function resolveTaskRow(row) {
+  emit('resolve-action', {
+    taskId: row.id,
+    actionTarget: row.health?.latestActionTarget || (row.pendingFailures ? 'task_failures' : 'task_detail'),
+  })
 }
 
 function healthLabel(status) {
@@ -579,6 +639,12 @@ button.obs-tile:hover,
   color: var(--text-tertiary);
   font-size: 11px;
 }
+.alert-suggestion {
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 .alert-severity {
   justify-self: start;
   padding: 2px 7px;
@@ -636,6 +702,38 @@ button.obs-tile:hover,
   cursor: pointer;
 }
 .alert-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.alert-actions .primary-action {
+  border-color: rgba(99,102,241,0.35);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.obs-error-cell {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.obs-suggestion-line {
+  margin-top: 4px;
+  color: var(--amber);
+}
+
+.table-action-btn {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.table-action-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
 
 .run-metrics {
   display: grid;

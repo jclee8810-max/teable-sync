@@ -81,6 +81,7 @@ function shouldSendAlert(alert, settings, now = Date.now()) {
 
 export function buildAlertWebhookPayload({ alert, snapshot, appUrl = null, test = false }) {
   const suggestedAction = alert.metadata?.suggestedAction || defaultSuggestedAction(alert);
+  const actionUrl = buildActionUrl(appUrl, alert);
   return {
     source: 'teable-sync',
     event: test ? 'alert.test' : 'alert.open',
@@ -96,15 +97,39 @@ export function buildAlertWebhookPayload({ alert, snapshot, appUrl = null, test 
     errorType: alert.metadata?.errorType || null,
     actionTarget: alert.metadata?.actionTarget || null,
     suggestedAction,
+    actionUrl,
     appUrl,
     metadata: alert.metadata || {},
     summary: snapshot?.summary ? clone(snapshot.summary) : null,
     teable: {
       title: `[Teable Sync] ${alert.title}`,
-      content: `${alert.message}${alert.taskName ? `\n任务：${alert.taskName}` : ''}${suggestedAction ? `\n建议：${suggestedAction}` : ''}`,
+      content: `${alert.message}${alert.taskName ? `\n任务：${alert.taskName}` : ''}${suggestedAction ? `\n建议：${suggestedAction}` : ''}${actionUrl ? `\n处理链接：${actionUrl}` : ''}`,
       severity: alert.severity,
     },
   };
+}
+
+function buildActionUrl(appUrl, alert) {
+  if (!appUrl) return null;
+  try {
+    const url = new URL(appUrl);
+    const actionTarget = alert.metadata?.actionTarget || defaultActionTarget(alert);
+    url.searchParams.set('actionTarget', actionTarget);
+    if (alert.taskId) url.searchParams.set('taskId', alert.taskId);
+    if (alert.metadata?.connectionId) url.searchParams.set('connectionId', alert.metadata.connectionId);
+    return url.toString();
+  } catch {
+    return appUrl;
+  }
+}
+
+function defaultActionTarget(alert) {
+  if (alert.type === 'sync_failure') return 'task_failures';
+  if (alert.type === 'connection' || alert.type === 'connection_test') return 'connections';
+  if (alert.type === 'scheduler_missing') return 'task_settings';
+  if (alert.type === 'schema_snapshot') return 'task_mapping';
+  if (alert.type === 'recent_failed') return 'task_detail';
+  return alert.taskId ? 'task_detail' : 'observability';
 }
 
 function defaultSuggestedAction(alert) {

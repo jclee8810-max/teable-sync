@@ -81,8 +81,8 @@
 
       <div class="content-area">
         <ConnectionsPanel v-if="activeTab === 'connections'" />
-        <TasksPanel v-if="activeTab === 'tasks'" />
-        <ObservabilityPanel v-if="activeTab === 'observability'" />
+        <TasksPanel v-if="activeTab === 'tasks'" :focus-action="taskFocusAction" @resolve-action="handleResolveAction" />
+        <ObservabilityPanel v-if="activeTab === 'observability'" @resolve-action="handleResolveAction" />
         <LogsPanel v-if="activeTab === 'logs'" />
         <SystemDoctorPanel v-if="activeTab === 'doctor'" />
         <AuthPage v-if="showProfile" @auth-changed="onAuthChanged" />
@@ -130,6 +130,7 @@ const showUserMenu = ref(false)
 const showProfile = ref(false)
 const versionDialogVisible = ref(false)
 const versionInfo = ref({ version: '1.0.0', commit: 'unknown', buildTime: 'unknown', nodeEnv: '-' })
+const taskFocusAction = ref(null)
 const devLog = (...args) => {
   if (import.meta.env.DEV) console.debug(...args)
 }
@@ -217,6 +218,7 @@ onMounted(async () => {
       currentUser.value = await getCurrentUser()
       setStoredUser(currentUser.value)
       isLoggedIn.value = true
+      consumeUrlAction()
     } catch {
       clearToken()
       isLoggedIn.value = false
@@ -232,6 +234,7 @@ function onAuthChanged(user) {
     currentUser.value = user
     isLoggedIn.value = true
     showProfile.value = false
+    consumeUrlAction()
     if (!ws || ws.readyState === WebSocket.CLOSED) connectWS()
   } else {
     currentUser.value = null
@@ -259,6 +262,39 @@ function toggleUserMenu() {
 
 function closeUserMenu() {
   showUserMenu.value = false
+}
+
+function handleResolveAction(action = {}) {
+  showProfile.value = false
+  showUserMenu.value = false
+  const target = action.actionTarget || action.target || 'task_detail'
+  if (target === 'connections') {
+    activeTab.value = 'connections'
+    return
+  }
+  if (target === 'observability') {
+    activeTab.value = 'observability'
+    return
+  }
+  taskFocusAction.value = { ...action, actionTarget: target, nonce: Date.now() }
+  activeTab.value = 'tasks'
+}
+
+function consumeUrlAction() {
+  if (!isLoggedIn.value) return
+  const params = new URLSearchParams(window.location.search)
+  const actionTarget = params.get('actionTarget')
+  const taskId = params.get('taskId')
+  const connectionId = params.get('connectionId')
+  const view = params.get('view')
+  if (!actionTarget && !taskId && !connectionId && !view) return
+  handleResolveAction({
+    actionTarget: actionTarget || (view === 'connections' ? 'connections' : 'task_detail'),
+    taskId,
+    connectionId,
+    source: 'url',
+  })
+  window.history.replaceState(null, '', window.location.pathname + window.location.hash)
 }
 
 // Click outside directive
