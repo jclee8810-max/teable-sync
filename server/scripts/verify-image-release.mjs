@@ -10,6 +10,7 @@ const REPO = process.env.IMAGE_VERIFY_REPO || 'teable-sync';
 const WORKFLOW = process.env.IMAGE_VERIFY_WORKFLOW || 'docker-publish.yml';
 const IMAGE = process.env.IMAGE_VERIFY_IMAGE || `ghcr.io/${OWNER}/${REPO}:latest`;
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+const PULL_RETRIES = Math.max(1, Math.floor(Number(process.env.IMAGE_VERIFY_PULL_RETRIES || 3)));
 const softMode = process.env.IMAGE_VERIFY_STRICT !== 'true';
 const checks = [];
 let hasWarning = false;
@@ -55,6 +56,10 @@ function findDocker() {
   return null;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function checkWorkflow() {
   const url = `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOW}/runs?branch=main&per_page=1`;
   const data = await fetchJson(url);
@@ -81,18 +86,26 @@ async function checkRegistryManifest() {
   return digest;
 }
 
-function checkDockerPull() {
+async function checkDockerPull() {
   const docker = findDocker();
   if (!docker) {
     record(false, 'Docker pull latest image', 'Docker CLI not found', false);
     return false;
   }
-  const result = spawnSync(docker, ['pull', IMAGE], { stdio: 'pipe', encoding: 'utf8', timeout: 120000 });
-  const output = `${result.stdout || ''}${result.stderr || ''}`.trim().slice(-2000);
-  const ok = result.status === 0;
-  record(ok, 'Docker pull latest image', output || IMAGE, true);
-  if (!ok) throw new Error(`docker pull failed: ${output}`);
-  return true;
+
+  let lastOutput = '';
+  for (let attempt = 1; attempt <= PULL_RETRIES; attempt += 1) {
+    const result = spawnSync(docker, ['pull', IMAGE], { stdio: 'pipe', encoding: 'utf8', timeout: 120000 });
+    lastOutput = `${result.stdout || ''}${result.stderr || ''}`.trim().slice(-2000);
+    if (result.status === 0) {
+      record(true, 'Docker pull latest image', `attempt ${attempt}/${PULL_RETRIES}: ${lastOutput || IMAGE}`, true);
+      return true;
+    }
+    if (attempt < PULL_RETRIES) await sleep(Math.min(30000, attempt * 5000));
+  }
+
+  record(false, 'Docker pull latest image', `failed after ${PULL_RETRIES} attempts: ${lastOutput}`, true);
+  throw new Error(`docker pull failed after ${PULL_RETRIES} attempts: ${lastOutput}`);
 }
 
 function renderReport(exitCode) {
@@ -106,6 +119,7 @@ function renderReport(exitCode) {
     `- Image: ${IMAGE}`,
     `- Workflow: ${OWNER}/${REPO}/${WORKFLOW}`,
     `- Strict: ${process.env.IMAGE_VERIFY_STRICT === 'true' ? 'true' : 'false'}`,
+    `- Docker pull retries: ${PULL_RETRIES}`,
     '',
     '| Check | Status | Required | Detail |',
     '| --- | --- | --- | --- |',
@@ -118,7 +132,7 @@ let exitCode = 0;
 try {
   await checkWorkflow();
   await checkRegistryManifest();
-  checkDockerPull();
+  await checkDockerPull();
 } catch (err) {
   exitCode = softMode ? 0 : 1;
   record(false, 'Image release verification', err.message, !softMode);
