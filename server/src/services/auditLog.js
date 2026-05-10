@@ -11,7 +11,7 @@ import {
 } from './runtimeStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
+const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
 const AUDIT_FILE = join(DATA_DIR, 'audit-logs.json');
 const HISTORY_FILE = join(DATA_DIR, 'sync-history.json');
 const FAILURES_FILE = join(DATA_DIR, 'sync-failures.json');

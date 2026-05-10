@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { logger } from './logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
+const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
 const DB_FILE = process.env.RUNTIME_SQLITE_FILE || join(DATA_DIR, 'runtime.sqlite');
 const STORE_MODE = String(process.env.TEABLE_SYNC_RUNTIME_STORE || process.env.RUNTIME_STORE || 'json').toLowerCase();
 const SQLITE_ENABLED = STORE_MODE === 'sqlite';

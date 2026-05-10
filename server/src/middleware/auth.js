@@ -6,7 +6,8 @@ import { ensureOwner } from '../services/roles.js';
 import { logger } from '../services/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const USERS_FILE = join(__dirname, '..', '..', 'data', 'users.json');
+const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
+const USERS_FILE = join(DATA_DIR, 'users.json');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {

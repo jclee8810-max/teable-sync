@@ -21,7 +21,8 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const STATE_DIR = join(dirname(dirname(__dirname)), 'data', 'sync-state');
+const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(dirname(dirname(__dirname)), 'data');
+const STATE_DIR = join(DATA_DIR, 'sync-state');
 if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
 
 // P1-1: Task-level sync lock to prevent concurrent runs of the same task

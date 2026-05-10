@@ -9,7 +9,7 @@ import { decryptConfigSecrets, encryptConfigSecrets } from '../services/secretSt
 import { logger } from '../services/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', '..', 'data');
+const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', '..', 'data');
 const CONFIG_FILE = join(DATA_DIR, 'config.json');
 
 // In-memory state store (connectionId -> { nonce, connectionId, createdAt })

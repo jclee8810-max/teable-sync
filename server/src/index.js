@@ -34,7 +34,7 @@ import { logger } from './services/logger.js';
 import { connectionLabel, getConnectionHealth } from './services/connectionHealth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', 'data');
+const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', 'data');
 const CONFIG_FILE = join(DATA_DIR, 'config.json');
 
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
