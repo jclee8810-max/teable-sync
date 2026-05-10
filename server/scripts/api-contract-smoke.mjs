@@ -225,6 +225,7 @@ try {
 
   res = await request('/tasks/legacy-task/initialization', {}, ownerToken);
   record(res.status === 200 && res.data.hasCheckpoint === true && res.data.checkpoint?.processedRows === 1000, 'initialization endpoint exposes checkpoint');
+  record(res.data.runState?.initializationQueue?.concurrency >= 1 && typeof res.data.runState.initializationQueue.queueLength === 'number', 'initialization endpoint exposes queue metadata');
   res = await request('/tasks/legacy-task/failures', {}, ownerToken);
   const failure = res.data?.[0];
   record(res.status === 200 && failure?.id === 'contract-failure-001' && failure.hasPayload === true, 'failure list exposes batch summary');

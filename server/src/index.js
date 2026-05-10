@@ -44,10 +44,14 @@ const APP_VERSION = process.env.APP_VERSION || '1.0.0';
 const GIT_COMMIT = process.env.GIT_COMMIT || 'unknown';
 const BUILD_TIME = process.env.BUILD_TIME || 'unknown';
 const ALERT_NOTIFICATION_SCAN_INTERVAL_MS = Math.max(15000, Number(process.env.ALERT_NOTIFICATION_SCAN_INTERVAL_MS || 60000));
+const INITIALIZATION_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.INITIALIZATION_CONCURRENCY || process.env.INITIALIZATION_QUEUE_CONCURRENCY || 1)));
+const INITIALIZATION_QUEUE_AVG_RUN_MINUTES = Math.max(1, Math.floor(Number(process.env.INITIALIZATION_QUEUE_AVG_RUN_MINUTES || 30)));
 
 // --- Scheduler state (in-memory) ---
 const syncScheduler = new Map(); // taskId -> { intervalId, syncMode, intervalSec }
 const syncRuns = new Map(); // taskId -> { controller, state }
+const initializationQueue = [];
+let activeInitializations = 0;
 
 app.use(cors());
 app.use(expressStatic(join(__dirname, '..', '..', 'client', 'dist')));
@@ -302,9 +306,58 @@ function createRunState(task, trigger) {
   };
 }
 
+function calculateQueueEstimate(position) {
+  const occupiedSlots = Math.max(0, activeInitializations);
+  const batchIndex = Math.max(0, Math.floor((occupiedSlots + Math.max(1, position) - 1) / INITIALIZATION_CONCURRENCY));
+  return new Date(Date.now() + batchIndex * INITIALIZATION_QUEUE_AVG_RUN_MINUTES * 60000).toISOString();
+}
+
+function buildInitializationQueueMeta(taskId) {
+  const index = initializationQueue.findIndex((item) => item.task.id === taskId);
+  const position = index >= 0 ? index + 1 : 0;
+  return {
+    queued: index >= 0,
+    position,
+    active: activeInitializations,
+    concurrency: INITIALIZATION_CONCURRENCY,
+    queueLength: initializationQueue.length,
+    estimatedStartAt: position ? calculateQueueEstimate(position) : null,
+  };
+}
+
+function updateQueuedInitializationStates() {
+  initializationQueue.forEach((item, index) => {
+    const position = index + 1;
+    item.runControl.onProgress({
+      status: 'queued',
+      phase: 'queued',
+      cancellable: true,
+      queuePosition: position,
+      queueLength: initializationQueue.length,
+      initializationConcurrency: INITIALIZATION_CONCURRENCY,
+      estimatedStartAt: calculateQueueEstimate(position),
+    });
+  });
+}
+
+function removeQueuedInitialization(taskId, reason = '排队中的初始化已取消') {
+  const index = initializationQueue.findIndex((item) => item.task.id === taskId);
+  if (index === -1) return null;
+  const [job] = initializationQueue.splice(index, 1);
+  job.runControl.signal?.aborted || job.runControl.finish({
+    status: 'cancelled',
+    phase: 'cancelled',
+    errorMessage: reason,
+    cancellable: false,
+  });
+  updateQueuedInitializationStates();
+  processInitializationQueue();
+  return job;
+}
+
 function startTrackedRun(task, trigger) {
   const existing = syncRuns.get(task.id);
-  if (['running', 'cancelling'].includes(existing?.state.status)) {
+  if (['running', 'queued', 'cancelling'].includes(existing?.state.status)) {
     return {
       owned: false,
       signal: existing.controller.signal,
@@ -338,7 +391,14 @@ function startTrackedRun(task, trigger) {
 }
 
 function getRunState(taskId) {
-  return syncRuns.get(taskId)?.state || { taskId, status: 'idle', phase: 'idle', cancellable: false };
+  const state = syncRuns.get(taskId)?.state;
+  if (state) {
+    return {
+      ...state,
+      initializationQueue: buildInitializationQueueMeta(taskId),
+    };
+  }
+  return { taskId, status: 'idle', phase: 'idle', cancellable: false, initializationQueue: buildInitializationQueueMeta(taskId) };
 }
 
 function assertTaskAccess(user, task, action = '访问') {
@@ -527,6 +587,83 @@ function shouldUseInitializationMode(preflight, requested = false) {
   return Boolean(estimate?.initialRun && Number(estimate.sourceRows || 0) > 0);
 }
 
+function enqueueInitializationRun(job) {
+  if (!job?.runControl?.owned) return false;
+  if (!job.initializationMode) return false;
+  initializationQueue.push({
+    ...job,
+    queuedAt: new Date().toISOString(),
+  });
+  updateQueuedInitializationStates();
+  processInitializationQueue();
+  return true;
+}
+
+async function processInitializationQueue() {
+  while (activeInitializations < INITIALIZATION_CONCURRENCY && initializationQueue.length > 0) {
+    const job = initializationQueue.shift();
+    if (job.runControl.signal?.aborted) {
+      job.runControl.finish({ status: 'cancelled', phase: 'cancelled', errorMessage: '排队中的初始化已取消', cancellable: false });
+      continue;
+    }
+    activeInitializations++;
+    updateQueuedInitializationStates();
+    runInitializationJob(job)
+      .catch((err) => logger.error(`初始化队列任务失败: ${err.message}`))
+      .finally(() => {
+        activeInitializations = Math.max(0, activeInitializations - 1);
+        updateQueuedInitializationStates();
+        processInitializationQueue();
+      });
+  }
+}
+
+async function runInitializationJob(job) {
+  const { task, srcConn, tgtConn, runControl, persistLog, resetState, trigger, actorUser, mode, intervalSec } = job;
+  runControl.onProgress({
+    status: 'running',
+    phase: 'starting',
+    queuePosition: 0,
+    queueLength: initializationQueue.length,
+    initializationConcurrency: INITIALIZATION_CONCURRENCY,
+    estimatedStartAt: null,
+  });
+  await persistLog({ taskId: task.id, level: 'info', message: `初始化队列开始执行: 并发 ${activeInitializations}/${INITIALIZATION_CONCURRENCY}`, ts: new Date().toISOString() });
+  const { runSyncWithControl } = await import('./services/syncEngine.js');
+  try {
+    const result = await runSyncWithControl(task, srcConn, tgtConn, persistLog, {
+      ...runControl,
+      resetState,
+      initializationMode: true,
+      trigger,
+    });
+    runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
+    await finalizeTaskRun(task, result, { scheduled: Boolean(mode), intervalSec });
+    if (mode && result?.status !== 'skipped') {
+      await persistLog({ taskId: task.id, level: 'info', message: `[${mode}] 同步完成，下次同步: ${intervalSec}s 后`, ts: new Date().toISOString() });
+    }
+  } catch (err) {
+    const cancelled = err.code === 'SYNC_CANCELLED';
+    const paused = err.code === 'SYNC_INITIALIZATION_PAUSED';
+    runControl.finish({
+      status: paused ? 'paused' : cancelled ? 'cancelled' : 'failed',
+      phase: paused ? 'paused' : cancelled ? 'cancelled' : 'failed',
+      errorMessage: err.message,
+      cancellable: false,
+    });
+    await failTaskRun(task, err, { scheduled: Boolean(mode) });
+    if (actorUser) {
+      appendAuditLog(actorUser, 'task.initialization.failed', {
+        resourceType: 'task',
+        resourceId: task.id,
+        resourceName: task.name,
+        message: `初始化任务失败 ${task.name || task.id}`,
+        metadata: { error: err.message, trigger },
+      });
+    }
+  }
+}
+
 function teableFormulaString(value) {
   return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -569,6 +706,27 @@ async function replayFailureBatch(tgtConn, task, failure) {
   throw new Error('Unsupported failure operation: ' + failure.operation);
 }
 
+async function finalizeTaskRun(task, result, options = {}) {
+  const cfg = loadConfig();
+  const idx = cfg.syncTasks.findIndex((x) => x.id === task.id);
+  if (idx !== -1) {
+    cfg.syncTasks[idx].status = options.scheduled || syncScheduler.has(task.id) ? 'scheduled' : 'idle';
+    if (result?.status !== 'skipped') cfg.syncTasks[idx].lastSyncAt = new Date().toISOString();
+    await saveConfig(cfg);
+  }
+}
+
+async function failTaskRun(task, err, options = {}) {
+  const cancelled = err.code === 'SYNC_CANCELLED';
+  const paused = err.code === 'SYNC_INITIALIZATION_PAUSED';
+  const cfg = loadConfig();
+  const idx = cfg.syncTasks.findIndex((x) => x.id === task.id);
+  if (idx !== -1) {
+    cfg.syncTasks[idx].status = options.scheduled || syncScheduler.has(task.id) ? 'scheduled' : (cancelled || paused ? 'idle' : 'error');
+    await saveConfig(cfg, { backup: false });
+  }
+}
+
 async function runScheduledTask(taskId, trigger, mode, intervalSec) {
   const config = loadConfig();
   const task = config.syncTasks.find((t) => t.id === taskId);
@@ -607,20 +765,38 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     return { status: 'preflight_failed', error: err.message };
   }
 
-  const c1 = loadConfig();
-  const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
-  if (idx1 === -1) return { status: 'missing' };
-  c1.syncTasks[idx1].status = 'running';
-  await saveConfig(c1);
-
-  const { runSyncWithControl } = await import('./services/syncEngine.js');
   const runControl = startTrackedRun(task, trigger);
   if (!runControl.owned) {
     await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
     return { status: 'skipped' };
   }
 
+  const c1 = loadConfig();
+  const idx1 = c1.syncTasks.findIndex((x) => x.id === task.id);
+  if (idx1 === -1) return { status: 'missing' };
+  c1.syncTasks[idx1].status = task._initializationMode === true ? 'queued' : 'running';
+  await saveConfig(c1);
+
+  if (task._initializationMode === true) {
+    enqueueInitializationRun({
+      task,
+      srcConn,
+      tgtConn,
+      runControl,
+      persistLog: (entry) => persistUserSyncLog(entry, task.userId),
+      resetState: false,
+      initializationMode: true,
+      trigger,
+      mode,
+      intervalSec,
+    });
+    const queueMeta = buildInitializationQueueMeta(task.id);
+    await persistUserSyncLog({ taskId: task.id, level: 'info', message: `[${mode}] 初始化任务已进入队列，当前位置 ${queueMeta.position || 1}，并发上限 ${INITIALIZATION_CONCURRENCY}`, ts: new Date().toISOString() }, task.userId);
+    return { status: 'queued', initializationMode: true, queue: queueMeta };
+  }
+
   try {
+    const { runSyncWithControl } = await import('./services/syncEngine.js');
     const result = await runSyncWithControl(
       task,
       srcConn,
@@ -629,14 +805,7 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
       { ...runControl, initializationMode: task._initializationMode === true, trigger },
     );
     runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
-
-    const done = loadConfig();
-    const idxDone = done.syncTasks.findIndex((x) => x.id === task.id);
-    if (idxDone !== -1) {
-      done.syncTasks[idxDone].status = 'scheduled';
-      if (result?.status !== 'skipped') done.syncTasks[idxDone].lastSyncAt = new Date().toISOString();
-      await saveConfig(done);
-    }
+    await finalizeTaskRun(task, result, { scheduled: true, intervalSec });
     if (result?.status === 'skipped') {
       await persistUserSyncLog({ taskId: task.id, level: 'warn', message: `[${mode}] 上一次同步仍在执行，本轮已跳过`, ts: new Date().toISOString() }, task.userId);
     } else {
@@ -645,12 +814,7 @@ async function runScheduledTask(taskId, trigger, mode, intervalSec) {
     return result || { status: 'success' };
   } catch (err) {
     runControl.finish({ status: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', phase: err.code === 'SYNC_CANCELLED' ? 'cancelled' : 'failed', errorMessage: err.message, cancellable: false });
-    const failed = loadConfig();
-    const idxFailed = failed.syncTasks.findIndex((x) => x.id === task.id);
-    if (idxFailed !== -1) {
-      failed.syncTasks[idxFailed].status = 'scheduled';
-      await saveConfig(failed);
-    }
+    await failTaskRun(task, err, { scheduled: true });
     await persistUserSyncLog({ taskId: task.id, level: 'error', message: `[${mode}] 同步失败: ${err.message}`, ts: new Date().toISOString() }, task.userId);
     return { status: 'failed', error: err.message };
   }
@@ -1691,7 +1855,9 @@ app.post('/api/tasks/:id/stop', async (req, res) => {
     syncScheduler.delete(req.params.id);
   }
   const run = syncRuns.get(req.params.id);
-  if (run?.state.status === 'running') {
+  if (run?.state.status === 'queued') {
+    removeQueuedInitialization(req.params.id, '停止任务时已取消排队中的初始化');
+  } else if (run?.state.status === 'running') {
     run.controller.abort();
     run.state = { ...run.state, status: 'cancelling', phase: 'cancelling', updatedAt: new Date().toISOString() };
     syncRuns.set(req.params.id, run);
@@ -1743,8 +1909,18 @@ app.post('/api/tasks/:id/cancel', (req, res) => {
     return res.status(403).json({ error: '无权操作此任务' });
   }
   const run = syncRuns.get(req.params.id);
-  if (!run || !['running', 'cancelling'].includes(run.state.status)) {
+  if (!run || !['running', 'queued', 'cancelling'].includes(run.state.status)) {
     return res.status(409).json({ error: '当前没有正在执行的同步' });
+  }
+  if (run.state.status === 'queued') {
+    run.controller.abort();
+    removeQueuedInitialization(req.params.id, '已取消排队中的初始化');
+    const cfg = loadConfig();
+    const idx = cfg.syncTasks.findIndex((x) => x.id === req.params.id);
+    if (idx !== -1) cfg.syncTasks[idx].status = syncScheduler.has(req.params.id) ? 'scheduled' : 'idle';
+    saveConfig(cfg, { backup: false });
+    broadcastLogUser({ taskId: req.params.id, level: 'warn', message: '已取消排队中的初始化任务', ts: new Date().toISOString() }, task.userId);
+    return res.json({ cancelling: false, cancelled: true, queued: true });
   }
   run.controller.abort();
   run.state = { ...run.state, status: 'cancelling', phase: 'cancelling', updatedAt: new Date().toISOString() };
@@ -2045,8 +2221,10 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   if (validation.error) return res.status(400).json({ error: validation.error });
   if (!srcConn || !tgtConn) return res.status(400).json({ error: 'Connection not found' });
 
+  let preflightForRun = null;
   try {
     const preflight = await runTaskPreflightCheck(task, validation.srcConn || srcConn, validation.tgtConn || tgtConn);
+    preflightForRun = preflight;
     const gateError = preflightError(preflight);
     if (gateError) return res.status(gateError.status || 400).json({ error: gateError.message, preflight });
     if (preflight.status === 'warn') {
@@ -2059,18 +2237,40 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   const resetState = req.body?.resetState === true;
   const initializationMode = shouldUseInitializationMode(preflightForRun, req.body?.initializationMode === true || resetState);
   if (resetState) clearTaskSyncState(task.id);
-  const { runSyncWithControl } = await import('./services/syncEngine.js');
   const runControl = startTrackedRun(task, initializationMode ? 'initialization' : 'manual');
   if (!runControl.owned) return res.status(409).json({ error: '任务正在执行' });
 
   const cfg0 = loadConfig();
   const idx0 = cfg0.syncTasks.findIndex((x) => x.id === task.id);
   if (idx0 !== -1) {
-    cfg0.syncTasks[idx0].status = 'running';
+    cfg0.syncTasks[idx0].status = initializationMode ? 'queued' : 'running';
     await saveConfig(cfg0);
   }
 
-  res.json({ started: true });
+  if (initializationMode) {
+    enqueueInitializationRun({
+      task,
+      srcConn,
+      tgtConn,
+      runControl,
+      persistLog: (entry) => {
+        const enhanced = { ...entry, userId: task.userId };
+        broadcastLogUser(enhanced, task.userId);
+        const cfg = loadConfig();
+        cfg.syncLogs.push(enhanced);
+        if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
+        return saveConfig(cfg, { backup: false });
+      },
+      resetState,
+      initializationMode: true,
+      trigger: resetState ? 'manual_reset' : 'initialization',
+      actorUser: req.user,
+    });
+    const queueMeta = buildInitializationQueueMeta(task.id);
+    res.json({ started: true, queued: true, initializationMode: true, queue: queueMeta });
+  } else {
+    res.json({ started: true, queued: false, initializationMode: false });
+  }
   appendAuditLog(req.user, 'task.run', {
     resourceType: 'task',
     resourceId: task.id,
@@ -2078,6 +2278,11 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     message: `${resetState ? '重新开始全量同步' : initializationMode ? '继续初始化同步' : '手动运行任务'} ${task.name || task.id}`,
     metadata: { resetState, initializationMode },
   });
+
+  if (initializationMode) {
+    await persistUserSyncLog({ taskId: task.id, level: 'info', message: `初始化任务已进入队列，当前位置 ${buildInitializationQueueMeta(task.id).position || 1}，并发上限 ${INITIALIZATION_CONCURRENCY}`, ts: new Date().toISOString() }, task.userId);
+    return;
+  }
 
   // Run async — persist logs and update task status
   try {
@@ -2093,6 +2298,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
     let result;
     try {
+      const { runSyncWithControl } = await import('./services/syncEngine.js');
       result = await runSyncWithControl(task, srcConn, tgtConn, persistLogUser, { ...runControl, resetState, initializationMode, trigger: resetState ? 'manual_reset' : initializationMode ? 'initialization' : 'manual' });
       runControl.finish({ status: result?.status || 'success', phase: result?.status === 'skipped' ? 'skipped' : 'completed', cancellable: false });
     } catch (err) {
@@ -2113,13 +2319,7 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     }
 
     // Mark done
-    const cfg1 = loadConfig();
-    const idx1 = cfg1.syncTasks.findIndex((x) => x.id === task.id);
-    if (idx1 !== -1) {
-      cfg1.syncTasks[idx1].status = syncScheduler.has(task.id) ? 'scheduled' : 'idle';
-      cfg1.syncTasks[idx1].lastSyncAt = new Date().toISOString();
-      await saveConfig(cfg1);
-    }
+    await finalizeTaskRun(task, result);
   } catch (err) {
     const cancelled = err.code === 'SYNC_CANCELLED';
     const paused = err.code === 'SYNC_INITIALIZATION_PAUSED';
@@ -2127,9 +2327,9 @@ app.post('/api/tasks/:id/run', async (req, res) => {
     broadcastLogUser(entry, task.userId);
     const cfg = loadConfig();
     cfg.syncLogs.push(entry);
-    const idx = cfg.syncTasks.findIndex((x) => x.id === task.id);
-    if (idx !== -1) cfg.syncTasks[idx].status = syncScheduler.has(task.id) ? 'scheduled' : (cancelled || paused ? 'idle' : 'error');
+    if (cfg.syncLogs.length > 500) cfg.syncLogs = cfg.syncLogs.slice(-500);
     await saveConfig(cfg, { backup: false });
+    await failTaskRun(task, err);
   }
 });
 

@@ -120,7 +120,7 @@
             </div>
             <el-progress
               :percentage="progressPercent(taskProgress[task.id])"
-              :indeterminate="taskProgress[task.id].status === 'running' || taskProgress[task.id].status === 'cancelling'"
+              :indeterminate="['running', 'queued', 'cancelling'].includes(taskProgress[task.id].status)"
               :status="progressStatus(taskProgress[task.id])"
               :stroke-width="8"
             />
@@ -184,7 +184,7 @@
               </div>
               <el-progress
                 :percentage="progressPercent(taskProgress[detailTask.id])"
-                :indeterminate="taskProgress[detailTask.id].status === 'running' || taskProgress[detailTask.id].status === 'cancelling'"
+                :indeterminate="['running', 'queued', 'cancelling'].includes(taskProgress[detailTask.id].status)"
                 :status="progressStatus(taskProgress[detailTask.id])"
                 :stroke-width="8"
               />
@@ -1325,26 +1325,28 @@ function isRealtimeTask(task) {
   return (task?.syncMode || 'manual') === 'realtime'
 }
 function isManualRunDisabled(task) {
-  return isRealtimeTask(task) || task?._running || task?.status === 'running' || !task?.connectionStatus?.ok
+  return isRealtimeTask(task) || task?._running || ['running', 'queued'].includes(task?.status) || !task?.connectionStatus?.ok
 }
 function manualRunTitle(task) {
   if (isRealtimeTask(task)) return '准实时同步任务由启动/停止调度控制，不支持手动同步'
   if (!task?.connectionStatus?.ok) return '连接异常，需先修复数据源后再同步'
-  if (task?._running || task?.status === 'running') return '任务正在同步中'
+  if (task?._running || ['running', 'queued'].includes(task?.status)) return '任务正在同步或排队中'
   return '立即执行一次同步'
 }
 function isTaskRunning(task) {
   const p = taskProgress.value[task.id]
-  return task.status === 'running' || task._running || p?.status === 'running' || p?.status === 'cancelling'
+  return ['running', 'queued'].includes(task.status) || task._running || ['running', 'queued', 'cancelling'].includes(p?.status)
 }
 function runStateLabel(task) {
   const progress = taskProgress.value[task.id]
+  if (progress?.status === 'queued') return '排队中'
   if (progress?.status === 'cancelling') return '取消中'
   if (isTaskRunning(task)) return progressPhaseLabel(progress?.phase || 'starting')
   return '空闲'
 }
 function runStateClass(task) {
   const progress = taskProgress.value[task.id]
+  if (progress?.status === 'queued') return 'state-warn'
   if (progress?.status === 'cancelling') return 'state-warn'
   if (isTaskRunning(task)) return 'state-active'
   return 'state-muted'
@@ -1410,6 +1412,7 @@ function taskNeedsAttention(task) {
 }
 function progressPhaseLabel(phase) {
   const map = {
+    queued: '排队中',
     starting: '启动中',
     preparing: '准备同步',
     loading_target: '读取目标表',
@@ -1425,6 +1428,14 @@ function progressPhaseLabel(phase) {
   return map[phase] || '同步中'
 }
 function progressSummary(p) {
+  if (p.status === 'queued' || p.phase === 'queued') {
+    const parts = [`队列第 ${p.queuePosition || p.initializationQueue?.position || 1} 位`]
+    const concurrency = p.initializationConcurrency || p.initializationQueue?.concurrency
+    if (concurrency) parts.push(`并发 ${concurrency}`)
+    const eta = p.estimatedStartAt || p.initializationQueue?.estimatedStartAt
+    if (eta) parts.push(`预计 ${formatTime(eta)}`)
+    return parts.join(' · ')
+  }
   const parts = [`源 ${p.processedRows || 0}`]
   if (p.targetRows) parts.push(`目标 ${p.targetRows}`)
   parts.push(`新增 ${p.inserted || 0}`)
@@ -1436,13 +1447,14 @@ function progressSummary(p) {
 function progressPercent(p) {
   if (['success', 'completed'].includes(p.status) || p.phase === 'completed') return 100
   if (['failed', 'cancelled'].includes(p.status)) return 100
+  if (p.status === 'queued' || p.phase === 'queued') return 8
   const total = Number(p.totalEstimate || p.targetRows || 0)
   if (!total) return 35
   return Math.max(5, Math.min(95, Math.round((Number(p.processedRows || 0) / total) * 100)))
 }
 function progressStatus(p) {
   if (p.status === 'failed') return 'exception'
-  if (p.status === 'cancelled') return 'warning'
+  if (['cancelled', 'queued'].includes(p.status)) return 'warning'
   if (p.status === 'success' || p.phase === 'completed') return 'success'
   return undefined
 }
@@ -1615,7 +1627,7 @@ async function refreshProgress() {
   await Promise.all(tasks.value.map(async (task) => {
     try {
       const progress = await getTaskProgress(task.id)
-      if (progress.status === 'idle' && !['running', 'cancelling'].includes(next[task.id]?.status)) {
+      if (progress.status === 'idle' && !['running', 'queued', 'cancelling'].includes(next[task.id]?.status)) {
         delete next[task.id]
       } else {
         next[task.id] = progress
@@ -1631,7 +1643,7 @@ function startProgressPolling() {
   if (progressTimer) return
   progressTimer = window.setInterval(async () => {
     await refreshProgress()
-    const hasActive = Object.values(taskProgress.value).some(p => ['running', 'cancelling'].includes(p.status))
+    const hasActive = Object.values(taskProgress.value).some(p => ['running', 'queued', 'cancelling'].includes(p.status))
     if (!hasActive) {
       try {
         tasks.value = await getTasks()
