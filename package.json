@@ -16,6 +16,7 @@
     "test:runtime-store": "node server/scripts/runtime-store-self-test.mjs",
     "e2e:smoke": "node server/scripts/run-e2e-smoke.mjs",
     "e2e:contract": "node server/scripts/run-api-contract-smoke.mjs",
+    "ui:e2e": "node server/scripts/run-ui-e2e-smoke.mjs",
     "check:release": "node server/scripts/pre-release-check.mjs",
     "acceptance:prod": "node server/scripts/production-acceptance.mjs",
     "acceptance:fault": "node server/scripts/fault-injection-acceptance.mjs",
@@ -34,6 +35,7 @@
     "docker:down": "docker compose down"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "playwright": "^1.59.1"
   }
 }
