@@ -62,15 +62,15 @@
                 <el-icon><View /></el-icon>详情
               </button>
               <button class="fs-btn fs-btn-primary" @click="manualRun(task)" :disabled="isManualRunDisabled(task)" :title="manualRunTitle(task)">
-                <el-icon v-if="!task._running && task.status !== 'running'"><VideoPlay /></el-icon>
+                <el-icon v-if="!isRunActionPending(task) && !task._running && task.status !== 'running'"><VideoPlay /></el-icon>
                 <el-icon v-else class="is-loading"><Loading /></el-icon>
-                {{ (task._running || task.status === 'running') ? '同步中' : '同步' }}
+                {{ (isRunActionPending(task) || task._running || task.status === 'running') ? '同步中' : '同步' }}
               </button>
-              <button v-if="isTaskRunning(task)" class="fs-btn fs-btn-danger" @click="cancelRunningTask(task)">
-                取消
+              <button v-if="isTaskRunning(task)" class="fs-btn fs-btn-danger" @click="cancelRunningTask(task)" :disabled="isTaskActionBusy(task, 'cancel') || isCancellingTask(task)">
+                {{ (isTaskActionBusy(task, 'cancel') || isCancellingTask(task)) ? '取消中' : '取消' }}
               </button>
-              <button v-else-if="isAutoSyncMode(task.syncMode)" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)">
-                {{ schedulerStatus[task.id] ? '停止调度' : '启动调度' }}
+              <button v-else-if="isAutoSyncMode(task.syncMode)" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" :disabled="isScheduleActionDisabled(task)">
+                {{ isTaskActionBusy(task, 'schedule') ? '处理中' : (schedulerStatus[task.id] ? '停止调度' : '启动调度') }}
               </button>
               <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)">
                 失败 {{ failureCounts[task.id] }}
@@ -79,17 +79,17 @@
                 <button class="fs-btn fs-btn-ghost more-action" type="button">更多</button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item @click="restartFullSync(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok">重跑全量</el-dropdown-item>
-                    <el-dropdown-item @click="continueInitialization(task)" :disabled="isTaskRunning(task) || !task.connectionStatus?.ok">继续初始化</el-dropdown-item>
-                    <el-dropdown-item divided @click="handlePreview(task.id)">预览数据</el-dropdown-item>
-                    <el-dropdown-item @click="runPreflight(task)" :disabled="preflightLoading">预检</el-dropdown-item>
-                    <el-dropdown-item @click="checkSchemaDrift(task)" :disabled="schemaDriftLoading">字段变更</el-dropdown-item>
-                    <el-dropdown-item @click="runReconcile(task)" :disabled="reconcileLoading">一致性校验</el-dropdown-item>
+                    <el-dropdown-item @click="restartFullSync(task)" :disabled="isRestartFullSyncDisabled(task)">重跑全量</el-dropdown-item>
+                    <el-dropdown-item @click="continueInitialization(task)" :disabled="isContinueInitializationDisabled(task)">继续初始化</el-dropdown-item>
+                    <el-dropdown-item divided @click="handlePreview(task.id)" :disabled="isTaskActionBusy(task, 'preview')">预览数据</el-dropdown-item>
+                    <el-dropdown-item @click="runPreflight(task)" :disabled="preflightLoading || isTaskActionBusy(task, 'preflight')">预检</el-dropdown-item>
+                    <el-dropdown-item @click="checkSchemaDrift(task)" :disabled="schemaDriftLoading || isTaskActionBusy(task, 'schemaDrift')">字段变更</el-dropdown-item>
+                    <el-dropdown-item @click="runReconcile(task)" :disabled="reconcileLoading || isTaskActionBusy(task, 'reconcile')">一致性校验</el-dropdown-item>
                     <el-dropdown-item @click="openTaskLogs(task)">近期日志</el-dropdown-item>
-                    <el-dropdown-item divided @click="duplicateTask(task)" :disabled="copyingTaskId === task.id">复制任务</el-dropdown-item>
-                    <el-dropdown-item @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id">存为模板</el-dropdown-item>
+                    <el-dropdown-item divided @click="duplicateTask(task)" :disabled="copyingTaskId === task.id || isTaskActionBusy(task, 'copy')">复制任务</el-dropdown-item>
+                    <el-dropdown-item @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id || isTaskActionBusy(task, 'saveTemplate')">存为模板</el-dropdown-item>
                     <el-dropdown-item @click="openDialog(task)" :disabled="!isOwner(task)">编辑配置</el-dropdown-item>
-                    <el-dropdown-item @click="removeTask(task.id)" :disabled="!isOwner(task)">删除任务</el-dropdown-item>
+                    <el-dropdown-item @click="removeTask(task.id)" :disabled="!isOwner(task) || isTaskActionBusy(task, 'delete')">删除任务</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -205,11 +205,11 @@
                 <div><span>水位策略</span><strong>{{ watermarkLabel(taskInitialization.watermarkType) }}</strong></div>
               </div>
               <div class="detail-action-row">
-                <button class="fs-btn fs-btn-primary" @click="continueInitialization(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">
-                  继续初始化
+                <button class="fs-btn fs-btn-primary" @click="continueInitialization(detailTask)" :disabled="isContinueInitializationDisabled(detailTask)">
+                  {{ isTaskActionBusy(detailTask, 'continueInitialization') ? '继续中' : '继续初始化' }}
                 </button>
-                <button class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">
-                  重新开始全量
+                <button class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isRestartFullSyncDisabled(detailTask)">
+                  {{ isTaskActionBusy(detailTask, 'restartFullSync') ? '启动中' : '重新开始全量' }}
                 </button>
               </div>
             </div>
@@ -362,8 +362,8 @@
             <div class="detail-section">
               <div class="detail-section-bar">
                 <div class="detail-section-title">字段快照</div>
-                <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="checkSchemaDrift(detailTask)" :disabled="schemaDriftLoading">
-                  立即检测
+                <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="checkSchemaDrift(detailTask)" :disabled="schemaDriftLoading || isTaskActionBusy(detailTask, 'schemaDrift')">
+                  {{ isTaskActionBusy(detailTask, 'schemaDrift') ? '检测中' : '立即检测' }}
                 </button>
               </div>
               <div v-if="detailTask.schemaSnapshot" class="detail-kv-grid">
@@ -401,8 +401,8 @@
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="taskDetailDialogVisible = false">关闭</button>
         <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="openDialog(detailTask)" :disabled="!isOwner(detailTask)">编辑配置</button>
-        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">重跑全量</button>
-        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="continueInitialization(detailTask)" :disabled="isTaskRunning(detailTask) || !detailTask.connectionStatus?.ok">继续初始化</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="restartFullSync(detailTask)" :disabled="isRestartFullSyncDisabled(detailTask)">{{ isTaskActionBusy(detailTask, 'restartFullSync') ? '启动中' : '重跑全量' }}</button>
+        <button v-if="detailTask" class="fs-btn fs-btn-ghost" @click="continueInitialization(detailTask)" :disabled="isContinueInitializationDisabled(detailTask)">{{ isTaskActionBusy(detailTask, 'continueInitialization') ? '继续中' : '继续初始化' }}</button>
         <button v-if="detailTask" class="fs-btn fs-btn-primary" @click="manualRun(detailTask)" :disabled="isManualRunDisabled(detailTask)" :title="manualRunTitle(detailTask)">立即同步</button>
       </template>
     </el-dialog>
@@ -806,8 +806,8 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <span class="detail-value">共 {{ taskFailures.length }} 个失败批次</span>
           <div style="display:flex;gap:8px">
-            <button class="fs-btn fs-btn-primary" @click="retryFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">全部重试</button>
-            <button class="fs-btn fs-btn-danger" @click="clearFailures" :disabled="!selectedFailureTask || taskFailures.length === 0">清空记录</button>
+            <button class="fs-btn fs-btn-primary" @click="retryFailures" :disabled="failuresLoading || !selectedFailureTask || taskFailures.length === 0">{{ failuresLoading ? '处理中' : '全部重试' }}</button>
+            <button class="fs-btn fs-btn-danger" @click="clearFailures" :disabled="failuresLoading || !selectedFailureTask || taskFailures.length === 0">清空记录</button>
           </div>
         </div>
         <el-table :data="taskFailures" size="small" border max-height="420" style="width:100%">
@@ -1008,8 +1008,12 @@
           </el-table-column>
           <el-table-column label="操作" width="180" align="center">
             <template #default="{ row }">
-              <button class="fs-btn fs-btn-primary" style="padding:6px 12px;font-size:12px" @click="createFromTemplate(row)">创建</button>
-              <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="removeTemplate(row)">删除</button>
+              <button class="fs-btn fs-btn-primary" style="padding:6px 12px;font-size:12px" @click="createFromTemplate(row)" :disabled="isTemplateActionBusy(row, 'create')">
+                {{ isTemplateActionBusy(row, 'create') ? '创建中' : '创建' }}
+              </button>
+              <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="removeTemplate(row)" :disabled="isTemplateActionBusy(row, 'delete')">
+                {{ isTemplateActionBusy(row, 'delete') ? '删除中' : '删除' }}
+              </button>
             </template>
           </el-table-column>
         </el-table>
@@ -1097,6 +1101,8 @@ const taskInitialization = ref(null)
 const hydratingTaskForm = ref(false)
 const copyingTaskId = ref(null)
 const templateSavingId = ref(null)
+const taskActionLocks = ref({})
+const templateActionLocks = ref({})
 const templateDialogVisible = ref(false)
 const templatesLoading = ref(false)
 const taskTemplates = ref([])
@@ -1355,18 +1361,70 @@ function isAutoSyncMode(mode) {
 function isRealtimeTask(task) {
   return (task?.syncMode || 'manual') === 'realtime'
 }
+function idOf(entity) {
+  return typeof entity === 'object' ? entity?.id : entity
+}
+function actionKey(entity, action) {
+  const id = idOf(entity)
+  return id ? `${id}:${action}` : ''
+}
+function isTaskActionBusy(taskOrId, action) {
+  return Boolean(taskActionLocks.value[actionKey(taskOrId, action)])
+}
+function setTaskActionBusy(taskOrId, action, busy) {
+  const key = actionKey(taskOrId, action)
+  if (!key) return
+  const next = { ...taskActionLocks.value }
+  if (busy) next[key] = true
+  else delete next[key]
+  taskActionLocks.value = next
+}
+function isTemplateActionBusy(templateOrId, action) {
+  return Boolean(templateActionLocks.value[actionKey(templateOrId, action)])
+}
+function setTemplateActionBusy(templateOrId, action, busy) {
+  const key = actionKey(templateOrId, action)
+  if (!key) return
+  const next = { ...templateActionLocks.value }
+  if (busy) next[key] = true
+  else delete next[key]
+  templateActionLocks.value = next
+}
+function isRunActionPending(task) {
+  return ['manualRun', 'restartFullSync', 'continueInitialization'].some(action => isTaskActionBusy(task, action))
+}
+function isDetailTask(task) {
+  return Boolean(task?.id && detailTask.value?.id === task.id)
+}
+function hasKnownInitializationCheckpoint(task) {
+  return !isDetailTask(task) || taskInitialization.value?.hasCheckpoint === true
+}
 function isManualRunDisabled(task) {
-  return isRealtimeTask(task) || task?._running || ['running', 'queued'].includes(task?.status) || !task?.connectionStatus?.ok
+  return isRealtimeTask(task) || isRunActionPending(task) || isTaskRunning(task) || !task?.connectionStatus?.ok
 }
 function manualRunTitle(task) {
   if (isRealtimeTask(task)) return '准实时同步任务由启动/停止调度控制，不支持手动同步'
   if (!task?.connectionStatus?.ok) return '连接异常，需先修复数据源后再同步'
-  if (task?._running || ['running', 'queued'].includes(task?.status)) return '任务正在同步或排队中'
+  if (isRunActionPending(task)) return '同步启动请求处理中'
+  if (isTaskRunning(task)) return '任务正在同步或排队中'
   return '立即执行一次同步'
 }
 function isTaskRunning(task) {
+  if (!task?.id) return false
   const p = taskProgress.value[task.id]
   return ['running', 'queued'].includes(task.status) || task._running || ['running', 'queued', 'cancelling'].includes(p?.status)
+}
+function isRestartFullSyncDisabled(task) {
+  return !task?.connectionStatus?.ok || isTaskRunning(task) || isRunActionPending(task)
+}
+function isContinueInitializationDisabled(task) {
+  return !task?.connectionStatus?.ok || !hasKnownInitializationCheckpoint(task) || isTaskRunning(task) || isRunActionPending(task)
+}
+function isScheduleActionDisabled(task) {
+  return isTaskActionBusy(task, 'schedule') || isTaskRunning(task) || !task?.connectionStatus?.ok
+}
+function isCancellingTask(task) {
+  return taskProgress.value[task?.id]?.status === 'cancelling'
 }
 function runStateLabel(task) {
   const progress = taskProgress.value[task.id]
@@ -1491,6 +1549,8 @@ function progressStatus(p) {
 }
 
 async function handlePreview(taskId) {
+  if (!taskId || isTaskActionBusy(taskId, 'preview')) return
+  setTaskActionBusy(taskId, 'preview', true)
   previewLoading.value = true
   previewDialogVisible.value = true
   previewData.value = null
@@ -1500,6 +1560,7 @@ async function handlePreview(taskId) {
     ElMessage.error('预览失败: ' + err.message)
   } finally {
     previewLoading.value = false
+    setTaskActionBusy(taskId, 'preview', false)
   }
 }
 
@@ -1981,14 +2042,23 @@ function connectionConfigChanged() {
 }
 
 async function removeTask(id) {
-  await ElMessageBox.confirm('确定删除此任务？', '提示', { type: 'warning' })
-  await deleteTask(id)
-  ElMessage.success('已删除')
-  await loadAll()
+  if (isTaskActionBusy(id, 'delete')) return
+  try {
+    await ElMessageBox.confirm('确定删除此任务？', '提示', { type: 'warning' })
+    setTaskActionBusy(id, 'delete', true)
+    await deleteTask(id)
+    ElMessage.success('已删除')
+    await loadAll()
+  } catch (err) {
+    if (err !== 'cancel' && err?.message !== 'cancel') ElMessage.error('删除失败: ' + (err.message || err))
+  } finally {
+    setTaskActionBusy(id, 'delete', false)
+  }
 }
 
 async function duplicateTask(task) {
-  if (!task?.id) return
+  if (!task?.id || isTaskActionBusy(task, 'copy')) return
+  setTaskActionBusy(task, 'copy', true)
   copyingTaskId.value = task.id
   try {
     const copied = await copyTask(task.id, { name: `${task.name || '同步任务'} 副本` })
@@ -1998,11 +2068,13 @@ async function duplicateTask(task) {
     ElMessage.error('复制失败: ' + err.message)
   } finally {
     copyingTaskId.value = null
+    setTaskActionBusy(task, 'copy', false)
   }
 }
 
 async function saveTaskAsTemplate(task) {
-  if (!task?.id) return
+  if (!task?.id || isTaskActionBusy(task, 'saveTemplate')) return
+  setTaskActionBusy(task, 'saveTemplate', true)
   templateSavingId.value = task.id
   try {
     const template = await createTaskTemplate({ sourceTaskId: task.id, name: `${task.name || '同步任务'} 模板` })
@@ -2011,6 +2083,7 @@ async function saveTaskAsTemplate(task) {
     ElMessage.error('保存模板失败: ' + err.message)
   } finally {
     templateSavingId.value = null
+    setTaskActionBusy(task, 'saveTemplate', false)
   }
 }
 
@@ -2031,6 +2104,8 @@ async function openTemplateDialog() {
 }
 
 async function createFromTemplate(template) {
+  if (!template?.id || isTemplateActionBusy(template, 'create')) return
+  setTemplateActionBusy(template, 'create', true)
   try {
     const task = await createTaskFromTemplate(template.id, { name: `${template.config?.name || template.name || '同步任务'} 副本` })
     ElMessage.success(`已从模板创建：${task.name}`)
@@ -2038,26 +2113,34 @@ async function createFromTemplate(template) {
     await loadAll()
   } catch (err) {
     ElMessage.error('从模板创建失败: ' + err.message)
+  } finally {
+    setTemplateActionBusy(template, 'create', false)
   }
 }
 
 async function removeTemplate(template) {
+  if (!template?.id || isTemplateActionBusy(template, 'delete')) return
   try {
     await ElMessageBox.confirm(`确定删除模板「${template.name}」？`, '删除模板', { type: 'warning' })
+    setTemplateActionBusy(template, 'delete', true)
     await deleteTaskTemplate(template.id)
     ElMessage.success('模板已删除')
     await loadTemplates()
   } catch (err) {
     if (err === 'cancel' || err?.message === 'cancel') return
     ElMessage.error('删除模板失败: ' + (err.message || err))
+  } finally {
+    setTemplateActionBusy(template, 'delete', false)
   }
 }
 
 async function manualRun(task) {
+  if (!task?.id || isManualRunDisabled(task)) return
   if (isRealtimeTask(task)) {
     ElMessage.warning('准实时同步任务由启动/停止调度控制，无需手动同步')
     return
   }
+  setTaskActionBusy(task, 'manualRun', true)
   task._running = true
   try {
     await runTask(task.id)
@@ -2077,12 +2160,15 @@ async function manualRun(task) {
     setTimeout(loadAll, 1000)
   } finally {
     task._running = false
+    setTaskActionBusy(task, 'manualRun', false)
   }
 }
 
 async function restartFullSync(task) {
+  if (!task?.id || isRestartFullSyncDisabled(task)) return
   try {
     await ElMessageBox.confirm('确定清理该任务的断点和增量水位，并重新开始全量同步？目标端已有数据会按主键更新或跳过，不会自动清空。', '重新开始全量同步', { type: 'warning' })
+    setTaskActionBusy(task, 'restartFullSync', true)
     task._running = true
     await runTask(task.id, { resetState: true })
     ElMessage.info('已重新开始全量同步，请在进度和日志中查看状态')
@@ -2100,10 +2186,13 @@ async function restartFullSync(task) {
     }
   } finally {
     task._running = false
+    setTaskActionBusy(task, 'restartFullSync', false)
   }
 }
 
 async function continueInitialization(task) {
+  if (!task?.id || isContinueInitializationDisabled(task)) return
+  setTaskActionBusy(task, 'continueInitialization', true)
   try {
     task._running = true
     await continueInitialSync(task.id)
@@ -2121,18 +2210,23 @@ async function continueInitialization(task) {
     }
   } finally {
     task._running = false
+    setTaskActionBusy(task, 'continueInitialization', false)
   }
 }
 
 async function cancelRunningTask(task) {
+  if (!task?.id || isTaskActionBusy(task, 'cancel') || isCancellingTask(task)) return
   try {
     await ElMessageBox.confirm('确定取消当前正在执行的同步？已写入的数据会保留，本次不会推进增量水位。', '取消同步', { type: 'warning' })
+    setTaskActionBusy(task, 'cancel', true)
     await cancelTask(task.id)
     taskProgress.value[task.id] = { ...(taskProgress.value[task.id] || {}), taskId: task.id, status: 'cancelling', phase: 'cancelling' }
     ElMessage.warning('已请求取消同步')
     startProgressPolling()
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('取消失败: ' + (err.message || err))
+  } finally {
+    setTaskActionBusy(task, 'cancel', false)
   }
 }
 
@@ -2169,6 +2263,8 @@ function schemaDriftRows(group = {}) {
 }
 
 async function runPreflight(task) {
+  if (!task?.id || isTaskActionBusy(task, 'preflight')) return
+  setTaskActionBusy(task, 'preflight', true)
   preflightDialogVisible.value = true
   preflightLoading.value = true
   preflightResult.value = null
@@ -2187,10 +2283,13 @@ async function runPreflight(task) {
     preflightDialogVisible.value = false
   } finally {
     preflightLoading.value = false
+    setTaskActionBusy(task, 'preflight', false)
   }
 }
 
 async function checkSchemaDrift(task) {
+  if (!task?.id || isTaskActionBusy(task, 'schemaDrift')) return
+  setTaskActionBusy(task, 'schemaDrift', true)
   selectedSchemaTask.value = task
   schemaDriftDialogVisible.value = true
   schemaDriftLoading.value = true
@@ -2205,6 +2304,7 @@ async function checkSchemaDrift(task) {
     schemaDriftDialogVisible.value = false
   } finally {
     schemaDriftLoading.value = false
+    setTaskActionBusy(task, 'schemaDrift', false)
   }
 }
 
@@ -2224,6 +2324,8 @@ async function refreshSchemaSnapshot() {
 }
 
 async function runReconcile(task) {
+  if (!task?.id || isTaskActionBusy(task, 'reconcile')) return
+  setTaskActionBusy(task, 'reconcile', true)
   reconcileDialogVisible.value = true
   reconcileLoading.value = true
   reconcileResult.value = null
@@ -2237,6 +2339,7 @@ async function runReconcile(task) {
     reconcileDialogVisible.value = false
   } finally {
     reconcileLoading.value = false
+    setTaskActionBusy(task, 'reconcile', false)
   }
 }
 
@@ -2254,7 +2357,7 @@ async function openFailures(task) {
 }
 
 async function retryFailures() {
-  if (!selectedFailureTask.value) return
+  if (!selectedFailureTask.value || failuresLoading.value) return
   failuresLoading.value = true
   try {
     const result = await retryTaskFailures(selectedFailureTask.value.id)
@@ -2269,7 +2372,7 @@ async function retryFailures() {
 }
 
 async function retrySingleFailure(failure) {
-  if (!selectedFailureTask.value || !failure?.id) return
+  if (!selectedFailureTask.value || !failure?.id || failureRetryingId.value === failure.id) return
   failureRetryingId.value = failure.id
   try {
     const result = await retryTaskFailure(selectedFailureTask.value.id, failure.id)
@@ -2287,7 +2390,7 @@ async function retrySingleFailure(failure) {
 }
 
 async function clearFailures() {
-  if (!selectedFailureTask.value) return
+  if (!selectedFailureTask.value || failuresLoading.value) return
   await ElMessageBox.confirm('确定清空该任务的失败记录？这不会改动 Teable 数据。', '清空失败记录', { type: 'warning' })
   failuresLoading.value = true
   try {
@@ -2370,6 +2473,8 @@ async function openTaskDetail(task) {
 }
 
 async function toggleSync(task) {
+  if (!task?.id || isScheduleActionDisabled(task)) return
+  setTaskActionBusy(task, 'schedule', true)
   if (task.status === 'scheduled' || schedulerStatus.value[task.id]) {
     // Stop auto-sync
     try {
@@ -2378,11 +2483,14 @@ async function toggleSync(task) {
       await loadAll()
     } catch (err) {
       ElMessage.error('停止失败: ' + err.message)
+    } finally {
+      setTaskActionBusy(task, 'schedule', false)
     }
   } else {
     // Start auto-sync
     if (!task.syncMode || task.syncMode === 'manual') {
       ElMessage.warning('请先编辑任务，设置同步模式为「定时」或「实时」')
+      setTaskActionBusy(task, 'schedule', false)
       return
     }
     try {
@@ -2398,6 +2506,8 @@ async function toggleSync(task) {
       } else {
         ElMessage.error('启动失败: ' + err.message)
       }
+    } finally {
+      setTaskActionBusy(task, 'schedule', false)
     }
   }
 }

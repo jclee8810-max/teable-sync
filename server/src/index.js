@@ -2236,6 +2236,9 @@ app.post('/api/tasks/:id/run', async (req, res) => {
 
   const resetState = req.body?.resetState === true;
   const initializationMode = shouldUseInitializationMode(preflightForRun, req.body?.initializationMode === true || resetState);
+  if (req.body?.initializationMode === true && !resetState && !preflightForRun?.initialization?.shouldUseInitializationQueue && !getTaskInitializationState(task.id).hasCheckpoint) {
+    return res.status(400).json({ error: '当前任务没有可继续的初始化断点，请使用“重跑全量”重新开始。' });
+  }
   if (resetState) clearTaskSyncState(task.id);
   const runControl = startTrackedRun(task, initializationMode ? 'initialization' : 'manual');
   if (!runControl.owned) return res.status(409).json({ error: '任务正在执行' });
