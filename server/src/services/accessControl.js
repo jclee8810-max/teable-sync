@@ -1,4 +1,5 @@
 import { isAdmin } from './roles.js';
+import { connectionReadyError } from './connectionHealth.js';
 
 export function canReadConnection(user, conn) {
   if (!user || !conn || conn.deletedAt) return false;
@@ -13,20 +14,6 @@ export function canWriteConnection(user, conn) {
 export function findReadableConnection(config, user, id) {
   const conn = config.connections.find((c) => c.id === id);
   return canReadConnection(user, conn) ? conn : null;
-}
-
-function connectionLabel(conn, fallbackId) {
-  return conn?.name || fallbackId || '未配置';
-}
-
-function connectionReadyError(label, conn) {
-  if (!conn.lastTest) {
-    return `${label}「${connectionLabel(conn)}」尚未测试通过，请先在数据源页面测试连接。`;
-  }
-  if (conn.lastTest.success !== true) {
-    return `${label}「${connectionLabel(conn)}」最近测试失败：${conn.lastTest.error || '未知错误'}，请重新测试通过后再使用。`;
-  }
-  return null;
 }
 
 export function validateTaskConnections(config, user, task, options = {}) {

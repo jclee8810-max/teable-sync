@@ -1032,6 +1032,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, getTables, getWatermarkCandidates, getMappingSuggestions, getTeableBases, getTeableTables, getTeableFields } from '../api'
 import { getTasks, createTask, updateTask, deleteTask, copyTask, getTaskTemplates, createTaskTemplate, createTaskFromTemplate, deleteTaskTemplate, runTask, continueInitialSync, startTask, stopTask, cancelTask, getTaskProgress, getTaskInitialization, getFailureCounts, getTaskFailures, retryTaskFailures, retryTaskFailure, clearTaskFailures, getTasksHealth, reconcileTask, preflightTask, getTaskSchemaDrift, refreshTaskSchemaSnapshot, getSchedulerStatus, previewTaskData, getStoredUser, getLogs, getSyncHistory } from '../api'
 import { buildTaskUiState, isActionBusy, isAutoSyncMode, setActionBusy } from '../utils/taskUiState'
+import { getConnectionHealth, isConnectionReady } from '../utils/connectionHealth'
 
 // 当前用户身份
 const currentUser = getStoredUser()
@@ -1204,9 +1205,6 @@ const watermarkColumnOptions = computed(() => {
 })
 
 function connName(id) { return connections.value.find(c => c.id === id)?.name || id }
-function isConnectionReady(conn) {
-  return conn?.lastTest?.success === true
-}
 function shouldShowConnectionOption(conn) {
   if (!conn || conn.deletedAt) return false
   if (isConnectionReady(conn)) return true
@@ -1215,6 +1213,7 @@ function shouldShowConnectionOption(conn) {
 function connectionOptionLabel(conn) {
   if (isConnectionReady(conn)) return conn.name
   if (!conn?.lastTest) return `${conn.name}（未测试）`
+  if (getConnectionHealth(conn).status === 'expired') return `${conn.name}（测试已过期）`
   return `${conn.name}（测试失败）`
 }
 function sourceTableLabel(table) {

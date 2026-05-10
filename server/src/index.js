@@ -31,6 +31,7 @@ import {
 import { clearTaskSyncState, getTaskInitializationState } from './services/syncEngine.js';
 import { isAdmin, isOwner } from './services/roles.js';
 import { logger } from './services/logger.js';
+import { connectionLabel, getConnectionHealth } from './services/connectionHealth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -107,6 +108,7 @@ const CONNECTION_TEST_FIELDS = ['lastTest'];
 
 function sanitizeConnection(conn) {
   const safe = { ...conn };
+  safe.testHealth = getConnectionHealth(conn);
   for (const field of CONNECTION_SECRET_FIELDS) {
     if (safe[field]) {
       const flag = field === 'oauthClientSecret'
@@ -205,10 +207,6 @@ async function attachSchemaSnapshot(task, srcConn, tgtConn) {
   return task;
 }
 
-function connectionLabel(conn, fallbackId) {
-  return conn?.name || fallbackId || '未配置';
-}
-
 function buildTaskConnectionStatus(config, user, task) {
   const sourceId = task.sourceConnectionId || task.sourceId;
   const targetId = task.targetConnectionId || task.targetId;
@@ -233,11 +231,9 @@ function buildTaskConnectionStatus(config, user, task) {
 
   for (const [field, conn] of [['sourceConnectionId', srcConnRaw], ['targetConnectionId', tgtConnRaw]]) {
     if (!conn || conn.deletedAt) continue;
-    if (!conn.lastTest) {
-      issues.push({ field, level: 'error', message: `${connectionLabel(conn)} 尚未测试通过` });
-    } else if (conn.lastTest.success !== true) {
-      issues.push({ field, level: 'error', message: `${connectionLabel(conn)} 最近测试失败: ${conn.lastTest.error || '未知错误'}` });
-    }
+    const health = getConnectionHealth(conn);
+    if (health.severity === 'error') issues.push({ field, level: 'error', message: health.message });
+    else if (health.severity === 'warn') issues.push({ field, level: 'warn', message: health.message });
   }
 
   return {
@@ -248,6 +244,7 @@ function buildTaskConnectionStatus(config, user, task) {
       type: srcConnRaw?.type || null,
       readable: Boolean(validation.srcConn),
       lastTest: srcConnRaw?.lastTest || null,
+      testHealth: srcConnRaw ? getConnectionHealth(srcConnRaw, { fallbackId: sourceId }) : null,
     } : null,
     target: targetId ? {
       id: targetId,
@@ -255,6 +252,7 @@ function buildTaskConnectionStatus(config, user, task) {
       type: tgtConnRaw?.type || null,
       readable: Boolean(validation.tgtConn),
       lastTest: tgtConnRaw?.lastTest || null,
+      testHealth: tgtConnRaw ? getConnectionHealth(tgtConnRaw, { fallbackId: targetId }) : null,
     } : null,
     issues,
   };
@@ -1547,7 +1545,7 @@ app.post('/api/tasks', async (req, res) => {
     message: `创建任务 ${task.name || task.id}`,
     metadata: { syncMode: task.syncMode, sourceTable: task.sourceTable, targetTableId: task.targetTableId },
   });
-  res.json(task);
+  res.json(taskDto(config, req.user, task));
 });
 
 app.post('/api/tasks/:id/copy', async (req, res) => {
@@ -1575,7 +1573,7 @@ app.post('/api/tasks/:id/copy', async (req, res) => {
     message: `复制任务 ${source.name || source.id} → ${task.name}`,
     metadata: { sourceTaskId: source.id },
   });
-  res.json(task);
+  res.json(taskDto(config, req.user, task));
 });
 
 app.get('/api/task-templates', (req, res) => {
@@ -1644,7 +1642,7 @@ app.post('/api/task-templates/:id/create-task', async (req, res) => {
     message: `从模板 ${template.name} 创建任务 ${task.name}`,
     metadata: { templateId: template.id },
   });
-  res.json(task);
+  res.json(taskDto(config, req.user, task));
 });
 
 app.delete('/api/task-templates/:id', (req, res) => {
@@ -1696,7 +1694,7 @@ app.put('/api/tasks/:id', async (req, res) => {
     message: `更新任务 ${nextTask.name || task.id}`,
     metadata: { fields: Object.keys(updates) },
   });
-  res.json(config.syncTasks[idx]);
+  res.json(taskDto(config, req.user, config.syncTasks[idx]));
 });
 
 app.delete('/api/tasks/:id', (req, res) => {
@@ -1740,7 +1738,7 @@ app.post('/api/tasks/:id/restore', (req, res) => {
     resourceName: task.name,
     message: `恢复任务 ${task.name || task.id}`,
   });
-  res.json(config.syncTasks[idx]);
+  res.json(taskDto(config, req.user, config.syncTasks[idx]));
 });
 
 // Preview source data before sync

@@ -87,9 +87,13 @@ const roleTarget = { id: 'contract-role-target', email: 'contract-role-target@te
 const ownerToken = tokenFor(owner);
 const adminToken = tokenFor(admin);
 const userToken = tokenFor(user);
+const staleTestAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+const expiredTestAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
 
 const readySource = { id: 'ready-src', name: 'Ready SQL', type: 'mssql', host: 'sql.local', database: 'db', username: 'u', password: 'secret', ownerId: owner.id, shared: true, createdAt: now, lastTest: { success: true, testedAt: now } };
 const readyTarget = { id: 'ready-tgt', name: 'Ready Teable', type: 'teable', host: 'http://teable.local', token: 'teable-secret', ownerId: owner.id, shared: true, createdAt: now, lastTest: { success: true, testedAt: now } };
+const staleSource = { id: 'stale-src', name: 'Stale SQL', type: 'mssql', host: 'sql.local', database: 'db', username: 'u', password: 'secret', ownerId: owner.id, shared: true, createdAt: now, lastTest: { success: true, testedAt: staleTestAt } };
+const expiredSource = { id: 'expired-src', name: 'Expired SQL', type: 'mssql', host: 'sql.local', database: 'db', username: 'u', password: 'secret', ownerId: owner.id, shared: true, createdAt: now, lastTest: { success: true, testedAt: expiredTestAt } };
 const untestedSource = { id: 'untested-src', name: 'Untested SQL', type: 'mssql', host: 'sql.local', database: 'db', ownerId: owner.id, shared: true, createdAt: now };
 const failedSource = { id: 'failed-src', name: 'Failed SQL', type: 'mssql', host: 'sql.local', database: 'db', ownerId: owner.id, shared: true, createdAt: now, lastTest: { success: false, testedAt: now, error: 'bad password' } };
 const untestedTarget = { id: 'untested-tgt', name: 'Untested Teable', type: 'teable', host: 'http://teable.local', token: 'teable-secret', ownerId: owner.id, shared: true, createdAt: now };
@@ -132,7 +136,7 @@ try {
   if (existsSync(STATE_FILE)) writeFileSync(stateBackupFile, readFileSync(STATE_FILE));
   writeFileSync(USERS_FILE, JSON.stringify([owner, admin, user, roleTarget], null, 2));
   writeFileSync(CONFIG_FILE, JSON.stringify({
-    connections: [readySource, readyTarget, untestedSource, failedSource, untestedTarget],
+    connections: [readySource, readyTarget, staleSource, expiredSource, untestedSource, failedSource, untestedTarget],
     syncTasks: [legacyTask],
     taskTemplates: [{ id: 'tpl-untested', name: 'Untested Template', userId: owner.id, config: { ...baseTask, sourceConnectionId: untestedSource.id } }],
     syncLogs: [],
@@ -245,6 +249,10 @@ try {
   record(res.status === 400 && /最近测试失败/.test(res.data?.error || ''), 'task create rejects failed source');
   res = await request('/tasks', { method: 'POST', body: JSON.stringify({ ...baseTask, targetConnectionId: untestedTarget.id }) }, ownerToken);
   record(res.status === 400 && /尚未测试通过/.test(res.data?.error || ''), 'task create rejects untested target');
+  res = await request('/tasks', { method: 'POST', body: JSON.stringify({ ...baseTask, sourceConnectionId: expiredSource.id }) }, ownerToken);
+  record(res.status === 400 && /超过 30 天/.test(res.data?.error || ''), 'task create rejects expired source test');
+  res = await request('/tasks', { method: 'POST', body: JSON.stringify({ ...baseTask, sourceConnectionId: staleSource.id, name: 'Stale Accepted Task' }) }, ownerToken);
+  record(res.status === 200 && res.data.connectionStatus?.issues?.some((issue) => issue.level === 'warn' && /建议重新测试/.test(issue.message)), 'task create accepts stale source with warning');
   res = await request('/tasks', { method: 'POST', body: JSON.stringify(baseTask) }, ownerToken);
   record(res.status === 200 && res.data.id, 'task create accepts tested connections');
 

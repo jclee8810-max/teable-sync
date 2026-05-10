@@ -221,6 +221,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getConnections, createConnection, updateConnection, deleteConnection, testConnection, testTeable, getToken, getStoredUser } from '../api'
+import { CONNECTION_TEST_MAX_AGE_DAYS, CONNECTION_TEST_WARN_DAYS, getConnectionHealth } from '../utils/connectionHealth'
 
 const connections = ref([])
 const dialogVisible = ref(false)
@@ -278,6 +279,21 @@ function relativeTime(ts) {
 
 function connStatus(conn) {
   const test = conn.lastTest
+  const health = conn.testHealth || getConnectionHealth(conn)
+  if (health.status === 'expired') {
+    return {
+      className: 'error',
+      label: `● 测试已过期 · ${health.ageDays}天前`,
+      title: `超过 ${CONNECTION_TEST_MAX_AGE_DAYS} 天未复测，任务运行前必须重新测试`,
+    }
+  }
+  if (health.status === 'stale') {
+    return {
+      className: 'warning',
+      label: `● 建议复测 · ${health.ageDays}天前`,
+      title: `超过 ${CONNECTION_TEST_WARN_DAYS} 天未复测，建议重新测试连接`,
+    }
+  }
   if (test?.success === true) {
     const when = relativeTime(test.testedAt)
     return {
@@ -697,6 +713,7 @@ onMounted(loadConnections)
   white-space: nowrap;
 }
 .conn-status.active { color: var(--green); }
+.conn-status.warning { color: var(--orange); }
 .conn-status.error { color: var(--red); }
 .conn-status.unknown { color: var(--text-tertiary); }
 
