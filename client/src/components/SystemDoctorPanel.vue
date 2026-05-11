@@ -34,64 +34,6 @@
       </div>
     </div>
 
-
-    <div class="fs-card acceptance-card">
-      <div class="section-header">
-        <div>
-          <div class="section-title">一键验收</div>
-          <div class="section-desc">实测基准数据源、检查任务可运行性、抽样预检、失败批次和告警；不会执行同步写入。</div>
-        </div>
-        <button class="fs-btn fs-btn-primary" @click="runAcceptance" :disabled="acceptanceLoading">
-          <el-icon v-if="acceptanceLoading" class="is-loading"><Loading /></el-icon>
-          开始验收
-        </button>
-      </div>
-      <div v-if="acceptance" class="acceptance-summary" :class="acceptance.status">
-        <div>
-          <strong>{{ statusLabel(acceptance.status) }}</strong>
-          <span>{{ acceptance.summary.pass }} 通过 · {{ acceptance.summary.warn }} 警告 · {{ acceptance.summary.fail }} 失败</span>
-        </div>
-        <small>{{ formatTime(acceptance.finishedAt) }}</small>
-      </div>
-      <div v-if="acceptance" class="acceptance-steps">
-        <div v-for="step in acceptance.steps" :key="step.title" class="acceptance-step">
-          <span class="check-status" :class="step.status">{{ statusText(step.status) }}</span>
-          <div>
-            <div class="check-title">{{ step.title }}</div>
-            <div class="check-message">{{ step.message }}</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="fs-card environment-card">
-      <div class="section-header">
-        <div>
-          <div class="section-title">测试环境整理</div>
-          <div class="section-desc">保留基准数据源，软删除临时 e2e 数据源、任务和模板，并压缩临时日志。</div>
-        </div>
-        <div class="inline-actions">
-          <button class="fs-btn fs-btn-ghost" @click="loadEnvironment" :disabled="environmentLoading">
-            <el-icon v-if="environmentLoading" class="is-loading"><Loading /></el-icon>
-            刷新预览
-          </button>
-          <button class="fs-btn fs-btn-primary" @click="cleanupEnvironment" :disabled="cleanupLoading || !environment">
-            整理环境
-          </button>
-        </div>
-      </div>
-      <div v-if="environment" class="environment-grid">
-        <div><span>基准数据源</span><strong>{{ environment.summary.readyBaselineConnections }}/{{ environment.summary.baselineConnections }}</strong><small>最近测试通过</small></div>
-        <div><span>可清理数据源</span><strong>{{ environment.summary.removableConnections }}</strong><small>临时项</small></div>
-        <div><span>可清理任务</span><strong>{{ environment.summary.removableTasks }}</strong><small>临时项</small></div>
-        <div><span>可清理日志</span><strong>{{ environment.summary.removableLogs }}</strong><small>临时或超量</small></div>
-      </div>
-      <div v-if="environment?.warnings?.length" class="preview-list warnings environment-warnings">
-        <strong>提醒</strong>
-        <span v-for="item in environment.warnings" :key="item">{{ item }}</span>
-      </div>
-    </div>
-
     <div class="fs-card backup-card">
       <div class="section-header">
         <div>
@@ -111,20 +53,91 @@
       </el-table>
     </div>
 
-    <div class="fs-card migration-card">
-      <div class="section-header">
+    <div class="fs-card maintenance-card">
+      <div class="section-header compact">
         <div>
-          <div class="section-title">环境迁移</div>
-          <div class="section-desc">用于测试环境和正式环境之间迁移连接、任务、模板和告警通知配置，仅系统所有者可操作。</div>
+          <div class="section-title">高级维护</div>
+          <div class="section-desc">上线验收、环境迁移和测试整理都属于低频维护操作，默认收起。</div>
         </div>
+        <button class="fs-btn fs-btn-ghost" type="button" @click="advancedOpen = !advancedOpen">
+          {{ advancedOpen ? '收起' : '展开' }}
+        </button>
       </div>
-      <div class="migration-actions">
-        <button class="fs-btn fs-btn-primary" @click="exportConfig(false)" :disabled="exporting">导出迁移包</button>
-        <button class="fs-btn fs-btn-ghost" @click="exportConfig(true)" :disabled="exporting">导出含密钥包</button>
-        <button class="fs-btn fs-btn-ghost" @click="openImportDialog">导入迁移包</button>
-      </div>
-      <div class="migration-note">
-        默认迁移包不含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。含密钥包仅系统所有者可导出，只适合可信内网或离线迁移；导入后自动任务默认停用，需要确认连接测试通过后再手动启动。
+
+      <div v-if="advancedOpen" class="maintenance-stack">
+        <div class="maintenance-panel acceptance-card">
+          <div class="section-header">
+            <div>
+              <div class="section-title">上线验收</div>
+              <div class="section-desc">实测基准数据源、检查任务可运行性、抽样预检、失败批次和告警；不会执行同步写入。</div>
+            </div>
+            <button class="fs-btn fs-btn-primary" @click="runAcceptance" :disabled="acceptanceLoading">
+              <el-icon v-if="acceptanceLoading" class="is-loading"><Loading /></el-icon>
+              开始验收
+            </button>
+          </div>
+          <div v-if="acceptance" class="acceptance-summary" :class="acceptance.status">
+            <div>
+              <strong>{{ statusLabel(acceptance.status) }}</strong>
+              <span>{{ acceptance.summary.pass }} 通过 · {{ acceptance.summary.warn }} 警告 · {{ acceptance.summary.fail }} 失败</span>
+            </div>
+            <small>{{ formatTime(acceptance.finishedAt) }}</small>
+          </div>
+          <div v-if="acceptance" class="acceptance-steps">
+            <div v-for="step in acceptance.steps" :key="step.title" class="acceptance-step">
+              <span class="check-status" :class="step.status">{{ statusText(step.status) }}</span>
+              <div>
+                <div class="check-title">{{ step.title }}</div>
+                <div class="check-message">{{ step.message }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="showTestTools" class="maintenance-panel environment-card">
+          <div class="section-header">
+            <div>
+              <div class="section-title">测试环境整理</div>
+              <div class="section-desc">保留基准数据源，软删除临时 e2e 数据源、任务和模板，并压缩临时日志。</div>
+            </div>
+            <div class="inline-actions">
+              <button class="fs-btn fs-btn-ghost" @click="loadEnvironment" :disabled="environmentLoading">
+                <el-icon v-if="environmentLoading" class="is-loading"><Loading /></el-icon>
+                刷新预览
+              </button>
+              <button class="fs-btn fs-btn-primary" @click="cleanupEnvironment" :disabled="cleanupLoading || !environment">
+                整理环境
+              </button>
+            </div>
+          </div>
+          <div v-if="environment" class="environment-grid">
+            <div><span>基准数据源</span><strong>{{ environment.summary.readyBaselineConnections }}/{{ environment.summary.baselineConnections }}</strong><small>最近测试通过</small></div>
+            <div><span>可清理数据源</span><strong>{{ environment.summary.removableConnections }}</strong><small>临时项</small></div>
+            <div><span>可清理任务</span><strong>{{ environment.summary.removableTasks }}</strong><small>临时项</small></div>
+            <div><span>可清理日志</span><strong>{{ environment.summary.removableLogs }}</strong><small>临时或超量</small></div>
+          </div>
+          <div v-if="environment?.warnings?.length" class="preview-list warnings environment-warnings">
+            <strong>提醒</strong>
+            <span v-for="item in environment.warnings" :key="item">{{ item }}</span>
+          </div>
+        </div>
+
+        <div class="maintenance-panel migration-card">
+          <div class="section-header">
+            <div>
+              <div class="section-title">环境迁移</div>
+              <div class="section-desc">用于测试环境和正式环境之间迁移连接、任务、模板和告警通知配置，仅系统所有者可操作。</div>
+            </div>
+          </div>
+          <div class="migration-actions">
+            <button class="fs-btn fs-btn-primary" @click="exportConfig(false)" :disabled="exporting">导出迁移包</button>
+            <button class="fs-btn fs-btn-ghost" @click="exportConfig(true)" :disabled="exporting">导出含密钥包</button>
+            <button class="fs-btn fs-btn-ghost" @click="openImportDialog">导入迁移包</button>
+          </div>
+          <div class="migration-note">
+            默认迁移包不含数据库密码、Teable Token、OAuth Secret 和告警 Webhook URL。含密钥包仅系统所有者可导出，只适合可信内网或离线迁移；导入后自动任务默认停用，需要确认连接测试通过后再手动启动。
+          </div>
+        </div>
       </div>
     </div>
 
@@ -214,6 +227,8 @@ const importText = ref('')
 const importPreview = ref(null)
 const importPreviewLoading = ref(false)
 const importing = ref(false)
+const advancedOpen = ref(false)
+const showTestTools = import.meta.env.DEV || localStorage.getItem('teable_sync_show_test_tools') === 'true'
 const acceptanceLoading = ref(false)
 const acceptance = ref(null)
 const environmentLoading = ref(false)
@@ -246,13 +261,13 @@ async function runAcceptance() {
   acceptanceLoading.value = true
   try {
     acceptance.value = await runSystemAcceptance({ connectionScope: 'baseline', preflightLimit: 3 })
-    if (acceptance.value.status === 'pass') ElMessage.success('一键验收通过')
-    else if (acceptance.value.status === 'warn') ElMessage.warning('一键验收完成，有项目需要关注')
-    else ElMessage.error('一键验收发现阻断问题')
+    if (acceptance.value.status === 'pass') ElMessage.success('上线验收通过')
+    else if (acceptance.value.status === 'warn') ElMessage.warning('上线验收完成，有项目需要关注')
+    else ElMessage.error('上线验收发现阻断问题')
     await loadDoctor()
-    await loadEnvironment()
+    if (showTestTools) await loadEnvironment()
   } catch (err) {
-    ElMessage.error('一键验收失败: ' + err.message)
+    ElMessage.error('上线验收失败: ' + err.message)
   } finally {
     acceptanceLoading.value = false
   }
@@ -403,7 +418,7 @@ async function applyImport() {
 
 onMounted(async () => {
   await loadDoctor()
-  await loadEnvironment()
+  if (showTestTools) await loadEnvironment()
 })
 </script>
 
@@ -508,9 +523,27 @@ onMounted(async () => {
 }
 
 
-.acceptance-card,
-.environment-card {
+.maintenance-card {
   padding: 16px;
+}
+
+.maintenance-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.maintenance-panel {
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.section-header.compact {
+  margin-bottom: 0;
+}
+.maintenance-stack .section-header {
+  margin-bottom: 12px;
 }
 
 .inline-actions {

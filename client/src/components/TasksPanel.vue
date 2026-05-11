@@ -31,7 +31,7 @@
       <button class="fs-btn fs-btn-primary" @click="openDialog()">
         <el-icon><Plus /></el-icon>新建任务
       </button>
-      <button class="fs-btn fs-btn-ghost" @click="openTemplateDialog">
+      <button v-if="showAdvancedTaskTools" class="fs-btn fs-btn-ghost" @click="openTemplateDialog">
         从模板
       </button>
     </div>
@@ -87,7 +87,7 @@
                     <el-dropdown-item @click="runReconcile(task)" :disabled="reconcileLoading || isTaskActionBusy(task, 'reconcile')">一致性校验</el-dropdown-item>
                     <el-dropdown-item @click="openTaskLogs(task)">近期日志</el-dropdown-item>
                     <el-dropdown-item divided @click="duplicateTask(task)" :disabled="copyingTaskId === task.id || isTaskActionBusy(task, 'copy')">复制任务</el-dropdown-item>
-                    <el-dropdown-item @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id || isTaskActionBusy(task, 'saveTemplate')">存为模板</el-dropdown-item>
+                    <el-dropdown-item v-if="showAdvancedTaskTools" @click="saveTaskAsTemplate(task)" :disabled="templateSavingId === task.id || isTaskActionBusy(task, 'saveTemplate')">存为模板</el-dropdown-item>
                     <el-dropdown-item @click="openDialog(task)" :disabled="!isOwner(task)">编辑配置</el-dropdown-item>
                     <el-dropdown-item @click="removeTask(task.id)" :disabled="!isOwner(task) || isTaskActionBusy(task, 'delete')">删除任务</el-dropdown-item>
                   </el-dropdown-menu>
@@ -597,31 +597,6 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8">
-            <el-form-item label="同步方向">
-              <el-select v-model="form.syncDirection" style="width:100%">
-                <el-option label="单向同步" value="one_way" />
-                <el-option label="双向同步（Teable ↔ Teable）" value="bidirectional" :disabled="!canUseBidirectional" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="冲突策略">
-              <el-select v-model="form.conflictStrategy" style="width:100%">
-                <template v-if="form.syncDirection === 'bidirectional'">
-                  <el-option label="源优先" value="source_wins" />
-                  <el-option label="目标优先" value="target_wins" />
-                  <el-option label="最新修改优先" value="latest_wins" />
-                  <el-option label="跳过冲突" value="skip_conflict" />
-                </template>
-                <template v-else>
-                  <el-option label="覆盖（以源端为准）" value="upsert" />
-                  <el-option label="跳过（保留目标数据）" value="skip" />
-                  <el-option label="仅新增（不更新已有记录）" value="insert_only" />
-                </template>
-              </el-select>
-            </el-form-item>
-          </el-col>
           <el-col :span="8" v-if="form.syncMode !== 'manual'">
             <el-form-item :label="form.syncMode === 'realtime' ? '轮询间隔（秒）' : '同步间隔（秒）'">
               <el-select v-model="form.syncInterval" style="width:100%">
@@ -637,149 +612,181 @@
               </el-select>
             </el-form-item>
           </el-col>
-        </el-row>
-
-        <el-row :gutter="12">
           <el-col :span="8">
-            <el-form-item label="源分页大小">
-              <el-input-number v-model="form.pageSize" :min="100" :max="5000" :step="100" style="width:100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="Teable 写入批量">
-              <el-input-number v-model="form.batchSize" :min="10" :max="1000" :step="50" style="width:100%" />
-              <div class="form-help">每次向 Teable 写入的记录数，建议 200-500；Teable 单次最多 1000 条。</div>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="失败重试次数">
-              <el-input-number v-model="form.retryCount" :min="1" :max="8" style="width:100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="初始全量上限">
-              <el-input-number v-model="form.maxInitialRows" :min="1000" :max="10000000" :step="10000" style="width:100%" />
-              <div class="form-help">首次全量同步预估超过该行数会被后端阻断，避免大表误启动。</div>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="初始化读页/分钟">
-              <el-input-number v-model="form.initialReadPagesPerMinute" :min="0" :max="100000" :step="10" style="width:100%" />
-              <div class="form-help">0 表示不限速；用于大表首次初始化分段读取。</div>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="初始化写批/分钟">
-              <el-input-number v-model="form.initialWriteBatchesPerMinute" :min="0" :max="100000" :step="10" style="width:100%" />
-              <div class="form-help">0 表示不限速；用于控制 Teable 写入压力。</div>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="单次初始化分钟">
-              <el-input-number v-model="form.initialMaxRunMinutes" :min="0" :max="1440" :step="10" style="width:100%" />
-              <div class="form-help">0 表示不自动暂停；到时会保留断点，可继续初始化。</div>
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <!-- Watermark Strategy -->
-        <div class="section-divider">
-          <span class="section-icon">⇌</span> 增量策略
-          <el-tag v-if="watermarkLoading" size="small" type="info" style="margin-left:8px">检测中...</el-tag>
-        </div>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="增量策略">
-              <el-select v-model="form.watermarkType" style="width:100%" placeholder="自动检测">
-                <el-option
-                  v-for="wt in availableWatermarkTypes"
-                  :key="wt.value"
-                  :label="wt.label"
-                  :value="wt.value"
-                >
-                  <div style="display:flex;justify-content:space-between;align-items:center">
-                    <span>{{ wt.label }}</span>
-                    <span style="color:var(--text-tertiary);font-size:11px">{{ wt.desc }}</span>
-                  </div>
-                </el-option>
+            <el-form-item label="写入策略">
+              <el-select v-model="form.conflictStrategy" style="width:100%">
+                <template v-if="form.syncDirection === 'bidirectional'">
+                  <el-option label="源优先" value="source_wins" />
+                  <el-option label="目标优先" value="target_wins" />
+                  <el-option label="最新修改优先" value="latest_wins" />
+                  <el-option label="跳过冲突" value="skip_conflict" />
+                </template>
+                <template v-else>
+                  <el-option label="覆盖（以源端为准）" value="upsert" />
+                  <el-option label="跳过（保留目标数据）" value="skip" />
+                  <el-option label="仅新增（不更新已有记录）" value="insert_only" />
+                </template>
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8">
-            <el-form-item label="增量列">
-              <el-select
-                v-model="form.watermarkColumn"
-                placeholder="自动选择"
-                clearable
-                style="width:100%"
-                :disabled="!form.watermarkType || form.watermarkType === 'full_scan' || watermarkColumnOptions.length === 0"
+        </el-row>
+
+        <div class="advanced-settings">
+          <button class="advanced-toggle" type="button" @click="advancedSettingsOpen = !advancedSettingsOpen">
+            <span>高级设置</span>
+            <small>分页、批量、初始化保护、增量策略、双向和删除同步</small>
+            <span class="advanced-toggle-icon">{{ advancedSettingsOpen ? '收起' : '展开' }}</span>
+          </button>
+
+          <div v-if="advancedSettingsOpen" class="advanced-settings-body">
+            <el-row :gutter="12">
+              <el-col :span="8">
+                <el-form-item label="同步方向">
+                  <el-select v-model="form.syncDirection" style="width:100%">
+                    <el-option label="单向同步" value="one_way" />
+                    <el-option v-if="showAdvancedTaskTools || form.syncDirection === 'bidirectional'" label="双向同步（高级，Teable ↔ Teable）" value="bidirectional" :disabled="!canUseBidirectional" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="源分页大小">
+                  <el-input-number v-model="form.pageSize" :min="100" :max="5000" :step="100" style="width:100%" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="Teable 写入批量">
+                  <el-input-number v-model="form.batchSize" :min="10" :max="1000" :step="50" style="width:100%" />
+                  <div class="form-help">建议 200-500；Teable 单次最多 1000 条。</div>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="失败重试次数">
+                  <el-input-number v-model="form.retryCount" :min="1" :max="8" style="width:100%" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="初始全量上限">
+                  <el-input-number v-model="form.maxInitialRows" :min="1000" :max="10000000" :step="10000" style="width:100%" />
+                  <div class="form-help">首次全量预估超过该行数会被阻断。</div>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="初始化读页/分钟">
+                  <el-input-number v-model="form.initialReadPagesPerMinute" :min="0" :max="100000" :step="10" style="width:100%" />
+                  <div class="form-help">0 表示不限速。</div>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="初始化写批/分钟">
+                  <el-input-number v-model="form.initialWriteBatchesPerMinute" :min="0" :max="100000" :step="10" style="width:100%" />
+                  <div class="form-help">0 表示不限速。</div>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="单次初始化分钟">
+                  <el-input-number v-model="form.initialMaxRunMinutes" :min="0" :max="1440" :step="10" style="width:100%" />
+                  <div class="form-help">0 表示不自动暂停。</div>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <div class="section-divider subtle">
+              <span class="section-icon">⇌</span> 增量策略
+              <el-tag v-if="watermarkLoading" size="small" type="info" style="margin-left:8px">检测中...</el-tag>
+            </div>
+            <el-row :gutter="12">
+              <el-col :span="8">
+                <el-form-item label="增量策略">
+                  <el-select v-model="form.watermarkType" style="width:100%" placeholder="自动检测">
+                    <el-option
+                      v-for="wt in availableWatermarkTypes"
+                      :key="wt.value"
+                      :label="wt.label"
+                      :value="wt.value"
+                    >
+                      <div style="display:flex;justify-content:space-between;align-items:center">
+                        <span>{{ wt.label }}</span>
+                        <span style="color:var(--text-tertiary);font-size:11px">{{ wt.desc }}</span>
+                      </div>
+                    </el-option>
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="增量列">
+                  <el-select
+                    v-model="form.watermarkColumn"
+                    placeholder="自动选择"
+                    clearable
+                    style="width:100%"
+                    :disabled="!form.watermarkType || form.watermarkType === 'full_scan' || watermarkColumnOptions.length === 0"
+                  >
+                    <el-option v-for="col in watermarkColumnOptions" :key="col" :label="col" :value="col" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="主键列">
+                  <el-input v-model="form.sourcePrimaryKey" :placeholder="watermarkCandidates.pkCol || '自动检测'" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-alert
+              v-if="form.watermarkType === 'auto_pk'"
+              type="warning"
+              :closable="false"
+              style="margin-bottom:12px"
+            >
+              自增主键策略只能捕获新增记录，无法检测已有记录的更新和删除。
+            </el-alert>
+            <el-alert
+              v-if="form.watermarkType === 'full_scan'"
+              type="info"
+              :closable="false"
+              style="margin-bottom:12px"
+            >
+              全量扫描每次都会拉取所有记录进行对比，适用于无时间戳、rowversion 或自增主键的表。
+            </el-alert>
+
+            <template v-if="showAdvancedTaskTools || form.deletionMode !== 'ignore'">
+              <div class="section-divider subtle">
+                <span class="section-icon">⌫</span> 删除同步（高级）
+              </div>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="源端删除后的处理">
+                    <el-select v-model="form.deletionMode" style="width:100%">
+                      <el-option label="不处理删除" value="ignore" />
+                      <el-option label="软删除标记" value="soft_delete" />
+                      <el-option label="从 Teable 删除（危险）" value="hard_delete" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" v-if="form.deletionMode === 'soft_delete'">
+                  <el-form-item label="软删除字段名">
+                    <el-input v-model="form.softDeleteField" placeholder="deleted" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-alert
+                v-if="form.deletionMode !== 'ignore' && form.watermarkType !== 'full_scan'"
+                type="warning"
+                :closable="false"
+                style="margin-bottom:12px"
               >
-                <el-option v-for="col in watermarkColumnOptions" :key="col" :label="col" :value="col" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="主键列">
-              <el-input v-model="form.sourcePrimaryKey" :placeholder="watermarkCandidates.pkCol || '自动检测'" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-alert
-          v-if="form.watermarkType === 'auto_pk'"
-          type="warning"
-          :closable="false"
-          style="margin-bottom:12px"
-        >
-          ⚠️ 自增主键策略只能捕获新增记录，无法检测已有记录的更新和删除。
-        </el-alert>
-        <el-alert
-          v-if="form.watermarkType === 'full_scan'"
-          type="info"
-          :closable="false"
-          style="margin-bottom:12px"
-        >
-          ℹ️ 全量扫描模式每次同步都会拉取所有记录进行对比，适用于无时间戳/rowversion/自增主键的表，大数据量时可能较慢。
-        </el-alert>
-
-        <!-- Deletion Strategy -->
-        <div class="section-divider">
-          <span class="section-icon">⌫</span> 删除同步
+                删除检测需要全量扫描。当前增量策略下会跳过删除同步。
+              </el-alert>
+              <el-alert
+                v-if="form.syncDirection === 'bidirectional' && form.deletionMode !== 'ignore'"
+                type="warning"
+                :closable="false"
+                style="margin-bottom:12px"
+              >
+                双向删除只根据软删除字段传播；单侧缺失记录会优先修复，不会直接当作删除。
+              </el-alert>
+            </template>
+          </div>
         </div>
-        <el-row :gutter="12">
-          <el-col :span="12">
-            <el-form-item label="源端删除后的处理">
-              <el-select v-model="form.deletionMode" style="width:100%">
-                <el-option label="不处理删除" value="ignore" />
-                <el-option label="软删除标记" value="soft_delete" />
-                <el-option label="从 Teable 删除" value="hard_delete" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12" v-if="form.deletionMode === 'soft_delete'">
-            <el-form-item label="软删除字段名">
-              <el-input v-model="form.softDeleteField" placeholder="deleted" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-alert
-          v-if="form.deletionMode !== 'ignore' && form.watermarkType !== 'full_scan'"
-          type="warning"
-          :closable="false"
-          style="margin-bottom:12px"
-        >
-          删除检测需要全量扫描。当前增量策略下会跳过删除同步。
-        </el-alert>
-        <el-alert
-          v-if="form.syncDirection === 'bidirectional' && form.deletionMode !== 'ignore'"
-          type="warning"
-          :closable="false"
-          style="margin-bottom:12px"
-        >
-          双向删除只根据软删除字段传播；单侧缺失记录会优先修复，不会直接当作删除。
-        </el-alert>
       </el-form>
       <template #footer>
         <button class="fs-btn fs-btn-ghost" @click="dialogVisible = false">取消</button>
@@ -1008,7 +1015,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="templateDialogVisible" title="同步任务模板" width="760px" top="8vh">
+    <el-dialog v-model="templateDialogVisible" title="高级：同步任务模板" width="760px" top="8vh">
       <div v-if="templatesLoading" style="text-align:center;padding:32px">
         <el-icon class="is-loading" :size="24"><Loading /></el-icon>
       </div>
@@ -1061,6 +1068,7 @@ const emit = defineEmits(['resolve-action'])
 const currentUser = getStoredUser()
 const currentUserId = currentUser?.id || null
 const isSuperAdmin = ['owner', 'super_admin'].includes(currentUser?.role)
+const showAdvancedTaskTools = import.meta.env.DEV || localStorage.getItem('teable_sync_show_advanced_task_tools') === 'true'
 
 function isOwner(task) {
   return task && (task.userId === currentUserId || isSuperAdmin)
@@ -1071,6 +1079,7 @@ const tasks = ref([])
 const taskFilter = ref('all')
 const taskSearch = ref('')
 const dialogVisible = ref(false)
+const advancedSettingsOpen = ref(false)
 const editingId = ref(null)
 const saving = ref(false)
 
@@ -1967,6 +1976,7 @@ async function onTargetTableChange() {
 async function openDialog(task = null) {
   if (task) {
     hydratingTaskForm.value = true
+    advancedSettingsOpen.value = Boolean(task.syncDirection === 'bidirectional' || task.deletionMode !== 'ignore')
     try {
       editingId.value = task.id
       // 兼容新旧两套字段名
@@ -2005,6 +2015,7 @@ async function openDialog(task = null) {
     }
   } else {
     editingId.value = null
+    advancedSettingsOpen.value = false
     form.value = { ...defaultForm }
     mappingRows.value = []
     mappingSuggestions.value = null
@@ -3358,6 +3369,54 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--border-subtle);
 }
 .section-icon { font-size: 14px; opacity: 0.6; }
+.section-divider.subtle {
+  margin-top: 14px;
+  color: var(--text-tertiary);
+}
+
+.advanced-settings {
+  margin-top: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.advanced-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.advanced-toggle span:first-child {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.advanced-toggle small {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.advanced-toggle-icon {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.advanced-settings-body {
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
 
 .form-help {
   margin-top: 6px;
