@@ -72,14 +72,12 @@
               <button v-else-if="isAutoSyncMode(task.syncMode)" class="fs-btn" :class="schedulerStatus[task.id] ? 'fs-btn-danger' : 'fs-btn-success'" @click="toggleSync(task)" :disabled="isScheduleActionDisabled(task)">
                 {{ isTaskActionBusy(task, 'schedule') ? '处理中' : (schedulerStatus[task.id] ? '停止调度' : '启动调度') }}
               </button>
-              <button v-if="failureCounts[task.id]" class="fs-btn fs-btn-danger" @click="openFailures(task)">
-                失败 {{ failureCounts[task.id] }}
-              </button>
               <el-dropdown trigger="click">
                 <button class="fs-btn fs-btn-ghost more-action" type="button">更多</button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item @click="restartFullSync(task)" :disabled="isRestartFullSyncDisabled(task)">重跑全量</el-dropdown-item>
+                    <el-dropdown-item @click="openFailures(task)" :disabled="!failureCounts[task.id]">失败批次{{ failureCounts[task.id] ? ` (${failureCounts[task.id]})` : '' }}</el-dropdown-item>
+                    <el-dropdown-item divided @click="restartFullSync(task)" :disabled="isRestartFullSyncDisabled(task)">重跑全量</el-dropdown-item>
                     <el-dropdown-item @click="continueInitialization(task)" :disabled="isContinueInitializationDisabled(task)">继续初始化</el-dropdown-item>
                     <el-dropdown-item divided @click="handlePreview(task.id)" :disabled="isTaskActionBusy(task, 'preview')">预览数据</el-dropdown-item>
                     <el-dropdown-item @click="runPreflight(task)" :disabled="preflightLoading || isTaskActionBusy(task, 'preflight')">预检</el-dropdown-item>
@@ -336,32 +334,33 @@
             </div>
           </el-tab-pane>
 
-          <el-tab-pane label="配置">
-            <div class="detail-kv-grid wide">
-              <div><span>源连接</span><strong>{{ connName(detailTask.sourceConnectionId || detailTask.sourceId) }}</strong></div>
-              <div><span>源表</span><strong>{{ detailTask.sourceTable || '-' }}</strong></div>
-              <div><span>源库/Base</span><strong>{{ detailTask.sourceDatabase || detailTask.sourceBaseId || '-' }}</strong></div>
-              <div><span>目标连接</span><strong>{{ connName(detailTask.targetConnectionId || detailTask.targetId) }}</strong></div>
-              <div><span>目标 Base</span><strong>{{ detailTask.targetBaseId || '-' }}</strong></div>
-              <div><span>目标表</span><strong>{{ detailTask.targetTableId || '-' }}</strong></div>
-              <div><span>同步模式</span><strong>{{ syncModeLabel(detailTask.syncMode || 'manual') }}</strong></div>
-              <div><span>同步间隔</span><strong>{{ isAutoSyncMode(detailTask.syncMode) ? intervalLabel(detailTask.syncInterval || 300) : '-' }}</strong></div>
-              <div><span>同步方向</span><strong>{{ syncDirectionLabel(detailTask.syncDirection) }}</strong></div>
-              <div><span>冲突策略</span><strong>{{ conflictLabel(detailTask.conflictStrategy) }}</strong></div>
-              <div><span>增量策略</span><strong>{{ watermarkLabel(detailTask.watermarkType) }}</strong></div>
-              <div><span>增量列</span><strong>{{ detailTask.watermarkColumn || detailTask.sourceTimestampColumn || '-' }}</strong></div>
-              <div><span>主键列</span><strong>{{ detailTask.sourcePrimaryKey || '-' }}</strong></div>
-              <div><span>源分页大小</span><strong>{{ detailTask.pageSize || 1000 }}</strong></div>
-              <div><span>Teable 写入批量</span><strong>{{ detailTask.batchSize || 500 }}</strong></div>
-              <div><span>失败重试次数</span><strong>{{ detailTask.retryCount || 3 }}</strong></div>
-              <div><span>初始全量上限</span><strong>{{ formatNumber(detailTask.maxInitialRows || 100000) }} 行</strong></div>
-              <div><span>删除同步</span><strong>{{ deletionModeLabel(detailTask.deletionMode) }}</strong></div>
-              <div><span>软删除字段</span><strong>{{ detailTask.softDeleteField || '-' }}</strong></div>
-            </div>
-          </el-tab-pane>
-
-          <el-tab-pane label="字段映射">
+          <el-tab-pane label="高级信息">
             <div class="detail-section">
+              <div class="detail-section-title">任务配置</div>
+              <div class="detail-kv-grid wide">
+                <div><span>源连接</span><strong>{{ connName(detailTask.sourceConnectionId || detailTask.sourceId) }}</strong></div>
+                <div><span>源表</span><strong>{{ detailTask.sourceTable || '-' }}</strong></div>
+                <div><span>源库/Base</span><strong>{{ detailTask.sourceDatabase || detailTask.sourceBaseId || '-' }}</strong></div>
+                <div><span>目标连接</span><strong>{{ connName(detailTask.targetConnectionId || detailTask.targetId) }}</strong></div>
+                <div><span>目标 Base</span><strong>{{ detailTask.targetBaseId || '-' }}</strong></div>
+                <div><span>目标表</span><strong>{{ detailTask.targetTableId || '-' }}</strong></div>
+                <div><span>同步模式</span><strong>{{ syncModeLabel(detailTask.syncMode || 'manual') }}</strong></div>
+                <div><span>同步间隔</span><strong>{{ isAutoSyncMode(detailTask.syncMode) ? intervalLabel(detailTask.syncInterval || 300) : '-' }}</strong></div>
+                <div><span>同步方向</span><strong>{{ syncDirectionLabel(detailTask.syncDirection) }}</strong></div>
+                <div><span>冲突策略</span><strong>{{ conflictLabel(detailTask.conflictStrategy) }}</strong></div>
+                <div><span>增量策略</span><strong>{{ watermarkLabel(detailTask.watermarkType) }}</strong></div>
+                <div><span>增量列</span><strong>{{ detailTask.watermarkColumn || detailTask.sourceTimestampColumn || '-' }}</strong></div>
+                <div><span>主键列</span><strong>{{ detailTask.sourcePrimaryKey || '-' }}</strong></div>
+                <div><span>源分页大小</span><strong>{{ detailTask.pageSize || 1000 }}</strong></div>
+                <div><span>Teable 写入批量</span><strong>{{ detailTask.batchSize || 500 }}</strong></div>
+                <div><span>失败重试次数</span><strong>{{ detailTask.retryCount || 3 }}</strong></div>
+                <div><span>初始全量上限</span><strong>{{ formatNumber(detailTask.maxInitialRows || 100000) }} 行</strong></div>
+                <div><span>删除同步</span><strong>{{ deletionModeLabel(detailTask.deletionMode) }}</strong></div>
+                <div><span>软删除字段</span><strong>{{ detailTask.softDeleteField || '-' }}</strong></div>
+              </div>
+            </div>
+
+            <div class="detail-section advanced-detail-section">
               <div class="detail-section-bar">
                 <div class="detail-section-title">字段映射</div>
                 <span class="detail-count">{{ mappingRowsForTask(detailTask).length }} 个字段</span>
@@ -374,10 +373,8 @@
                 </el-table-column>
               </el-table>
             </div>
-          </el-tab-pane>
 
-          <el-tab-pane label="字段变更">
-            <div class="detail-section">
+            <div class="detail-section advanced-detail-section">
               <div class="detail-section-bar">
                 <div class="detail-section-title">字段快照</div>
                 <button class="fs-btn fs-btn-ghost" style="padding:6px 12px;font-size:12px" @click="checkSchemaDrift(detailTask)" :disabled="schemaDriftLoading || isTaskActionBusy(detailTask, 'schemaDrift')">

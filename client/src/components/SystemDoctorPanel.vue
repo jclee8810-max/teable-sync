@@ -1,10 +1,6 @@
 <template>
   <div class="doctor-page">
     <div class="doctor-actions">
-      <button class="fs-btn fs-btn-ghost" @click="loadBackups" :disabled="backupsLoading">
-        <el-icon v-if="backupsLoading" class="is-loading"><Loading /></el-icon>
-        刷新备份
-      </button>
       <button class="fs-btn fs-btn-primary" @click="loadDoctor" :disabled="loading">
         <el-icon v-if="loading" class="is-loading"><Loading /></el-icon>
         重新检查
@@ -35,29 +31,42 @@
     </div>
 
     <div class="fs-card backup-card">
-      <div class="section-header">
+      <div class="section-header compact">
         <div>
           <div class="section-title">配置备份</div>
-          <div class="section-desc">系统写入配置前自动生成，用于排查和恢复；这里不导出迁移包。</div>
+          <div class="section-desc">系统写入配置前自动生成，用于排查和恢复，默认收起。</div>
         </div>
-        <span class="backup-count">{{ backups.length }} 个</span>
+        <div class="inline-actions">
+          <span class="backup-count">{{ backups.length }} 个</span>
+          <button class="fs-btn fs-btn-ghost" type="button" @click="backupOpen = !backupOpen">
+            {{ backupOpen ? '收起' : '展开' }}
+          </button>
+        </div>
       </div>
-      <el-table :data="backups" size="small" border v-loading="backupsLoading" empty-text="暂无备份">
-        <el-table-column label="时间" min-width="180">
-          <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
-        </el-table-column>
-        <el-table-column prop="name" label="文件" min-width="260" show-overflow-tooltip />
-        <el-table-column label="大小" width="120">
-          <template #default="{ row }">{{ formatSize(row.size) }}</template>
-        </el-table-column>
-      </el-table>
+      <div v-if="backupOpen" class="backup-body">
+        <div class="backup-actions">
+          <button class="fs-btn fs-btn-ghost" @click="loadBackups" :disabled="backupsLoading">
+            <el-icon v-if="backupsLoading" class="is-loading"><Loading /></el-icon>
+            刷新备份
+          </button>
+        </div>
+        <el-table :data="backups" size="small" border v-loading="backupsLoading" empty-text="暂无备份">
+          <el-table-column label="时间" min-width="180">
+            <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+          </el-table-column>
+          <el-table-column prop="name" label="文件" min-width="260" show-overflow-tooltip />
+          <el-table-column label="大小" width="120">
+            <template #default="{ row }">{{ formatSize(row.size) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
     </div>
 
     <div class="fs-card maintenance-card">
       <div class="section-header compact">
         <div>
           <div class="section-title">高级维护</div>
-          <div class="section-desc">上线验收、环境迁移和测试整理都属于低频维护操作，默认收起。</div>
+          <div class="section-desc">上线验收、环境迁移和测试整理属于管理员低频操作，默认收起。</div>
         </div>
         <button class="fs-btn fs-btn-ghost" type="button" @click="advancedOpen = !advancedOpen">
           {{ advancedOpen ? '收起' : '展开' }}
@@ -227,6 +236,7 @@ const importText = ref('')
 const importPreview = ref(null)
 const importPreviewLoading = ref(false)
 const importing = ref(false)
+const backupOpen = ref(false)
 const advancedOpen = ref(false)
 const showTestTools = import.meta.env.DEV || localStorage.getItem('teable_sync_show_test_tools') === 'true'
 const acceptanceLoading = ref(false)
@@ -619,6 +629,17 @@ onMounted(async () => {
 
 .backup-card {
   padding: 16px;
+}
+
+.backup-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.backup-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .section-header {

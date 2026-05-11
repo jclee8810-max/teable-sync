@@ -6,39 +6,38 @@
         <strong>{{ snapshot?.generatedAt ? formatDateTime(snapshot.generatedAt) : '-' }}</strong>
       </div>
       <div class="obs-actions">
-        <button v-if="isAdmin" class="fs-btn fs-btn-ghost" @click="openNotificationDialog" style="padding:8px 16px;font-size:13px">
-          <el-icon><Bell /></el-icon>通知配置
-        </button>
         <button class="fs-btn fs-btn-primary" @click="loadSnapshot" :disabled="loading" style="padding:8px 16px;font-size:13px">
           <el-icon><Refresh /></el-icon>{{ loading ? '刷新中...' : '刷新' }}
         </button>
       </div>
     </div>
 
-    <div class="obs-summary">
-      <button class="obs-tile" type="button" @click="alertFilter = ''" :class="{ active: alertFilter === '' }">
-        <span>开放告警</span>
+    <div class="obs-summary compact">
+      <button class="obs-tile critical" type="button" @click="alertFilter = ''" :class="{ active: alertFilter === '' }">
+        <span>待处理告警</span>
         <strong>{{ summary.activeAlerts ?? summary.openAlerts ?? 0 }}</strong>
       </button>
-      <button class="obs-tile critical" type="button" @click="alertFilter = 'critical'" :class="{ active: alertFilter === 'critical' }">
-        <span>严重</span>
+      <button class="obs-tile warning" type="button" @click="alertFilter = 'critical'" :class="{ active: alertFilter === 'critical' }">
+        <span>严重告警</span>
         <strong>{{ summary.criticalAlerts || 0 }}</strong>
       </button>
-      <button class="obs-tile warning" type="button" @click="alertFilter = 'warning'" :class="{ active: alertFilter === 'warning' }">
-        <span>警告</span>
-        <strong>{{ summary.warningAlerts || 0 }}</strong>
+      <button class="obs-tile" type="button" @click="showHealthyTasks = false">
+        <span>异常任务</span>
+        <strong>{{ unhealthyTaskCount }}</strong>
       </button>
       <div class="obs-tile">
         <span>24h 成功率</span>
         <strong>{{ summary.successRate24h === null || summary.successRate24h === undefined ? '-' : summary.successRate24h + '%' }}</strong>
       </div>
-      <div class="obs-tile">
-        <span>运行中</span>
-        <strong>{{ summary.runningTasks || 0 }}</strong>
+    </div>
+
+    <div v-if="isAdmin" class="notification-strip">
+      <div>
+        <strong>告警通知</strong>
+        <span>{{ notificationStatusText }}</span>
       </div>
-      <button class="obs-tile" type="button" @click="alertFilter = 'acknowledged'" :class="{ active: alertFilter === 'acknowledged' }">
-        <span>已确认/静默</span>
-        <strong>{{ (summary.acknowledgedAlerts || 0) + (summary.mutedAlerts || 0) }}</strong>
+      <button class="fs-btn fs-btn-ghost" @click="openNotificationDialog" style="padding:8px 16px;font-size:13px">
+        <el-icon><Bell /></el-icon>设置通知
       </button>
     </div>
 
@@ -76,18 +75,16 @@
         </div>
       </section>
 
-      <section class="obs-section">
-        <div class="section-head">
+      <section class="obs-section run-section">
+        <div class="section-head compact-head">
           <div>
-            <strong>24 小时运行</strong>
-            <span>同步历史和日志错误计数</span>
+            <strong>24 小时运行摘要</strong>
+            <span>用于判断整体是否稳定，详细执行记录看任务详情或日志。</span>
           </div>
         </div>
-        <div class="run-metrics">
+        <div class="run-metrics compact">
           <div><span>运行次数</span><strong>{{ summary.runs24h || 0 }}</strong></div>
-          <div><span>成功</span><strong>{{ summary.successes24h || 0 }}</strong></div>
           <div><span>失败</span><strong>{{ summary.failedRuns24h || 0 }}</strong></div>
-          <div><span>错误日志</span><strong>{{ summary.errorLogs24h || 0 }}</strong></div>
           <div><span>警告日志</span><strong>{{ summary.warningLogs24h || 0 }}</strong></div>
           <div><span>平均耗时</span><strong>{{ formatDuration(summary.averageDurationMs) }}</strong></div>
         </div>
@@ -98,11 +95,13 @@
       <div class="section-head">
         <div>
           <strong>任务健康</strong>
-          <span>最近运行、调度、成功率和失败批次</span>
+          <span>默认只显示异常任务；需要巡检时再展开全部。</span>
         </div>
-        <em>{{ taskRows.length }} 个任务</em>
+        <button class="section-toggle" type="button" @click="showHealthyTasks = !showHealthyTasks">
+          {{ showHealthyTasks ? '只看异常' : `查看全部 ${taskRows.length} 个` }}
+        </button>
       </div>
-      <el-table :data="taskRows" size="small" border v-loading="loading" empty-text="暂无任务">
+      <el-table :data="visibleTaskRows" size="small" border v-loading="loading" :empty-text="showHealthyTasks ? '暂无任务' : '当前没有异常任务'">
         <el-table-column prop="name" label="任务" min-width="190" show-overflow-tooltip />
         <el-table-column label="健康" width="110">
           <template #default="{ row }">
@@ -145,15 +144,13 @@
       </el-table>
     </section>
 
-    <section class="obs-section">
-      <div class="section-head">
-        <div>
-          <strong>最近警告/错误日志</strong>
-          <span>来自运行日志，可用于快速定位原因</span>
-        </div>
-        <em>{{ recentLogs.length }} 条</em>
-      </div>
-      <div class="obs-log-list">
+    <section class="obs-section logs-collapse">
+      <button class="logs-toggle" type="button" @click="logsOpen = !logsOpen">
+        <span>最近警告/错误日志</span>
+        <small>需要定位原因时展开；完整日志仍在“日志”页面。</small>
+        <strong>{{ logsOpen ? '收起' : `展开 ${recentLogs.length} 条` }}</strong>
+      </button>
+      <div v-if="logsOpen" class="obs-log-list">
         <div v-for="(log, idx) in recentLogs" :key="idx" class="obs-log-row" :class="'log-' + log.level">
           <span class="log-time">{{ formatDateTime(log.ts) }}</span>
           <span class="log-level" :class="log.level">{{ levelLabel(log.level) }}</span>
@@ -236,6 +233,8 @@ const emit = defineEmits(['resolve-action'])
 const loading = ref(false)
 const snapshot = ref(null)
 const alertFilter = ref('')
+const showHealthyTasks = ref(false)
+const logsOpen = ref(false)
 const notificationDialogVisible = ref(false)
 const notificationLoading = ref(false)
 const notificationSaving = ref(false)
@@ -254,7 +253,15 @@ const currentUser = computed(() => getStoredUser() || {})
 const isAdmin = computed(() => ['owner', 'super_admin'].includes(currentUser.value.role))
 const summary = computed(() => snapshot.value?.summary || {})
 const taskRows = computed(() => snapshot.value?.tasks || [])
+const unhealthyTaskCount = computed(() => taskRows.value.filter(isTaskUnhealthy).length)
+const visibleTaskRows = computed(() => showHealthyTasks.value ? taskRows.value : taskRows.value.filter(isTaskUnhealthy))
 const recentLogs = computed(() => snapshot.value?.recentLogs || [])
+const notificationStatusText = computed(() => {
+  if (notificationLoading.value) return '加载中'
+  if (!notificationSettings.value) return '未加载'
+  if (!notificationSettings.value.enabled) return '未启用'
+  return notificationSettings.value.hasWebhookUrl ? `已启用 · 冷却 ${notificationSettings.value.cooldownMinutes || 30} 分钟` : '已启用，待配置 Webhook'
+})
 const filteredAlerts = computed(() => {
   const alerts = snapshot.value?.alerts || []
   if (!alertFilter.value) return alerts
@@ -394,7 +401,7 @@ function alertTypeLabel(type) {
 }
 
 function alertStateLabel(state) {
-  return ({ open: '开放', acknowledged: '已确认', muted: '已静默' }[state] || '开放')
+  return ({ open: '待处理', acknowledged: '已确认', muted: '已静默' }[state] || '待处理')
 }
 
 function alertStateDetail(item) {
@@ -444,6 +451,11 @@ function resolveTaskRow(row) {
     taskId: row.id,
     actionTarget: row.health?.latestActionTarget || (row.pendingFailures ? 'task_failures' : 'task_detail'),
   })
+}
+
+function isTaskUnhealthy(row) {
+  const status = row?.health?.status
+  return !row?.connectionOk || row?.pendingFailures > 0 || ['has_failures', 'recent_failed', 'cancelled', 'never_run', 'unknown'].includes(status) || Boolean(row?.health?.latestError)
 }
 
 function healthLabel(status) {
@@ -528,7 +540,7 @@ onUnmounted(() => {
 
 .obs-summary {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -560,6 +572,29 @@ button.obs-tile:hover,
 }
 .obs-tile.critical strong { color: var(--red); }
 .obs-tile.warning strong { color: var(--amber); }
+
+.notification-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.notification-strip div {
+  display: grid;
+  gap: 3px;
+}
+.notification-strip strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.notification-strip span {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
 
 .obs-grid {
   display: grid;
@@ -596,6 +631,18 @@ button.obs-tile:hover,
   font-size: 12px;
   font-style: normal;
 }
+
+.section-toggle {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--accent);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.section-toggle:hover { background: var(--accent-muted); border-color: var(--accent); }
 
 .alert-list {
   display: grid;
@@ -740,6 +787,9 @@ button.obs-tile:hover,
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+.run-metrics.compact {
+  grid-template-columns: 1fr;
+}
 .run-metrics div {
   display: grid;
   gap: 5px;
@@ -757,11 +807,32 @@ button.obs-tile:hover,
   font-size: 16px;
 }
 
+.logs-collapse {
+  padding: 0;
+  overflow: hidden;
+}
+.logs-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.logs-toggle span { font-size: 13px; font-weight: 700; }
+.logs-toggle small { color: var(--text-tertiary); font-size: 12px; }
+.logs-toggle strong { color: var(--accent); font-size: 12px; }
+
 .obs-log-list {
   max-height: 340px;
   overflow: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .obs-log-row {
@@ -843,13 +914,14 @@ button.obs-tile:hover,
 }
 
 @media (max-width: 1180px) {
-  .obs-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .obs-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .obs-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
   .obs-toolbar,
-  .section-head { flex-direction: column; align-items: stretch; }
+  .section-head,
+  .notification-strip { flex-direction: column; align-items: stretch; }
   .obs-actions { justify-content: stretch; }
   .obs-actions .fs-btn { justify-content: center; }
   .obs-summary,

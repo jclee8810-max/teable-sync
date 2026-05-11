@@ -1,21 +1,7 @@
 <template>
   <div class="logs-page">
-    <div class="log-switcher">
-      <button
-        v-for="option in viewOptions"
-        :key="option.value"
-        type="button"
-        class="log-mode"
-        :class="{ active: activeView === option.value }"
-        @click="activeView = option.value"
-      >
-        <span>{{ option.label }}</span>
-        <small>{{ option.description }}</small>
-      </button>
-    </div>
-
     <div class="log-toolbar">
-      <div v-if="activeView === 'sync'" class="log-stats">
+      <div class="log-stats">
         <button class="stat-item" :class="{ active: levelFilter === '' }" type="button" @click="levelFilter = ''">
           全部 {{ logs.length }}
         </button>
@@ -29,23 +15,12 @@
           错误 {{ stats.error }}
         </button>
       </div>
-      <div v-else class="audit-tools">
-        <el-select v-model="auditResourceType" placeholder="资源类型" clearable size="small" style="width:128px" @change="loadAuditLogs">
-          <el-option label="连接" value="connection" />
-          <el-option label="任务" value="task" />
-          <el-option label="系统" value="system" />
-          <el-option label="用户" value="user" />
-        </el-select>
-        <button class="fs-btn fs-btn-ghost" @click="loadAuditLogs" style="padding:8px 16px;font-size:13px">
-          <el-icon><Refresh /></el-icon>刷新
-        </button>
-      </div>
-      <button v-if="activeView === 'sync'" class="fs-btn fs-btn-ghost" @click="clearAll" style="padding:8px 16px;font-size:13px">
+      <button class="fs-btn fs-btn-ghost" @click="clearAll" style="padding:8px 16px;font-size:13px">
         <el-icon><Delete /></el-icon>清空可见日志
       </button>
     </div>
 
-    <div v-if="activeView === 'sync'" class="log-card" ref="logContainer">
+    <div class="log-card" ref="logContainer">
       <div class="log-card-head">
         <div>
           <strong>同步执行流</strong>
@@ -64,32 +39,44 @@
       </div>
     </div>
 
-    <div v-else class="log-card">
-      <div class="log-card-head">
-        <div>
-          <strong>操作审计</strong>
-          <span>记录用户、资源和管理动作</span>
+    <div class="audit-collapse">
+      <button class="audit-toggle" type="button" @click="auditOpen = !auditOpen">
+        <span>操作审计</span>
+        <small>用户、资源和管理动作记录，仅排查权限或误操作时查看。</small>
+        <strong>{{ auditOpen ? '收起' : '展开' }}</strong>
+      </button>
+      <div v-if="auditOpen" class="audit-panel">
+        <div class="audit-tools">
+          <el-select v-model="auditResourceType" placeholder="资源类型" clearable size="small" style="width:128px" @change="loadAuditLogs">
+            <el-option label="连接" value="connection" />
+            <el-option label="任务" value="task" />
+            <el-option label="系统" value="system" />
+            <el-option label="用户" value="user" />
+          </el-select>
+          <button class="fs-btn fs-btn-ghost" @click="loadAuditLogs" style="padding:8px 16px;font-size:13px">
+            <el-icon><Refresh /></el-icon>刷新
+          </button>
+          <span class="audit-count">{{ auditLogs.length }} 条</span>
         </div>
-        <em>{{ auditLogs.length }} 条</em>
+        <el-table :data="auditLogs" size="small" border v-loading="auditLoading" empty-text="暂无审计记录">
+          <el-table-column label="时间" width="150">
+            <template #default="{ row }">{{ formatDateTime(row.ts) }}</template>
+          </el-table-column>
+          <el-table-column prop="userEmail" label="用户" min-width="180" show-overflow-tooltip />
+          <el-table-column label="动作" width="130">
+            <template #default="{ row }">
+              <el-tag size="small" :type="actionTagType(row.action)">{{ actionLabel(row.action) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="资源" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span>{{ resourceLabel(row.resourceType) }}</span>
+              <span v-if="row.resourceName"> · {{ row.resourceName }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="message" label="说明" min-width="240" show-overflow-tooltip />
+        </el-table>
       </div>
-      <el-table :data="auditLogs" size="small" border v-loading="auditLoading" empty-text="暂无审计记录">
-        <el-table-column label="时间" width="150">
-          <template #default="{ row }">{{ formatDateTime(row.ts) }}</template>
-        </el-table-column>
-        <el-table-column prop="userEmail" label="用户" min-width="180" show-overflow-tooltip />
-        <el-table-column label="动作" width="130">
-          <template #default="{ row }">
-            <el-tag size="small" :type="actionTagType(row.action)">{{ actionLabel(row.action) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="资源" min-width="180" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span>{{ resourceLabel(row.resourceType) }}</span>
-            <span v-if="row.resourceName"> · {{ row.resourceName }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="message" label="说明" min-width="240" show-overflow-tooltip />
-      </el-table>
     </div>
   </div>
 </template>
@@ -101,16 +88,12 @@ import { ElMessage } from 'element-plus'
 
 const logs = ref([])
 const logContainer = ref(null)
-const activeView = ref('sync')
 const levelFilter = ref('')
 const auditLogs = ref([])
+const auditOpen = ref(false)
 const auditLoading = ref(false)
 const auditResourceType = ref('')
 const taskMap = ref({})
-const viewOptions = [
-  { label: '实时日志', value: 'sync', description: '任务执行过程与错误' },
-  { label: '操作审计', value: 'audit', description: '用户操作与权限记录' },
-]
 
 const stats = computed(() => {
   const s = { info: 0, warn: 0, error: 0 }
@@ -255,38 +238,6 @@ onUnmounted(() => {
   gap: 16px;
 }
 
-.log-switcher {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.log-mode {
-  display: grid;
-  gap: 4px;
-  padding: 14px 16px;
-  text-align: left;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface);
-  cursor: pointer;
-  font-family: var(--font-sans);
-}
-.log-mode:hover,
-.log-mode.active {
-  border-color: var(--accent);
-  background: var(--accent-muted);
-}
-.log-mode span {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-.log-mode small {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
 .log-toolbar {
   display: flex;
   justify-content: space-between;
@@ -302,6 +253,38 @@ onUnmounted(() => {
   flex: 1;
   flex-wrap: wrap;
 }
+
+.audit-collapse {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.audit-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.audit-toggle span { font-size: 13px; font-weight: 700; }
+.audit-toggle small { color: var(--text-tertiary); font-size: 12px; }
+.audit-toggle strong { color: var(--accent); font-size: 12px; }
+.audit-panel {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+.audit-count { color: var(--text-tertiary); font-size: 12px; }
 
 .stat-item {
   border: 1px solid var(--border-default);
@@ -394,7 +377,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 760px) {
-  .log-switcher { grid-template-columns: 1fr; }
   .log-toolbar {
     flex-direction: column;
     align-items: stretch;

@@ -143,13 +143,13 @@ const navItems = computed(() => {
     { key: 'logs', icon: 'Document', label: '日志', badge: null },
   ]
   if (['owner', 'super_admin'].includes(currentUser.value?.role)) {
-    items.push({ key: 'doctor', icon: 'FirstAidKit', label: '系统检查', badge: null })
+    items.push({ key: 'doctor', icon: 'FirstAidKit', label: '系统维护', badge: null })
   }
   return items
 })
 
 const currentPageTitle = computed(() => {
-  const m = { connections: '数据源管理', tasks: '同步任务', observability: '观测告警', logs: '运行日志', doctor: '系统检查' }
+  const m = { connections: '数据源管理', tasks: '同步任务', observability: '观测告警', logs: '运行日志', doctor: '系统维护' }
   return m[activeTab.value] || '个人中心'
 })
 const currentPageDesc = computed(() => {
@@ -158,7 +158,7 @@ const currentPageDesc = computed(() => {
     tasks: '管理 SQL → Teable 数据同步管线',
     observability: '集中查看任务健康、调度状态和开放告警',
     logs: '实时查看同步执行记录',
-    doctor: '检查配置、密钥、任务引用和运行数据目录',
+    doctor: '检查系统健康，管理备份、迁移和上线验收',
   }
   return m[activeTab.value] || ''
 })
