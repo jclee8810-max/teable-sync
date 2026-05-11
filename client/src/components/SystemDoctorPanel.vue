@@ -34,6 +34,64 @@
       </div>
     </div>
 
+
+    <div class="fs-card acceptance-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">一键验收</div>
+          <div class="section-desc">实测基准数据源、检查任务可运行性、抽样预检、失败批次和告警；不会执行同步写入。</div>
+        </div>
+        <button class="fs-btn fs-btn-primary" @click="runAcceptance" :disabled="acceptanceLoading">
+          <el-icon v-if="acceptanceLoading" class="is-loading"><Loading /></el-icon>
+          开始验收
+        </button>
+      </div>
+      <div v-if="acceptance" class="acceptance-summary" :class="acceptance.status">
+        <div>
+          <strong>{{ statusLabel(acceptance.status) }}</strong>
+          <span>{{ acceptance.summary.pass }} 通过 · {{ acceptance.summary.warn }} 警告 · {{ acceptance.summary.fail }} 失败</span>
+        </div>
+        <small>{{ formatTime(acceptance.finishedAt) }}</small>
+      </div>
+      <div v-if="acceptance" class="acceptance-steps">
+        <div v-for="step in acceptance.steps" :key="step.title" class="acceptance-step">
+          <span class="check-status" :class="step.status">{{ statusText(step.status) }}</span>
+          <div>
+            <div class="check-title">{{ step.title }}</div>
+            <div class="check-message">{{ step.message }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="fs-card environment-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">测试环境整理</div>
+          <div class="section-desc">保留基准数据源，软删除临时 e2e 数据源、任务和模板，并压缩临时日志。</div>
+        </div>
+        <div class="inline-actions">
+          <button class="fs-btn fs-btn-ghost" @click="loadEnvironment" :disabled="environmentLoading">
+            <el-icon v-if="environmentLoading" class="is-loading"><Loading /></el-icon>
+            刷新预览
+          </button>
+          <button class="fs-btn fs-btn-primary" @click="cleanupEnvironment" :disabled="cleanupLoading || !environment">
+            整理环境
+          </button>
+        </div>
+      </div>
+      <div v-if="environment" class="environment-grid">
+        <div><span>基准数据源</span><strong>{{ environment.summary.readyBaselineConnections }}/{{ environment.summary.baselineConnections }}</strong><small>最近测试通过</small></div>
+        <div><span>可清理数据源</span><strong>{{ environment.summary.removableConnections }}</strong><small>临时项</small></div>
+        <div><span>可清理任务</span><strong>{{ environment.summary.removableTasks }}</strong><small>临时项</small></div>
+        <div><span>可清理日志</span><strong>{{ environment.summary.removableLogs }}</strong><small>临时或超量</small></div>
+      </div>
+      <div v-if="environment?.warnings?.length" class="preview-list warnings environment-warnings">
+        <strong>提醒</strong>
+        <span v-for="item in environment.warnings" :key="item">{{ item }}</span>
+      </div>
+    </div>
+
     <div class="fs-card backup-card">
       <div class="section-header">
         <div>
@@ -144,7 +202,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getSystemDoctor, getConfigBackups, exportConfigPackage, previewConfigImport, importConfigPackage } from '../api'
+import { getSystemDoctor, getConfigBackups, exportConfigPackage, previewConfigImport, importConfigPackage, getTestEnvironment, cleanupTestEnvironment, runSystemAcceptance } from '../api'
 
 const loading = ref(false)
 const backupsLoading = ref(false)
@@ -156,6 +214,11 @@ const importText = ref('')
 const importPreview = ref(null)
 const importPreviewLoading = ref(false)
 const importing = ref(false)
+const acceptanceLoading = ref(false)
+const acceptance = ref(null)
+const environmentLoading = ref(false)
+const environment = ref(null)
+const cleanupLoading = ref(false)
 const importMode = ref('merge')
 const importLogs = ref(false)
 const disableImportedTasks = ref(true)
@@ -176,6 +239,55 @@ function formatSize(size) {
   if (!Number.isFinite(Number(size))) return '-'
   if (size < 1024) return `${size} B`
   return `${(size / 1024).toFixed(1)} KB`
+}
+
+
+async function runAcceptance() {
+  acceptanceLoading.value = true
+  try {
+    acceptance.value = await runSystemAcceptance({ connectionScope: 'baseline', preflightLimit: 3 })
+    if (acceptance.value.status === 'pass') ElMessage.success('一键验收通过')
+    else if (acceptance.value.status === 'warn') ElMessage.warning('一键验收完成，有项目需要关注')
+    else ElMessage.error('一键验收发现阻断问题')
+    await loadDoctor()
+    await loadEnvironment()
+  } catch (err) {
+    ElMessage.error('一键验收失败: ' + err.message)
+  } finally {
+    acceptanceLoading.value = false
+  }
+}
+
+async function loadEnvironment() {
+  environmentLoading.value = true
+  try {
+    environment.value = await getTestEnvironment({ keepRecentLogs: 200 })
+  } catch (err) {
+    environment.value = null
+    ElMessage.error('测试环境预览失败: ' + err.message)
+  } finally {
+    environmentLoading.value = false
+  }
+}
+
+async function cleanupEnvironment() {
+  if (!environment.value) return
+  const total = environment.value.summary.removableConnections + environment.value.summary.removableTasks + environment.value.summary.removableTemplates + environment.value.summary.removableLogs
+  try {
+    await ElMessageBox.confirm(`将保留基准数据源，并整理 ${total} 项临时数据。该操作会先生成配置备份，确定继续吗？`, '整理测试环境', { type: 'warning' })
+  } catch {
+    return
+  }
+  cleanupLoading.value = true
+  try {
+    environment.value = await cleanupTestEnvironment({ keepRecentLogs: 200 })
+    ElMessage.success('测试环境已整理')
+    await loadDoctor()
+  } catch (err) {
+    ElMessage.error('整理失败: ' + err.message)
+  } finally {
+    cleanupLoading.value = false
+  }
 }
 
 async function loadDoctor() {
@@ -289,7 +401,10 @@ async function applyImport() {
   }
 }
 
-onMounted(loadDoctor)
+onMounted(async () => {
+  await loadDoctor()
+  await loadEnvironment()
+})
 </script>
 
 <style scoped>
@@ -390,6 +505,83 @@ onMounted(loadDoctor)
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
+}
+
+
+.acceptance-card,
+.environment-card {
+  padding: 16px;
+}
+
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.acceptance-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+.acceptance-summary.pass { border-color: rgba(5,150,105,0.24); background: rgba(5,150,105,0.08); }
+.acceptance-summary.warn { border-color: rgba(245,158,11,0.24); background: rgba(245,158,11,0.08); }
+.acceptance-summary.fail { border-color: rgba(220,38,38,0.24); background: rgba(220,38,38,0.08); }
+.acceptance-summary strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+.acceptance-summary span,
+.acceptance-summary small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.acceptance-steps {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.acceptance-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.environment-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.environment-grid div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.environment-grid span,
+.environment-grid small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.environment-grid strong {
+  color: var(--text-primary);
+  font-size: 18px;
+}
+.environment-warnings {
+  margin-top: 12px;
 }
 
 .backup-card {
@@ -523,6 +715,7 @@ onMounted(loadDoctor)
     flex-direction: column;
     align-items: stretch;
   }
+  .environment-grid,
   .preview-grid {
     grid-template-columns: 1fr;
   }

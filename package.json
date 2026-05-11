@@ -14,6 +14,7 @@
     "test:connection-health": "node server/scripts/connection-health-self-test.mjs",
     "test:error-guidance": "node server/scripts/error-guidance-self-test.mjs",
     "test:runtime-store": "node server/scripts/runtime-store-self-test.mjs",
+    "test:environment": "node server/scripts/test-environment-self-test.mjs",
     "e2e:smoke": "node server/scripts/run-e2e-smoke.mjs",
     "e2e:contract": "node server/scripts/run-api-contract-smoke.mjs",
     "ui:e2e": "node server/scripts/run-ui-e2e-smoke.mjs",

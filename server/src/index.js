@@ -32,6 +32,7 @@ import { clearTaskSyncState, getTaskInitializationState } from './services/syncE
 import { isAdmin, isOwner } from './services/roles.js';
 import { logger } from './services/logger.js';
 import { connectionLabel, getConnectionHealth } from './services/connectionHealth.js';
+import { applyTestEnvironmentCleanup, buildTestEnvironmentPlan } from './services/testEnvironmentService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || process.env.RUNTIME_STORE_DATA_DIR || join(__dirname, '..', 'data');
@@ -466,6 +467,158 @@ function buildObservabilityForUser(config, user) {
 
 function getAppUrl() {
   return process.env.SERVER_PUBLIC_URL || `http://localhost:${PORT}`;
+}
+
+function acceptanceStep(status, title, message, meta = {}) {
+  return { status, title, message, ...meta };
+}
+
+function summarizeAcceptanceSteps(steps) {
+  return {
+    pass: steps.filter((step) => step.status === 'pass').length,
+    warn: steps.filter((step) => step.status === 'warn').length,
+    fail: steps.filter((step) => step.status === 'fail').length,
+  };
+}
+
+async function testConnectionForAcceptance(config, conn, user) {
+  try {
+    let result;
+    if (conn.type === 'teable') {
+      const { getTeableSpaces } = await import('./services/teableService.js');
+      const spaces = await getTeableSpaces(conn);
+      result = { success: true, type: 'teable', message: `连接成功，共 ${spaces.length} 个空间`, spaces: spaces.length };
+    } else {
+      const { testConnection } = await import('./services/dbService.js');
+      result = { success: true, type: conn.type, ...(await testConnection(conn)) };
+    }
+    await recordConnectionTest(config, conn.id, { ...result, testedBy: user.id });
+    return result;
+  } catch (err) {
+    const result = { success: false, type: conn.type, error: err.message };
+    await recordConnectionTest(config, conn.id, { ...result, testedBy: user.id });
+    return result;
+  }
+}
+
+async function buildAcceptanceReport(user, options = {}) {
+  const startedAt = new Date();
+  const steps = [];
+  const details = { connections: [], tasks: [], preflights: [] };
+  let config = loadConfig();
+
+  const doctor = runSystemDoctor({ dataDir: DATA_DIR, configFile: CONFIG_FILE, config });
+  steps.push(acceptanceStep(
+    doctor.status === 'fail' ? 'fail' : doctor.status === 'warn' ? 'warn' : 'pass',
+    '系统检查',
+    `${doctor.summary.pass} 通过，${doctor.summary.warn} 警告，${doctor.summary.fail} 失败`,
+    { doctorSummary: doctor.summary },
+  ));
+
+  const envPlan = buildTestEnvironmentPlan(config);
+  steps.push(acceptanceStep(
+    envPlan.summary.readyBaselineConnections >= Math.min(1, envPlan.summary.baselineConnections) ? (envPlan.warnings.length ? 'warn' : 'pass') : 'fail',
+    '测试基准环境',
+    `找到 ${envPlan.summary.baselineConnections} 个基准数据源，${envPlan.summary.readyBaselineConnections} 个最近测试通过`,
+    { environment: envPlan.summary, warnings: envPlan.warnings },
+  ));
+
+  const scope = options.connectionScope === 'all' ? 'all' : 'baseline';
+  const baselineNames = new Set(envPlan.baselineConnectionNames.map((name) => name.toLowerCase()));
+  const visibleConnections = (config.connections || []).filter((conn) => !conn.deletedAt && (isAdmin(user) || conn.ownerId === user.id || conn.shared === true));
+  const connectionsToTest = visibleConnections
+    .filter((conn) => scope === 'all' || baselineNames.has(String(conn.name || '').toLowerCase()))
+    .slice(0, 20);
+  let connectionFailures = 0;
+  for (const conn of connectionsToTest) {
+    const result = await testConnectionForAcceptance(config, conn, user);
+    details.connections.push({ id: conn.id, name: conn.name, type: conn.type, success: result.success === true, message: result.message || null, error: result.error || null });
+    if (result.success !== true) connectionFailures += 1;
+  }
+  config = loadConfig();
+  steps.push(acceptanceStep(
+    connectionFailures > 0 ? 'fail' : connectionsToTest.length > 0 ? 'pass' : 'warn',
+    '数据源实测',
+    connectionsToTest.length > 0 ? `${connectionsToTest.length - connectionFailures}/${connectionsToTest.length} 个数据源连接成功` : '没有可测试的数据源',
+    { scope, tested: connectionsToTest.length, failed: connectionFailures },
+  ));
+
+  const tasks = (config.syncTasks || []).filter((task) => !task.deletedAt && (isAdmin(user) || task.userId === user.id));
+  const runnable = [];
+  const blocked = [];
+  for (const task of tasks) {
+    const dto = taskDto(config, user, task);
+    const issues = dto.connectionStatus?.issues || [];
+    const errors = issues.filter((issue) => issue.level === 'error');
+    const item = { id: task.id, name: task.name, status: task.status, enabled: task.enabled === true, errors: errors.map((issue) => issue.message), warnings: issues.filter((issue) => issue.level !== 'error').map((issue) => issue.message) };
+    details.tasks.push(item);
+    if (errors.length > 0) blocked.push(item);
+    else runnable.push(task);
+  }
+  steps.push(acceptanceStep(
+    blocked.length > 0 ? 'warn' : 'pass',
+    '任务可运行性',
+    `${runnable.length} 个任务连接正常，${blocked.length} 个任务需要处理连接或配置`,
+    { runnable: runnable.length, blocked: blocked.length },
+  ));
+
+  const preflightLimit = Math.max(0, Math.min(5, Number(options.preflightLimit ?? 3) || 3));
+  let preflightWarn = 0;
+  let preflightFail = 0;
+  for (const task of runnable.slice(0, preflightLimit)) {
+    try {
+      const srcConn = config.connections.find((c) => c.id === (task.sourceConnectionId || task.sourceId));
+      const tgtConn = config.connections.find((c) => c.id === (task.targetConnectionId || task.targetId));
+      const result = await runTaskPreflightCheck(task, srcConn, tgtConn);
+      details.preflights.push({ taskId: task.id, taskName: task.name, status: result.status, summary: result.summary });
+      if (result.status === 'error') preflightFail += 1;
+      else if (result.status === 'warn') preflightWarn += 1;
+    } catch (err) {
+      preflightFail += 1;
+      details.preflights.push({ taskId: task.id, taskName: task.name, status: 'error', error: err.message });
+    }
+  }
+  steps.push(acceptanceStep(
+    preflightFail > 0 ? 'fail' : preflightWarn > 0 ? 'warn' : 'pass',
+    '同步前预检抽样',
+    preflightLimit > 0 ? `已预检 ${details.preflights.length} 个任务，${preflightWarn} 个警告，${preflightFail} 个失败` : '已跳过预检抽样',
+    { checked: details.preflights.length, warnings: preflightWarn, failures: preflightFail },
+  ));
+
+  const failureCounts = getSyncFailureCounts();
+  const visibleTaskIds = new Set(tasks.map((task) => task.id));
+  const failedRows = Object.entries(failureCounts).reduce((sum, [taskId, count]) => visibleTaskIds.has(taskId) ? sum + count : sum, 0);
+  steps.push(acceptanceStep(
+    failedRows > 0 ? 'warn' : 'pass',
+    '失败批次',
+    failedRows > 0 ? `仍有 ${failedRows} 条失败批次待处理` : '没有待处理失败批次',
+    { failedRows },
+  ));
+
+  const snapshot = buildObservabilityForUser(config, user);
+  const openAlerts = (snapshot.alerts || []).filter((alert) => alert.state !== 'resolved');
+  const blockingAlerts = openAlerts.filter((alert) => alert.severity === 'critical' && !['acknowledged', 'muted'].includes(alert.state));
+  steps.push(acceptanceStep(
+    blockingAlerts.length > 0 ? 'fail' : openAlerts.length > 0 ? 'warn' : 'pass',
+    '观测告警',
+    blockingAlerts.length > 0
+      ? `当前有 ${blockingAlerts.length} 条未处理严重告警`
+      : openAlerts.length > 0
+        ? `当前有 ${openAlerts.length} 条已确认或待关注告警`
+        : '当前没有告警',
+    { alerts: openAlerts.length, blockingAlerts: blockingAlerts.length },
+  ));
+
+  const summary = summarizeAcceptanceSteps(steps);
+  const status = summary.fail > 0 ? 'fail' : summary.warn > 0 ? 'warn' : 'pass';
+  return {
+    status,
+    startedAt: startedAt.toISOString(),
+    finishedAt: new Date().toISOString(),
+    summary,
+    steps,
+    details,
+  };
 }
 
 // --- Auth routes (public) ---
@@ -971,6 +1124,51 @@ app.get('/api/system/doctor', (req, res) => {
 app.get('/api/system/config-backups', (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可查看配置备份' });
   res.json(getConfigBackups(CONFIG_FILE, req.query.limit));
+});
+
+app.get('/api/system/test-environment', (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可查看测试环境' });
+  res.json(buildTestEnvironmentPlan(loadConfig(), { keepRecentLogs: req.query.keepRecentLogs }));
+});
+
+app.post('/api/system/test-environment/cleanup', async (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可整理测试环境' });
+  const config = loadConfig();
+  const result = applyTestEnvironmentCleanup(config, { keepRecentLogs: req.body?.keepRecentLogs });
+  syncScheduler.forEach((info, taskId) => {
+    if (result.removable.tasks.some((task) => task.id === taskId)) {
+      clearInterval(info.intervalId);
+      syncScheduler.delete(taskId);
+    }
+  });
+  for (const task of result.removable.tasks) {
+    const run = syncRuns.get(task.id);
+    if (run?.state?.status === 'queued') removeQueuedInitialization(task.id, '测试环境整理已取消临时初始化任务');
+    else if (run?.controller) run.controller.abort();
+    syncRuns.delete(task.id);
+  }
+  await saveConfig(config, { backup: true, backupReason: 'test-env-cleanup' });
+  appendAuditLog(req.user, 'system.test_environment_cleanup', {
+    resourceType: 'system',
+    message: '整理测试环境',
+    metadata: { removed: result.removed, baselineConnectionNames: result.baselineConnectionNames },
+  });
+  res.json(result);
+});
+
+app.post('/api/system/acceptance', async (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: '仅管理员可执行一键验收' });
+  try {
+    const report = await buildAcceptanceReport(req.user, req.body || {});
+    appendAuditLog(req.user, 'system.acceptance', {
+      resourceType: 'system',
+      message: `执行一键验收：${report.status}`,
+      metadata: { status: report.status, summary: report.summary },
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/system/config-export', (req, res) => {

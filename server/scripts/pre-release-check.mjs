@@ -45,6 +45,7 @@ try {
   runStep('Connection health self-test', 'npm', ['run', 'test:connection-health']);
   runStep('Error guidance self-test', 'npm', ['run', 'test:error-guidance']);
   runStep('Runtime store self-test', 'npm', ['run', 'test:runtime-store']);
+  runStep('Test environment self-test', 'npm', ['run', 'test:environment']);
   runStep('Large initial sync readiness', 'npm', ['run', 'stress:readiness']);
   runStep('Frontend build', 'npm', ['run', 'build']);
 
